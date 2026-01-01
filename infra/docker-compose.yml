@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  scrivener:
+    # TODO: add Dockerfile under services/scrivener
+    build: ../services/scrivener
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - FRED_API_KEY=${FRED_API_KEY}
+      - BLS_API_KEY=${BLS_API_KEY}
+
+  sophia_arithmos:
+    # TODO: add Dockerfile under services/sophia_arithmos
+    build: ../services/sophia_arithmos
+    ports:
+      - "8001:8001"
+
+  sophia_kampe:
+    # TODO: add Dockerfile under services/sophia_kampe
+    build: ../services/sophia_kampe
+    ports:
+      - "8002:8002"
+    environment:
+      - KAMPE_ARITHMOS__URL=http://sophia_arithmos:8001
+
+  # sophia_pylon is a library used by sophia_prima, no server process.
