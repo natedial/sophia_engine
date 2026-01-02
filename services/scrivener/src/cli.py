@@ -417,46 +417,45 @@ def upcoming_releases(
 @app.command()
 def upcoming(
     days: int = typer.Option(1, "--days", "-d", help="Number of days to look ahead"),
-    country: str = typer.Option("US", "--country", "-c", help="Country filter"),
 ):
-    """Show upcoming economic events from the calendar."""
+    """Show upcoming economic releases from the calendar."""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
-    from src.scheduler.calendar import EconomicEventsCalendar
+    from src.scheduler.calendar import ReleaseCalendar
 
     tz = ZoneInfo("America/New_York")
     now = datetime.now(tz)
     end = now + timedelta(days=days)
 
-    calendar = EconomicEventsCalendar()
-    events = calendar.get_upcoming_events(start=now, end=end, country=country)
+    calendar = ReleaseCalendar()
+    releases = calendar.get_upcoming_releases(start=now, end=end)
 
-    if not events:
-        console.print(f"No mapped events found in the next {days} day(s)", style="yellow")
+    if not releases:
+        console.print(f"No mapped releases found in the next {days} day(s)", style="yellow")
         return
 
-    table = Table(title=f"Upcoming Events ({country}, next {days} day(s))")
+    table = Table(title=f"Upcoming Releases (next {days} day(s))")
     table.add_column("Time (ET)", style="cyan")
-    table.add_column("Event", style="white")
+    table.add_column("Release", style="white")
     table.add_column("Type", style="yellow")
     table.add_column("FRED Series", style="dim")
     table.add_column("BLS Series", style="dim")
 
-    for event in events:
-        time_str = event["scheduled_time"].strftime("%m/%d %H:%M")
-        fred = ", ".join(event["fred_series"][:2]) + ("..." if len(event["fred_series"]) > 2 else "")
-        bls = ", ".join(event["bls_series"][:2]) + ("..." if len(event["bls_series"]) > 2 else "")
+    for release in releases:
+        time_str = release["scheduled_time"].strftime("%m/%d %H:%M")
+        fred = ", ".join(release["fred_series"][:2]) + ("..." if len(release["fred_series"]) > 2 else "")
+        bls = ", ".join(release["bls_series"][:2]) + ("..." if len(release["bls_series"]) > 2 else "")
 
         table.add_row(
             time_str,
-            event["event_name"][:40],
-            event["release_type"],
+            release["release_name"][:40],
+            release["release_type"],
             fred or "-",
             bls or "-",
         )
 
     console.print(table)
-    console.print(f"\nTotal: {len(events)} mapped events", style="dim")
+    console.print(f"\nTotal: {len(releases)} mapped releases", style="dim")
 
 
 @app.command()

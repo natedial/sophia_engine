@@ -10,7 +10,7 @@ from apscheduler.triggers.date import DateTrigger
 from src.config import get_settings
 from src.scheduler.scheduler import create_scheduler, get_timezone
 from src.scheduler.jobs import daily_sweep_all, fetch_series_on_release
-from src.scheduler.calendar import EconomicEventsCalendar
+from src.scheduler.calendar import ReleaseCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class SchedulerRunner:
     def __init__(self, blocking: bool = True):
         self.settings = get_settings()
         self.scheduler = create_scheduler(blocking=blocking)
-        self.events_calendar = EconomicEventsCalendar()
+        self.release_calendar = ReleaseCalendar()
         self.tz = get_timezone()
         self._scheduled_event_ids: set[str] = set()
 
@@ -40,7 +40,7 @@ class SchedulerRunner:
         logger.info(f"Scheduled daily sweep at {hour:02d}:{minute:02d} {self.settings.timezone}")
 
     def setup_calendar_checker(self) -> None:
-        """Set up a job to check the economic_events table every 12 hours."""
+        """Set up a job to check release_dates every 12 hours."""
         # Check at 6am and 6pm ET to pick up the day's events
         self.scheduler.add_job(
             self._check_and_schedule_events,
@@ -49,32 +49,30 @@ class SchedulerRunner:
             name="Economic events checker",
             replace_existing=True,
         )
-        logger.info("Scheduled economic events checker (6am & 6pm ET)")
+        logger.info("Scheduled release calendar checker (6am & 6pm ET)")
 
     def _check_and_schedule_events(self) -> None:
-        """Check economic_events table for upcoming releases and schedule fetch jobs."""
+        """Check release_dates for upcoming releases and schedule fetch jobs."""
         now = datetime.now(self.tz)
         # Look ahead 14 hours to catch all events until next check
         window_end = now + timedelta(hours=14)
 
         try:
-            upcoming = self.events_calendar.get_upcoming_events(start=now, end=window_end)
+            upcoming = self.release_calendar.get_upcoming_releases(start=now, end=window_end)
         except Exception as e:
-            logger.error(f"Failed to fetch upcoming events: {e}")
+            logger.error(f"Failed to fetch upcoming releases: {e}")
             return
 
-        for event in upcoming:
-            event_id = event["id"]
-            event_name = event["event_name"]
-            release_type = event["release_type"]
-            scheduled_time = event["scheduled_time"]
-            bls_series = event["bls_series"]
-            fred_series = event["fred_series"]
+        for release in upcoming:
+            release_event_id = release["id"]
+            release_name = release["release_name"]
+            release_type = release["release_type"]
+            scheduled_time = release["scheduled_time"]
+            bls_series = release["bls_series"]
+            fred_series = release["fred_series"]
 
             # Skip if already scheduled or already has results
-            if event_id in self._scheduled_event_ids:
-                continue
-            if event.get("has_result"):
+            if release_event_id in self._scheduled_event_ids:
                 continue
 
             # Schedule fetch 1 minute after release time
@@ -84,31 +82,31 @@ class SchedulerRunner:
             if fetch_time <= now:
                 continue
 
-            job_id_base = f"event_{event_id}"
+            job_id_base = f"release_{release_event_id}"
 
             # Schedule FRED series fetch
             if fred_series:
                 self.scheduler.add_job(
                     fetch_series_on_release,
                     trigger=DateTrigger(run_date=fetch_time, timezone=self.tz),
-                    args=["FRED", fred_series, f"{release_type} ({event_name})"],
+                    args=["FRED", fred_series, f"{release_type} ({release_name})"],
                     id=f"{job_id_base}_fred",
-                    name=f"Event fetch: {event_name} (FRED)",
+                    name=f"Release fetch: {release_name} (FRED)",
                 )
-                logger.info(f"Scheduled FRED fetch for '{event_name}' at {fetch_time}")
+                logger.info(f"Scheduled FRED fetch for '{release_name}' at {fetch_time}")
 
             # Schedule BLS series fetch
             if bls_series:
                 self.scheduler.add_job(
                     fetch_series_on_release,
                     trigger=DateTrigger(run_date=fetch_time, timezone=self.tz),
-                    args=["BLS", bls_series, f"{release_type} ({event_name})"],
+                    args=["BLS", bls_series, f"{release_type} ({release_name})"],
                     id=f"{job_id_base}_bls",
-                    name=f"Event fetch: {event_name} (BLS)",
+                    name=f"Release fetch: {release_name} (BLS)",
                 )
-                logger.info(f"Scheduled BLS fetch for '{event_name}' at {fetch_time}")
+                logger.info(f"Scheduled BLS fetch for '{release_name}' at {fetch_time}")
 
-            self._scheduled_event_ids.add(event_id)
+            self._scheduled_event_ids.add(release_event_id)
 
     def list_jobs(self) -> list[dict]:
         """List all scheduled jobs."""

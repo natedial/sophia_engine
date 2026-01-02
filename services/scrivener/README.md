@@ -87,6 +87,10 @@ scrivener scheduler
 scrivener serve --port 8000
 ```
 
+Deployment notes:
+- Run two long-lived processes: the scheduler (`scrivener scheduler`) and the API server (`scrivener serve`).
+- Order does not matter, but the scheduler only schedules release-based fetches once `release_dates` are populated (run `scrivener sync-releases` at least once, and periodically thereafter).
+
 ## CLI Commands
 
 | Command | Description |
@@ -189,7 +193,7 @@ API documentation available at `/docs` when the server is running.
 The scheduler runs two types of jobs:
 
 1. **Daily Sweep** (5pm ET): Fetches all core series from all sources
-2. **Calendar Check** (6am & 6pm ET): Checks `economic_events` table and schedules fetches for upcoming releases
+2. **Calendar Check** (6am & 6pm ET): Checks `release_dates` and schedules fetches for upcoming releases
 
 Event-triggered fetches run 1 minute after the scheduled release time.
 
