@@ -222,7 +222,7 @@ Both proposals converge on a hybrid approach. This merged architecture combines 
 ┌───────────────────────▼─────────────────────────────────────────┐
 │                      Query Router                                │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Parse query for known entities (tickers, themes, sources)   │
+│  1. Parse query for known entities (themes, sources, jargon)    │
 │  2. Route: lexical-only | vector-only | hybrid                  │
 │  3. Apply metadata filters using EXISTING fields in JSON        │
 │     (date, theme, source, asset class, trade_idea_flags)        │
@@ -276,7 +276,7 @@ Your JSON already has themes, trade ideas, and metadata extracted. The pipeline 
 | `trade_ideas` (existing) | GIN on array/JSONB | Fast filter by trade type |
 | `source`, `date`, `asset_class` | B-tree / GIN | Metadata filtering |
 | `summary`, `full_text` | pgvector embedding | Semantic similarity search |
-| `summary`, `full_text` | tsvector | Keyword/lexical search |
+| `summary`, `full_text` | tsvector + jargon lexicon | Keyword/lexical + domain jargon matching |
 
 ### Chunking for Embedding Only
 
@@ -307,7 +307,7 @@ Store: paper_id, section_type, text, embedding, pointer to source JSON
 
 | Query Pattern | Detection | Route |
 |---------------|-----------|-------|
-| Contains ticker/entity | Regex or lookup | Lexical first |
+| Contains domain jargon | Jargon lexicon match | Lexical + vector |
 | Contains known theme | Match against theme list | Metadata filter + vector |
 | "Similar to X" | Pattern match | Vector only |
 | Date-bounded | Date parsing | Metadata filter + hybrid |
@@ -331,7 +331,7 @@ Store: paper_id, section_type, text, embedding, pointer to source JSON
    c. Batch generate embeddings (text-embedding-3-small or local)
    d. Store chunks with embeddings + pointer to source record
 3. Rebuild any aggregate summaries (weekly)
-4. Invalidate affected query cache entries
+4. Invalidate affected query cache entries (append-only simplifies invalidation)
 5. Monthly: drift check - re-embed oldest chunks if embedding model changed
 6. Log stats, alert on failures
 ```
@@ -359,14 +359,14 @@ Store: paper_id, section_type, text, embedding, pointer to source JSON
 - Basic vector search
 
 **Phase 3: Hybrid + Routing**
-- Add tsvector full-text search
-- Implement query router with heuristics
-- Combine vector + lexical scoring
+- Add tsvector full-text search + jargon lexicon boosting
+- Implement query router with heuristics (themes, sources, jargon)
+- Combine vector + lexical scoring with metadata filters
 
 **Phase 4: Optimization**
-- Add query-level caching
-- Add context assembler with token cap + citations
-- Optional: reranker for precision
+-- Add query-level caching
+-- Add context assembler with token cap + lightweight citations for debugging
+-- Optional: reranker for precision
 
 ### Trade-offs Acknowledged
 
@@ -378,33 +378,33 @@ Store: paper_id, section_type, text, embedding, pointer to source JSON
 
 ## Best-of-Both Merged Proposal
 
-Goal: fast, low-token querying over rich research JSON with hybrid search, metadata filters, and minimal ops.
+Goal: fast, low-token querying over rich research JSON with hybrid search, metadata filters, and minimal ops, tuned for thematic/jargon-heavy queries.
 
 Core architecture:
 - Source of truth: existing JSON (themes, trade ideas, metadata, summaries, full text).
 - Storage: PostgreSQL + pgvector (single system).
 - Indexes:
   - GIN on themes/trade_ideas/metadata JSONB for filtering.
-  - tsvector for lexical search.
+  - tsvector for lexical search + jargon lexicon boosting.
   - pgvector embeddings on text chunks for semantic search.
 - Optional "summary index" for discovery:
   - One-row-per-paper: title + 1-line summary + themes + key trade idea.
   - Used only for browsing; fetch full chunks on demand.
 
 Query flow (token-minimizing):
-1) Parse intent + filters (tickers, dates, themes, sources).
-2) Route to lexical, vector, or hybrid (heuristics).
-3) Apply metadata filters first to shrink candidate set.
+1) Parse intent + filters (dates, themes, sources, asset class, jargon).
+2) Route to lexical, vector, or hybrid (heuristics with jargon boost).
+3) Apply metadata filters first to shrink candidate set (date, source, asset class).
 4) Retrieve top-N chunks; optionally rerank top-K.
-5) Assemble context with strict token cap; include citations.
+5) Assemble context with strict token cap; include lightweight citations for debugging.
 
 Embedding & chunking:
-- Embed summaries + trade ideas + full text chunks (500-800 tokens).
+- Embed summaries + full text chunks (500-800 tokens); embed trade ideas only if needed.
 - Skip embedding fields already captured by metadata filters when not needed.
 
 Caching:
 - Paper/theme/trade-idea summary cache (precompute).
-- Query-level cache with TTL; invalidate on new rows.
+- Query-level cache with TTL; invalidate on new rows (append-only).
 
 Ingestion pipeline (daily):
 1) Find new/updated rows.
@@ -416,8 +416,8 @@ Ingestion pipeline (daily):
 Implementation phases:
 1) Postgres schema + GIN/tsvector; basic metadata filtering.
 2) Embedding pipeline + pgvector; vector search.
-3) Hybrid retrieval + routing heuristics.
-4) Cache + context assembly + optional reranker.
+3) Hybrid retrieval + routing heuristics (jargon-aware).
+4) Cache + context assembly + optional reranker; optimize for 2-5s latency.
 
 Trade-offs:
 - Postgres-only keeps ops simple but may need Elastic later for complex lexical needs.
@@ -427,12 +427,55 @@ Trade-offs:
 ## Use Case Questions
 
 1) Which query types matter most: exact ticker lookups, thematic exploration, or "similar papers" discovery?
+Thematic referencing: "Where do most sources think the anticipated Fed QT program concentrates its purchases?"  | "What are the expected sources of upward pressure on services inflation in Q4?" | "Where are steepening pressures likely to come from in the EUR curve in 2026?"
+Specified referencing: "What was Barclays saying about November's inflation print?"
+Generalized queries: "Is anyone calling for a hike in 2026?"
+
 2) How often do users need strict date ranges (e.g., "Q4 2023 only")?
+Fairly often
+
 3) Do you expect users to filter by source, author, or asset class regularly?
+Yes to source and asset class. No to author.
+
 4) Is "trade idea" retrieval more important than full-text research context?
+No
+
 5) How tolerant are you of missing niche domain terms in semantic search (e.g., rare tickers)?
+Tickers are not relevant here. Jargon ("steepeners", "dovish hike") are very important though.
+
 6) Should the system support multi-hop synthesis across multiple papers in one response?
+Yes
+
 7) What is the acceptable latency target for a typical query?
+End state 2-5 seconds, though I'm sure we'll need significant investment to get there.
+
 8) Do you want the agent to expose browseable theme/ticker catalogs (list_themes, list_tickers)?
+No
+
 9) How frequently does the underlying research get revised vs appended?
+Never. Only new papers are added.
+
 10) Do you need auditability/citations for compliance, or is best-effort traceability enough?
+No, only for debugging
+
+## Use Case Answers (Captured)
+
+1) Query types: Thematic referencing, specified referencing, and generalized queries (examples include QT program concentration, services inflation pressure, EUR curve steepening, Barclays on a specific print, and calls for a 2026 hike).
+2) Date ranges: Used fairly often.
+3) Filters: Source and asset class yes; author no.
+4) Trade ideas vs full text: Full-text context is more important.
+5) Jargon: Domain jargon is critical; tickers not relevant.
+6) Multi-hop synthesis: Required across multiple papers.
+7) Latency: Target 2-5 seconds end state.
+8) Browsable catalogs: Not needed.
+9) Data changes: Append-only (no revisions).
+10) Citations: Best-effort traceability for debugging only.
+
+## Implications for the Merged Proposal
+
+- Prioritize theme/jargon sensitivity: add a domain-specific jargon lexicon and boost lexical matches for jargon terms; avoid ticker-specific logic.
+- Emphasize metadata filters for source/asset class and frequent date bounds; optimize those indexes early.
+- Focus retrieval on summaries and full-text chunks rather than trade-idea fields.
+- Enable multi-hop synthesis: allow top-K across multiple papers and enforce per-paper caps to avoid dominance.
+- Leverage append-only data: simplify cache invalidation (invalidate only when new rows arrive).
+- Keep citations lightweight (paper_id + section) for debugging, no compliance-grade audit trail.
