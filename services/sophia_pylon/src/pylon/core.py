@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pylon.clients.arithmos import ArithmosClient
+from pylon.clients.canvas import CanvasClient
 from pylon.clients.scrivener import ScrivenerClient
 from pylon.tools.arithmos import ArithmosToolExecutor
 from pylon.tools.base import ErrorType, ToolDefinition, ToolResult
+from pylon.tools.canvas import CanvasToolExecutor
 from pylon.tools.scrivener import ScrivenerToolExecutor
 
 
@@ -17,6 +19,7 @@ class PylonConfig:
 
     scrivener_url: str = "http://localhost:8000"
     arithmos_url: str = "http://localhost:8001"
+    canvas_url: str = "http://localhost:8003"
     # Future services:
     # kampe_url: str = "http://localhost:8002"
 
@@ -101,10 +104,12 @@ class Pylon:
         # Initialize clients
         self._scrivener_client = ScrivenerClient(base_url=self.config.scrivener_url)
         self._arithmos_client = ArithmosClient(base_url=self.config.arithmos_url)
+        self._canvas_client = CanvasClient(base_url=self.config.canvas_url)
 
         # Initialize tool executors
         self._scrivener_executor = ScrivenerToolExecutor(self._scrivener_client)
         self._arithmos_executor = ArithmosToolExecutor(self._arithmos_client)
+        self._canvas_executor = CanvasToolExecutor(self._canvas_client, self._scrivener_client)
 
         # Build tool routing table: tool_name -> (executor, service_name)
         self._tool_executors: dict[str, tuple[Any, str]] = {}
@@ -130,10 +135,18 @@ class Pylon:
             arithmos_tools.append(tool.name)
         self._service_tools["arithmos"] = arithmos_tools
 
+        # Register Canvas tools
+        canvas_tools = []
+        for tool in self._canvas_executor.get_tools():
+            self._tool_executors[tool.name] = (self._canvas_executor, "canvas")
+            canvas_tools.append(tool.name)
+        self._service_tools["canvas"] = canvas_tools
+
     async def close(self) -> None:
         """Close all client connections."""
         await self._scrivener_client.close()
         await self._arithmos_client.close()
+        await self._canvas_client.close()
 
     # -------------------------------------------------------------------------
     # Health Checks & Pre-flight
@@ -152,6 +165,8 @@ class Pylon:
                 healthy = await self._scrivener_client.health_check()
             elif name == "arithmos":
                 healthy = await self._arithmos_client.health_check()
+            elif name == "canvas":
+                healthy = await self._canvas_client.health_check()
             else:
                 healthy = False
 
@@ -244,6 +259,14 @@ class Pylon:
                     continue
             tools.append(tool)
 
+        # Canvas tools
+        for tool in self._canvas_executor.get_tools():
+            if only_healthy:
+                status = self._service_status.get("canvas")
+                if status and not status.healthy:
+                    continue
+            tools.append(tool)
+
         return tools
 
     def get_tools_as_anthropic_schema(self, only_healthy: bool = False) -> list[dict[str, Any]]:
@@ -254,7 +277,12 @@ class Pylon:
         """
         return [tool.to_anthropic_schema() for tool in self.get_tools(only_healthy=only_healthy)]
 
-    async def execute_tool(self, tool_name: str, parameters: dict[str, Any]) -> ToolResult:
+    async def execute_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        on_update: Any | None = None,
+    ) -> ToolResult:
         """
         Execute a tool by name.
 
@@ -264,6 +292,7 @@ class Pylon:
         Args:
             tool_name: Name of the tool to execute
             parameters: Tool parameters
+            on_update: Optional callback for progress updates (extension point)
 
         Returns:
             Result of the tool execution
@@ -297,3 +326,8 @@ class Pylon:
     def arithmos(self) -> ArithmosClient:
         """Direct access to Arithmos client for non-LLM use cases."""
         return self._arithmos_client
+
+    @property
+    def canvas(self) -> CanvasClient:
+        """Direct access to Canvas client for non-LLM use cases."""
+        return self._canvas_client

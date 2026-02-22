@@ -1,98 +1,154 @@
-"""Core Sophia agent - orchestrates conversations with personality and tool use."""
+"""Core Sophia agent - dual-loop architecture with event streaming."""
 
-from dataclasses import dataclass, field
-from typing import Any
+from __future__ import annotations
 
-import anthropic
+from typing import AsyncGenerator, Callable
+
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 
 from sophia.config import Settings, get_settings
+from sophia.context import ConversationContext, apply_transforms, summarize_long_tool_results
+from sophia.events import (
+    AgentEvent,
+    agent_end,
+    agent_start,
+    message_delta,
+    message_end,
+    message_start,
+    tool_execution_end,
+    tool_execution_start,
+    turn_end,
+    turn_start,
+)
+from sophia.llm.base import ContentDelta, ModelProvider, StreamComplete
+from sophia.llm.types import (
+    CompletionResponse,
+    Message,
+    Role,
+    ToolCall,
+    ToolResultMessage,
+    ToolSchema,
+)
+from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_store
 from sophia.personality.loader import Personality, load_personality
 
-
-@dataclass
-class ConversationContext:
-    """Context for an ongoing conversation."""
-
-    session_id: str
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def add_user_message(self, content: str) -> None:
-        """Add a user message to the conversation history."""
-        self.messages.append({"role": "user", "content": content})
-
-    def add_assistant_message(self, content: str | list[dict[str, Any]]) -> None:
-        """Add an assistant message (can be string or structured content)."""
-        self.messages.append({"role": "assistant", "content": content})
-
-    def add_tool_result(self, tool_use_id: str, content: str) -> None:
-        """Add a tool result message."""
-        self.messages.append({
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content}],
-        })
-
-    def add_tool_results(self, results: list[tuple[str, str]]) -> None:
-        """Add multiple tool results as a single message."""
-        self.messages.append({
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": tool_id, "content": content}
-                for tool_id, content in results
-            ],
-        })
-
-    def to_anthropic_messages(self) -> list[dict[str, Any]]:
-        """Convert to Anthropic API message format."""
-        return self.messages.copy()
+# Type aliases for steering / follow-up callbacks
+SteeringCallback = Callable[[], list[Message] | None]
+FollowUpCallback = Callable[[], str | None]
 
 
-@dataclass
-class Response:
-    """Agent response to a user message."""
+class AgentConfig:
+    """Tunables for the agent loop."""
 
-    content: str
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    tool_results: list[ToolResult] = field(default_factory=list)
+    def __init__(
+        self,
+        *,
+        max_tool_iterations: int = 10,
+        stream: bool = True,
+        context_transformers: list | None = None,
+    ) -> None:
+        self.max_tool_iterations = max_tool_iterations
+        self.stream = stream
+        self.context_transformers = context_transformers or [
+            summarize_long_tool_results(),
+        ]
 
 
 class SophiaAgent:
     """
-    Core Sophia agent that orchestrates conversations.
+    Core Sophia agent with a dual-loop, event-streaming architecture.
 
-    Handles:
-    - Personality-driven system prompts
-    - Tool discovery and execution via Pylon gateway
-    - Conversation state management
-    - Pre-flight checks and graceful degradation
+    Outer loop: follow-up messages (multi-turn steering).
+    Inner loop: tool calls + LLM round-trips.
+
+    The provider is injected — this class never imports the Anthropic SDK.
     """
 
     def __init__(
         self,
+        provider: ModelProvider,
         settings: Settings | None = None,
         pylon: Pylon | None = None,
         preflight_result: PreflightResult | None = None,
+        agent_config: AgentConfig | None = None,
+        memory_manager: MemoryManager | None = None,
+        get_steering_messages: SteeringCallback | None = None,
+        get_follow_up_messages: FollowUpCallback | None = None,
+        canvas_id: str | None = None,
     ) -> None:
+        self.provider = provider
         self.settings = settings or get_settings()
         self.pylon = pylon or Pylon()
         self.preflight_result = preflight_result
+        self.config = agent_config or AgentConfig()
+        self.canvas_id = canvas_id
+        if memory_manager is not None:
+            self.memory = memory_manager
+        else:
+            memory_store = create_memory_store(
+                backend=self.settings.memory_store_backend,
+                sqlite_path=self.settings.memory_store_path,
+                semantic_search_enabled=self.settings.memory_semantic_search_enabled,
+                lexical_weight=self.settings.memory_lexical_weight,
+                semantic_weight=self.settings.memory_semantic_weight,
+                embedding_provider=self.settings.memory_embedding_provider,
+                embedding_enabled=self.settings.memory_embedding_enabled,
+                embedding_model=self.settings.memory_embedding_model,
+                embed_episodic=self.settings.memory_embed_episodic,
+                embed_semantic=self.settings.memory_embed_semantic,
+                query_use_embedding_index=self.settings.memory_query_use_embedding_index,
+                embedding_openai_api_key=(
+                    self.settings.memory_embedding_openai_api_key
+                    or self.settings.openai_api_key
+                ),
+                embedding_openai_base_url=self.settings.memory_embedding_openai_base_url,
+                embedding_timeout_sec=self.settings.memory_embedding_timeout_sec,
+                embedding_retry_max_attempts=self.settings.memory_embedding_retry_max_attempts,
+                embedding_retry_base_delay_sec=(
+                    self.settings.memory_embedding_retry_base_ms / 1000.0
+                ),
+                embedding_retry_max_delay_sec=(
+                    self.settings.memory_embedding_retry_max_ms / 1000.0
+                ),
+                embedding_retry_jitter=self.settings.memory_embedding_retry_jitter,
+            )
+            self.memory = MemoryManager(
+                store=memory_store,
+                config=MemoryManagerConfig(
+                    enabled=self.settings.memory_enabled,
+                    working_window=self.settings.memory_working_window,
+                    episodic_recall_k=self.settings.memory_episodic_top_k,
+                    semantic_recall_k=self.settings.memory_semantic_top_k,
+                    compaction_enabled=self.settings.memory_compaction_enabled,
+                    compaction_every_n_turns=self.settings.memory_compaction_every_n_turns,
+                    compaction_max_episodic_per_session=(
+                        self.settings.memory_compaction_max_episodic_per_session
+                    ),
+                    compaction_batch_size=self.settings.memory_compaction_batch_size,
+                ),
+            )
+        self.get_steering_messages = get_steering_messages
+        self.get_follow_up_messages = get_follow_up_messages
         self.personality = self._load_personality()
-        self.client = self._create_client()
+
+    # ------------------------------------------------------------------
+    # Personality
+    # ------------------------------------------------------------------
 
     def _load_personality(self) -> Personality:
-        """Load the personality configuration."""
         return load_personality(self.settings.personality_path)
 
-    def _create_client(self) -> anthropic.Anthropic:
-        """Create the Anthropic API client."""
-        return anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
+    # ------------------------------------------------------------------
+    # System prompt
+    # ------------------------------------------------------------------
 
-    def _build_system_prompt(self, context: ConversationContext | None = None) -> str:
-        """Build the system prompt with personality and dynamic context."""
-        dynamic_context = {}
+    def _build_system_prompt(
+        self,
+        context: ConversationContext | None = None,
+        memory_context: str | None = None,
+    ) -> str:
+        dynamic_context: dict[str, str] = {}
 
-        # Add available tools to context (only healthy ones if we have preflight data)
         only_healthy = self.preflight_result is not None
         tools = self.pylon.get_tools(only_healthy=only_healthy)
         if tools:
@@ -104,247 +160,25 @@ class SophiaAgent:
                 "Do not fabricate numbers. If tools are unavailable, explain the limitation."
             )
 
-        # Inject service status if any services are degraded
         if self.preflight_result:
             service_status = self.preflight_result.for_system_prompt()
             if service_status:
                 dynamic_context["Service status"] = service_status
 
+        if self.canvas_id:
+            dynamic_context["Active canvas"] = (
+                f"Canvas ID: {self.canvas_id}\n"
+                "Always use this canvas_id when calling visualization tools. "
+                "Do not ask the user for a canvas ID."
+            )
+
+        if memory_context:
+            dynamic_context["Memory context"] = memory_context
+
         return self.personality.to_system_prompt(dynamic_context)
-
-    async def chat(
-        self,
-        message: str,
-        context: ConversationContext,
-    ) -> Response:
-        """
-        Process a user message and generate a response.
-
-        Args:
-            message: User's input message
-            context: Conversation context with history
-
-        Returns:
-            Agent response
-        """
-        # Add user message to context
-        context.add_user_message(message)
-
-        # Get available tools (only healthy ones if preflight was run)
-        only_healthy = self.preflight_result is not None
-        tools = self.pylon.get_tools_as_anthropic_schema(only_healthy=only_healthy)
-
-        # Build request
-        system_prompt = self._build_system_prompt(context)
-        messages = context.to_anthropic_messages()
-
-        # Call Anthropic API
-        response = await self._call_llm(system_prompt, messages, tools)
-
-        # Process response - handle tool calls if present
-        final_response, raw_content = await self._process_response(
-            response,
-            context,
-            tools,
-            system_prompt,
-            messages,
-            message,
-        )
-
-        # Add assistant response to context (preserve structured content if tool use)
-        context.add_assistant_message(raw_content)
-
-        return final_response
-
-    async def _call_llm(
-        self,
-        system: str,
-        messages: list[dict[str, str]],
-        tools: list[dict[str, Any]],
-    ) -> anthropic.types.Message:
-        """Make an API call to the LLM."""
-        kwargs: dict[str, Any] = {
-            "model": self.settings.llm_model,
-            "max_tokens": 4096,
-            "system": system,
-            "messages": messages,
-        }
-
-        if tools:
-            kwargs["tools"] = tools
-
-        # Use sync client in async context (anthropic SDK handles this)
-        return self.client.messages.create(**kwargs)
-
-    async def _process_response(
-        self,
-        response: anthropic.types.Message,
-        context: ConversationContext,
-        tools: list[dict[str, Any]],
-        system_prompt: str,
-        messages: list[dict[str, Any]],
-        user_message: str,
-    ) -> tuple[Response, str | list[dict[str, Any]]]:
-        """Process LLM response, handling tool calls if present.
-
-        Returns:
-            Tuple of (Response, raw_content_for_context)
-        """
-        tool_calls, text_content = self._extract_response_content(response)
-        tool_results = []
-
-        # Execute tool calls if any
-        if tool_calls:
-            tool_results = await self._execute_tools(tool_calls, tools)
-
-            # Continue conversation with tool results
-            return await self._continue_with_tool_results(
-                context, tools, response, tool_calls, tool_results
-            )
-
-        if self._should_enforce_tools(user_message, tools):
-            enforced_prompt = self._build_enforced_tool_prompt(system_prompt)
-            enforced_response = await self._call_llm(enforced_prompt, messages, tools)
-            enforced_tool_calls, enforced_text = self._extract_response_content(enforced_response)
-
-            if enforced_tool_calls:
-                enforced_results = await self._execute_tools(enforced_tool_calls, tools)
-                return await self._continue_with_tool_results(
-                    context, tools, enforced_response, enforced_tool_calls, enforced_results
-                )
-
-            refusal = (
-                "I need to call the available tools to answer that accurately. "
-                "Please confirm you're okay with tool use or rephrase the request."
-            )
-            return Response(content=refusal), refusal
-
-        return Response(
-            content=text_content,
-            tool_calls=tool_calls,
-            tool_results=tool_results,
-        ), text_content
-
-    async def _execute_tools(
-        self,
-        tool_calls: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-    ) -> list[ToolResult]:
-        """Execute a list of tool calls via Pylon."""
-        allowed_tools = {tool["name"] for tool in tools}
-        results = []
-        for call in tool_calls:
-            if call["name"] not in allowed_tools:
-                results.append(
-                    ToolResult.fail(
-                        f"Unknown tool: {call['name']}",
-                        ErrorType.INVALID_INPUT,
-                    )
-                )
-                continue
-            result = await self.pylon.execute_tool(call["name"], call["input"])
-            results.append(result)
-        return results
-
-    async def _continue_with_tool_results(
-        self,
-        context: ConversationContext,
-        tools: list[dict[str, Any]],
-        original_response: anthropic.types.Message,
-        tool_calls: list[dict[str, Any]],
-        tool_results: list[ToolResult],
-        max_iterations: int = 10,
-    ) -> tuple[Response, str]:
-        """Continue the conversation after tool execution, looping if more tools needed."""
-        all_tool_calls = tool_calls.copy()
-        all_tool_results = tool_results.copy()
-
-        # Add assistant message with tool use to context
-        assistant_content = [block.model_dump() for block in original_response.content]
-        context.add_assistant_message(assistant_content)
-
-        # Add tool results to context
-        context.add_tool_results([
-            (call["id"], result.to_content())
-            for call, result in zip(tool_calls, tool_results)
-        ])
-
-        iteration = 0
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Get next response using updated context
-            system_prompt = self._build_system_prompt(context)
-            messages = context.to_anthropic_messages()
-            response = await self._call_llm(system_prompt, messages, tools)
-
-            # Check if more tool calls needed
-            new_tool_calls = []
-            text_content = ""
-
-            for block in response.content:
-                if block.type == "text":
-                    text_content += block.text
-                elif block.type == "tool_use":
-                    new_tool_calls.append({
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    })
-
-            # If no more tool calls, we're done
-            if not new_tool_calls:
-                return Response(
-                    content=text_content,
-                    tool_calls=all_tool_calls,
-                    tool_results=all_tool_results,
-                ), text_content
-
-            # Execute new tool calls
-            new_results = await self._execute_tools(new_tool_calls, tools)
-            all_tool_calls.extend(new_tool_calls)
-            all_tool_results.extend(new_results)
-
-            # Add to context and loop
-            assistant_content = [block.model_dump() for block in response.content]
-            context.add_assistant_message(assistant_content)
-            context.add_tool_results([
-                (call["id"], result.to_content())
-                for call, result in zip(new_tool_calls, new_results)
-            ])
-
-        # Max iterations reached
-        return Response(
-            content="I'm having trouble completing this request. Please try again.",
-            tool_calls=all_tool_calls,
-            tool_results=all_tool_results,
-        ), "Max tool iterations reached"
-
-    @staticmethod
-    def _extract_response_content(
-        response: anthropic.types.Message,
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Extract tool calls and text content from an LLM response."""
-        tool_calls: list[dict[str, Any]] = []
-        text_content = ""
-
-        for block in response.content:
-            if block.type == "text":
-                text_content += block.text
-            elif block.type == "tool_use":
-                tool_calls.append(
-                    {
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    }
-                )
-
-        return tool_calls, text_content
 
     @staticmethod
     def _build_enforced_tool_prompt(system_prompt: str) -> str:
-        """Append a hard tool-use requirement to the system prompt."""
         enforcement = (
             "\n\n## Tool Use Requirement\n"
             "If tools are available and the user asks for data or computations, "
@@ -353,43 +187,232 @@ class SophiaAgent:
         )
         return f"{system_prompt}{enforcement}"
 
+    # ------------------------------------------------------------------
+    # Tool helpers
+    # ------------------------------------------------------------------
+
+    def _get_tool_schemas(self) -> list[ToolSchema]:
+        """Get provider-agnostic tool schemas from pylon."""
+        only_healthy = self.preflight_result is not None
+        tool_defs = self.pylon.get_tools(only_healthy=only_healthy)
+        return [
+            ToolSchema(
+                name=td.name,
+                description=td.description,
+                input_schema=td.to_generic_schema()["input_schema"],
+            )
+            for td in tool_defs
+        ]
+
     @staticmethod
-    def _should_enforce_tools(user_message: str, tools: list[dict[str, Any]]) -> bool:
-        """Heuristic to decide when tool use must be enforced."""
+    def _should_enforce_tools(user_message: str, tools: list[ToolSchema]) -> bool:
         if not tools:
             return False
 
         message = user_message.lower()
         keywords = (
-            "latest",
-            "current",
-            "value",
-            "series",
-            "observations",
-            "data",
-            "yield",
-            "rate",
-            "cpi",
-            "gdp",
-            "inflation",
-            "unemployment",
-            "treasury",
-            "auction",
-            "fed",
-            "speech",
-            "release",
-            "compute",
-            "regression",
-            "mean",
-            "median",
-            "std",
-            "percent change",
-            "yoy",
-            "mom",
-            "moving average",
-            "normalize",
-            "log",
-            "difference",
+            "latest", "current", "value", "series", "observations", "data",
+            "yield", "rate", "cpi", "gdp", "inflation", "unemployment",
+            "treasury", "auction", "fed", "speech", "release",
+            "compute", "regression", "mean", "median", "std",
+            "percent change", "yoy", "mom", "moving average",
+            "normalize", "log", "difference",
         )
+        return any(kw in message for kw in keywords)
 
-        return any(keyword in message for keyword in keywords)
+    @staticmethod
+    def _latest_user_text(context: ConversationContext) -> str:
+        for msg in reversed(context.messages):
+            if msg.role == Role.USER and msg.content:
+                return msg.content
+        return ""
+
+    async def _execute_tool(self, tool_call: ToolCall, allowed: set[str]) -> ToolResult:
+        if tool_call.name not in allowed:
+            return ToolResult.fail(f"Unknown tool: {tool_call.name}", ErrorType.INVALID_INPUT)
+        return await self.pylon.execute_tool(tool_call.name, tool_call.input)
+
+    # ------------------------------------------------------------------
+    # Primary method — async generator of AgentEvents
+    # ------------------------------------------------------------------
+
+    async def run(
+        self,
+        message: str,
+        context: ConversationContext,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """
+        Process a user message, yielding AgentEvents as the agent works.
+
+        This is the primary interface — callers iterate the generator and
+        handle events (render text, show tool progress, etc.).
+        """
+        yield agent_start(context.session_id)
+
+        context.add_user_message(message)
+        tools = self._get_tool_schemas()
+        allowed_tool_names = {t.name for t in tools}
+
+        turn = 0
+
+        # OUTER LOOP: follow-up messages
+        while True:
+            turn += 1
+            yield turn_start(turn)
+
+            active_user_message = self._latest_user_text(context) or message
+            memory_context = self.memory.recall_for_prompt(
+                session_id=context.session_id,
+                query=active_user_message,
+                messages=context.messages,
+            )
+            system_prompt = self._build_system_prompt(context, memory_context)
+            iterations = 0
+            last_message: Message | None = None
+
+            # INNER LOOP: tool calls
+            while iterations < self.config.max_tool_iterations:
+                iterations += 1
+
+                # Check for steering messages
+                if self.get_steering_messages:
+                    steering = self.get_steering_messages()
+                    if steering:
+                        context.messages.extend(steering)
+
+                # Apply context transforms
+                transformed = apply_transforms(
+                    context.messages, self.config.context_transformers
+                )
+
+                # Call provider
+                yield message_start()
+
+                if self.config.stream:
+                    completion = None
+                    async for event in self._stream_and_yield(
+                        system_prompt, transformed, tools
+                    ):
+                        if isinstance(event, AgentEvent):
+                            yield event
+                        else:
+                            # It's the CompletionResponse
+                            completion = event
+                    assert completion is not None
+                else:
+                    completion = await self.provider.complete(
+                        model=self.settings.llm_model,
+                        system=system_prompt,
+                        messages=transformed,
+                        tools=tools or None,
+                    )
+
+                assistant_msg = completion.message
+                yield message_end(assistant_msg)
+
+                # Add assistant message to context
+                context.add_assistant_message(assistant_msg)
+                last_message = assistant_msg
+
+                # If no tool calls, check enforcement then break
+                if not assistant_msg.tool_calls:
+                    # Tool enforcement check (first iteration only)
+                    if iterations == 1 and self._should_enforce_tools(message, tools):
+                        enforced_prompt = self._build_enforced_tool_prompt(system_prompt)
+                        system_prompt = enforced_prompt
+                        # Remove the assistant message we just added and retry
+                        context.messages.pop()
+                        continue
+
+                    break
+
+                # Execute tool calls
+                tool_results: list[ToolResultMessage] = []
+                for tc in assistant_msg.tool_calls:
+                    yield tool_execution_start(tc)
+
+                    result = await self._execute_tool(tc, allowed_tool_names)
+                    content = result.to_content()
+                    is_error = not result.success
+
+                    yield tool_execution_end(tc, content, is_error)
+
+                    tool_results.append(
+                        ToolResultMessage(
+                            tool_call_id=tc.id,
+                            content=content,
+                            is_error=is_error,
+                        )
+                    )
+
+                    # Check steering between tool calls
+                    if self.get_steering_messages:
+                        steering = self.get_steering_messages()
+                        if steering:
+                            context.messages.extend(steering)
+                            break  # Skip remaining tools, re-enter inner loop
+
+                # Add tool results to context
+                context.add_tool_results(tool_results)
+
+            yield turn_end(turn)
+
+            if last_message is not None:
+                self.memory.ingest_turn(
+                    session_id=context.session_id,
+                    user_message=active_user_message,
+                    assistant_message=last_message.content,
+                )
+
+            # Check follow-up messages → continue outer loop or break
+            if self.get_follow_up_messages:
+                follow_up = self.get_follow_up_messages()
+                if follow_up:
+                    context.add_user_message(follow_up)
+                    continue
+
+            break
+
+        yield agent_end(context.session_id)
+
+    # ------------------------------------------------------------------
+    # Streaming helper
+    # ------------------------------------------------------------------
+
+    async def _stream_and_yield(
+        self,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSchema],
+    ) -> AsyncGenerator[AgentEvent | CompletionResponse, None]:
+        """Stream from provider, yielding AgentEvents for deltas and the
+        CompletionResponse as the final item."""
+        async for event in self.provider.stream(
+            model=self.settings.llm_model,
+            system=system,
+            messages=messages,
+            tools=tools or None,
+        ):
+            if isinstance(event, ContentDelta):
+                yield message_delta(event.text)
+            elif isinstance(event, StreamComplete):
+                yield event.response
+
+    # ------------------------------------------------------------------
+    # Convenience method
+    # ------------------------------------------------------------------
+
+    async def chat(self, message: str, context: ConversationContext) -> Message:
+        """Consume run() and return the final assistant message.
+
+        This is a simpler interface for callers that don't need event streaming.
+        """
+        last_message: Message | None = None
+        async for event in self.run(message, context):
+            if event.type.value == "message_end":
+                last_message = event.data["message"]
+
+        if last_message is None:
+            return Message(role=Role.ASSISTANT, content="No response generated.")
+
+        return last_message

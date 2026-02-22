@@ -93,6 +93,15 @@ class ToolDefinition:
             },
         }
 
+    def to_generic_schema(self) -> dict[str, Any]:
+        """Provider-agnostic schema with name, description, input_schema."""
+        schema = self.to_anthropic_schema()
+        return {
+            "name": schema["name"],
+            "description": schema["description"],
+            "input_schema": schema["input_schema"],
+        }
+
 
 @dataclass
 class ToolResult:

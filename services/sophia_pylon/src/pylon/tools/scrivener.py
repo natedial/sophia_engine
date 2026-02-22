@@ -238,7 +238,7 @@ class ScrivenerToolExecutor:
         """Get all tool definitions for Scrivener."""
         return SCRIVENER_TOOLS
 
-    async def execute(self, tool_name: str, parameters: dict[str, Any]) -> ToolResult:
+    async def execute(self, tool_name: str, parameters: dict[str, Any], on_update=None) -> ToolResult:
         """Execute a Scrivener tool."""
         try:
             match tool_name:

@@ -41,6 +41,7 @@ dev = [
 
 [project.scripts]
 sophia = "sophia.cli:main"
+sophia-memory-index = "sophia.memory_index_worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
