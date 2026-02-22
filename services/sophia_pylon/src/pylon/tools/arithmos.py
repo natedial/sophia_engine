@@ -109,7 +109,7 @@ class ArithmosToolExecutor:
         """Get all tool definitions for Arithmos."""
         return ARITHMOS_TOOLS
 
-    async def execute(self, tool_name: str, parameters: dict[str, Any]) -> ToolResult:
+    async def execute(self, tool_name: str, parameters: dict[str, Any], on_update=None) -> ToolResult:
         """Execute an Arithmos tool."""
         try:
             match tool_name:

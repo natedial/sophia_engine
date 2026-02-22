@@ -25,4 +25,19 @@ services:
     environment:
       - KAMPE_ARITHMOS__URL=http://sophia_arithmos:8001
 
+  sophia_canvas:
+    build: ../services/sophia_canvas
+    ports:
+      - "8003:8003"
+    environment:
+      - CANVAS_DATABASE_URL=${DATABASE_URL}
+      - CANVAS_AUTH_ENABLED=false
+
+  sophia_dashboard:
+    build: ../frontend/sophia-dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      - sophia_canvas
+
   # sophia_pylon is a library used by sophia_prima, no server process.
