@@ -89,7 +89,7 @@ def truncate_to_token_budget(budget: int) -> ContextTransformer:
     return _transform
 
 
-def summarize_long_tool_results(max_chars: int = 8000) -> ContextTransformer:
+def summarize_long_tool_results(max_chars: int = 50000) -> ContextTransformer:
     """Truncate tool result content that exceeds max_chars."""
 
     def _transform(messages: list[Message]) -> list[Message]:

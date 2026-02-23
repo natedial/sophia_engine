@@ -55,6 +55,7 @@ class ToolParameter:
     required: bool = True
     enum: list[str] | None = None
     default: Any = None
+    items: dict[str, Any] | None = None
 
 
 @dataclass
@@ -77,6 +78,9 @@ class ToolDefinition:
             }
             if param.enum:
                 prop["enum"] = param.enum
+            if param.type == ToolParameterType.ARRAY:
+                # OpenAI-compatible function schemas require `items` for arrays.
+                prop["items"] = param.items or {"type": "object"}
 
             properties[param.name] = prop
 

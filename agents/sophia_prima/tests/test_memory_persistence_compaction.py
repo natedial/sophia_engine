@@ -60,3 +60,33 @@ def test_compaction_prunes_old_episodic_records() -> None:
 
     assert len(episodic) <= 3
     assert any("compaction" in rec.tags for rec in semantic)
+
+
+def test_lessons_persist_between_instances(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    writer = MemoryManager(
+        store=SQLiteMemoryStore(db_path),
+        config=MemoryManagerConfig(
+            compaction_enabled=False,
+            lesson_promotion_min_repeats=1,
+            lessons_recall_k=4,
+        ),
+    )
+    writer.ingest_turn(
+        session_id="session-a",
+        user_message="From now on, always include data notes in outputs.",
+        assistant_message="Noted.",
+    )
+
+    reader = MemoryManager(
+        store=SQLiteMemoryStore(db_path),
+        config=MemoryManagerConfig(compaction_enabled=False, lessons_recall_k=4),
+    )
+    snapshot = reader.recall(
+        session_id="session-a",
+        query="format outputs",
+        messages=[],
+    )
+
+    assert any("include data notes in outputs" in rec.content for rec in snapshot.lessons)

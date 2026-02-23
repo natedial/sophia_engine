@@ -19,6 +19,7 @@ class EventType(str, Enum):
     MESSAGE_START = "message_start"
     MESSAGE_DELTA = "message_delta"
     MESSAGE_END = "message_end"
+    SKILL_ACTIVATED = "skill_activated"
     TOOL_EXECUTION_START = "tool_execution_start"
     TOOL_EXECUTION_UPDATE = "tool_execution_update"
     TOOL_EXECUTION_END = "tool_execution_end"
@@ -63,6 +64,18 @@ def message_delta(text: str) -> AgentEvent:
 
 def message_end(message: Message) -> AgentEvent:
     return AgentEvent(type=EventType.MESSAGE_END, data={"message": message})
+
+
+def skill_activated(name: str, reason: str, score: float, path: str) -> AgentEvent:
+    return AgentEvent(
+        type=EventType.SKILL_ACTIVATED,
+        data={
+            "name": name,
+            "reason": reason,
+            "score": score,
+            "path": path,
+        },
+    )
 
 
 def tool_execution_start(tool_call: ToolCall) -> AgentEvent:

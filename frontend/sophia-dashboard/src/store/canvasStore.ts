@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Canvas, Chart, LayoutItem } from '../types/canvas'
+import type { Chart, LayoutItem } from '../types/canvas'
 import * as api from '../services/api'
 
 interface CanvasState {

@@ -272,33 +272,60 @@ def auctions(
 
 
 @app.command()
-def upcoming_auctions():
-    """Show upcoming Treasury auctions."""
+def upcoming_auctions(
+    store: bool = typer.Option(False, "--store", "-s", help="Store announced auctions to database"),
+):
+    """Fetch and display upcoming Treasury auctions from TreasuryDirect."""
     from src.fetchers.treasury import TreasuryFetcher
 
     fetcher = TreasuryFetcher()
-    auctions = fetcher.fetch_upcoming_auctions()
+
+    if store:
+        console.print("Fetching announced auctions from TreasuryDirect...", style="yellow")
+        result = fetcher.fetch_and_store_announced()
+
+        if result["status"] == "success":
+            console.print(
+                f"Success! Fetched {result['records_fetched']} announced auctions, "
+                f"stored {result['records_stored']}",
+                style="green",
+            )
+        else:
+            console.print(f"Error: {result.get('error')}", style="red")
+            return
+
+    auctions = fetcher.fetch_announced_auctions()
 
     if not auctions:
         console.print("No upcoming auctions found", style="yellow")
         return
 
-    table = Table(title="Upcoming Treasury Auctions")
+    table = Table(title="Upcoming Treasury Auctions (TreasuryDirect)")
     table.add_column("Auction Date", style="cyan")
     table.add_column("Type", style="white")
     table.add_column("Term", style="white")
     table.add_column("CUSIP", style="dim")
+    table.add_column("Offering ($B)", justify="right", style="green")
 
-    for auction in auctions[:20]:  # Show first 20
+    for auction in auctions[:30]:
+        offering = auction.get("offeringAmount", "")
+        offering_str = ""
+        if offering:
+            try:
+                offering_str = f"{int(offering) / 1_000_000_000:.1f}"
+            except (ValueError, TypeError):
+                offering_str = ""
+
         table.add_row(
-            auction.get("auction_date", ""),
-            auction.get("security_type", ""),
-            auction.get("security_term", ""),
+            auction.get("auctionDate", "")[:10],
+            auction.get("securityType", ""),
+            auction.get("securityTerm", ""),
             auction.get("cusip", ""),
+            offering_str,
         )
 
     console.print(table)
-    console.print(f"\nTotal: {len(auctions)} upcoming auctions", style="dim")
+    console.print(f"\nTotal: {len(auctions)} announced auctions", style="dim")
 
 
 @app.command()

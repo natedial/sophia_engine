@@ -17,8 +17,10 @@ class MemoryManagerConfig:
 
     enabled: bool = True
     working_window: int = 8
+    lessons_recall_k: int = 4
     episodic_recall_k: int = 3
     semantic_recall_k: int = 3
+    lesson_promotion_min_repeats: int = 2
     max_item_chars: int = 240
     compaction_enabled: bool = True
     compaction_every_n_turns: int = 10
@@ -33,10 +35,19 @@ class MemoryManager:
         self,
         store: MemoryStore | None = None,
         config: MemoryManagerConfig | None = None,
+        seed_lessons: list[str] | None = None,
     ) -> None:
         self.store = store or InMemoryMemoryStore()
         self.config = config or MemoryManagerConfig()
         self._turns_since_compaction: dict[str, int] = {}
+        self._lesson_candidate_counts: dict[tuple[str, str], int] = {}
+        self._known_lessons: dict[str, set[str]] = {}
+        self._seed_lesson_records: list[MemoryRecord] = []
+        self._set_seed_lessons(seed_lessons or [])
+
+    def set_seed_lessons(self, lessons: list[str]) -> None:
+        """Replace seed lessons (typically loaded from LESSONS.md)."""
+        self._set_seed_lessons(lessons)
 
     def recall(
         self,
@@ -47,9 +58,10 @@ class MemoryManager:
     ) -> MemorySnapshot:
         """Build a layered memory snapshot for the current query."""
         if not self.config.enabled:
-            return MemorySnapshot(working_lines=[], episodic=[], semantic=[])
+            return MemorySnapshot(lessons=[], working_lines=[], episodic=[], semantic=[])
 
         working_lines = self._build_working_memory(messages)
+        lessons = self._build_lessons_memory(session_id=session_id, query=query)
         episodic = [
             m.record
             for m in self.store.query(
@@ -69,6 +81,7 @@ class MemoryManager:
             )
         ]
         return MemorySnapshot(
+            lessons=lessons,
             working_lines=working_lines,
             episodic=episodic,
             semantic=semantic,
@@ -117,6 +130,12 @@ class MemoryManager:
             )
         )
 
+        self._promote_lesson_candidates(
+            session_id=session_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
+
         for content, tags, salience in self._extract_semantic_facts(user_text):
             self.store.add(
                 MemoryRecord(
@@ -135,6 +154,41 @@ class MemoryManager:
             if turns >= cadence:
                 self.compact_session(session_id=session_id)
                 self._turns_since_compaction[session_id] = 0
+
+    def _build_lessons_memory(self, *, session_id: str, query: str) -> list[MemoryRecord]:
+        limit = max(0, self.config.lessons_recall_k)
+        if limit == 0:
+            return []
+
+        persisted_lessons = [
+            m.record
+            for m in self.store.query(
+                session_id=session_id,
+                query=query,
+                levels={MemoryLevel.LESSONS},
+                limit=limit,
+            )
+        ]
+        lessons: list[MemoryRecord] = []
+        seen: set[str] = set()
+        for rec in self._seed_lesson_records:
+            norm = self._normalize_lesson(rec.content)
+            if norm in seen:
+                continue
+            lessons.append(rec)
+            seen.add(norm)
+            if len(lessons) >= limit:
+                return lessons
+
+        for rec in persisted_lessons:
+            norm = self._normalize_lesson(rec.content)
+            if norm in seen:
+                continue
+            lessons.append(rec)
+            seen.add(norm)
+            if len(lessons) >= limit:
+                break
+        return lessons
 
     def compact_session(self, *, session_id: str) -> None:
         """Compact older episodic records into a semantic summary and prune."""
@@ -236,6 +290,106 @@ class MemoryManager:
             deduped.append((content, tags, salience))
         return deduped
 
+    def _promote_lesson_candidates(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        candidates = self._extract_lesson_candidates(
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
+        if not candidates:
+            return
+
+        known = self._known_lessons_for_session(session_id)
+        repeat_threshold = max(1, self.config.lesson_promotion_min_repeats)
+
+        for candidate_text, explicit in candidates:
+            lesson = self._truncate(candidate_text)
+            normalized = self._normalize_lesson(lesson)
+            if not normalized or normalized in known:
+                continue
+
+            key = (session_id, normalized)
+            count = self._lesson_candidate_counts.get(key, 0) + 1
+            self._lesson_candidate_counts[key] = count
+
+            if not explicit and count < repeat_threshold:
+                continue
+
+            confidence = 0.9 if explicit else min(0.75 + (count * 0.05), 0.9)
+            self.store.add(
+                MemoryRecord(
+                    level=MemoryLevel.LESSONS,
+                    session_id=session_id,
+                    content=f"Lesson: {lesson}",
+                    tags={"lesson", "promoted", "explicit" if explicit else "repeated"},
+                    salience=confidence,
+                    metadata={
+                        "source": "promotion",
+                        "explicit": explicit,
+                        "repeat_count": count,
+                    },
+                )
+            )
+            known.add(normalized)
+
+    def _extract_lesson_candidates(
+        self,
+        *,
+        user_text: str,
+        assistant_text: str,
+    ) -> list[tuple[str, bool]]:
+        out: list[tuple[str, bool]] = []
+        text = user_text.strip()
+        if not text:
+            return out
+
+        explicit_patterns = [
+            r"\bfrom now on[,:\s-]*(.+)",
+            r"\bremember (?:this|that)[:\s-]*(.+)",
+            r"\balways\s+(.+)",
+            r"\bnever\s+(.+)",
+        ]
+        for pattern in explicit_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            clause = self._clean_clause(match.group(1))
+            if clause:
+                out.append((clause, True))
+
+        correction_prefixes = (
+            "that's wrong",
+            "that is wrong",
+            "not correct",
+            "no, ",
+            "incorrect",
+        )
+        lower = text.lower()
+        if any(lower.startswith(prefix) for prefix in correction_prefixes):
+            cleaned = self._clean_clause(text)
+            if cleaned:
+                out.append((cleaned, True))
+
+        # Repeated preference/decision signals can graduate into lessons
+        for content, tags, _salience in self._extract_semantic_facts(text):
+            if "preference" in tags or "decision" in tags:
+                out.append((content, False))
+
+        deduped: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for content, explicit in out:
+            key = self._normalize_lesson(content)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append((content, explicit))
+        return deduped
+
     def _build_compaction_summary(self, records: list[MemoryRecord], at: datetime) -> str:
         lines: list[str] = [
             f"Compaction summary at {at.isoformat()} for {len(records)} older turns:",
@@ -268,3 +422,58 @@ class MemoryManager:
             if kw in lower:
                 score += 0.1
         return min(score, 0.95)
+
+    def _set_seed_lessons(self, lessons: list[str]) -> None:
+        self._seed_lesson_records = []
+        for raw in lessons:
+            text = self._clean_clause(raw)
+            if not text:
+                continue
+            self._seed_lesson_records.append(
+                MemoryRecord(
+                    level=MemoryLevel.LESSONS,
+                    session_id=None,
+                    content=f"Lesson: {text}",
+                    tags={"lesson", "seed"},
+                    salience=0.95,
+                    metadata={"source": "LESSONS.md"},
+                )
+            )
+        self._known_lessons.clear()
+
+    def _known_lessons_for_session(self, session_id: str) -> set[str]:
+        cached = self._known_lessons.get(session_id)
+        if cached is not None:
+            return cached
+
+        known = {
+            self._normalize_lesson(rec.content)
+            for rec in self._seed_lesson_records
+        }
+        records = self.store.list_records(
+            session_id=session_id,
+            levels={MemoryLevel.LESSONS},
+            limit=None,
+            newest_first=True,
+        )
+        known.update(
+            self._normalize_lesson(rec.content)
+            for rec in records
+        )
+        known.discard("")
+        self._known_lessons[session_id] = known
+        return known
+
+    @staticmethod
+    def _normalize_lesson(text: str) -> str:
+        normalized = text.strip().lower()
+        if normalized.startswith("lesson:"):
+            normalized = normalized[len("lesson:"):].strip()
+        return " ".join(normalized.split())
+
+    def _clean_clause(self, text: str) -> str:
+        stripped = text.strip()
+        stripped = re.sub(r"^[\-\*\d\.\)\s]+", "", stripped)
+        stripped = re.split(r"[.!?]\s", stripped, maxsplit=1)[0]
+        stripped = stripped.strip(" -:\t\n")
+        return self._truncate(stripped)

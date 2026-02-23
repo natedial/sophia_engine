@@ -1,4 +1,4 @@
-import type { Chart, ChartPosition } from './canvas'
+import type { Chart } from './canvas'
 
 // Server -> Client messages
 export type ServerMessage =

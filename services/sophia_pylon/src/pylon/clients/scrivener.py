@@ -103,10 +103,17 @@ class ScrivenerClient(BaseClient):
     # Releases (Economic Calendar)
     # -------------------------------------------------------------------------
 
-    async def get_releases_upcoming(self, days: int = 7) -> dict[str, Any]:
+    async def get_releases_upcoming(
+        self,
+        days: int = 7,
+        key_only: bool = False,
+    ) -> dict[str, Any]:
         """Get upcoming economic releases."""
         client = await self._get_client()
-        response = await client.get("/releases/upcoming", params={"days": days})
+        response = await client.get(
+            "/releases/upcoming",
+            params={"days": days, "key_only": key_only},
+        )
         response.raise_for_status()
         return response.json()
 
@@ -117,10 +124,10 @@ class ScrivenerClient(BaseClient):
         response.raise_for_status()
         return response.json()
 
-    async def get_releases_week(self) -> dict[str, Any]:
+    async def get_releases_week(self, key_only: bool = False) -> dict[str, Any]:
         """Get this week's economic releases."""
         client = await self._get_client()
-        response = await client.get("/releases/week")
+        response = await client.get("/releases/week", params={"key_only": key_only})
         response.raise_for_status()
         return response.json()
 

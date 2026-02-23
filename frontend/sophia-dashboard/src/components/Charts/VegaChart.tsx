@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import embed, { Result } from 'vega-embed'
 
 interface VegaChartProps {
@@ -45,8 +45,6 @@ export const VegaChart = forwardRef<VegaChartHandle, VegaChartProps>(
         actions: false, // We'll handle actions ourselves
         theme: 'quartz' as const,
         renderer: 'svg' as const,
-        width: 'container' as const,
-        height: 'container' as const,
       }
 
       // Ensure width/height are set for responsiveness

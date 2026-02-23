@@ -92,6 +92,13 @@ async def chat_loop(agent: SophiaAgent, session_id: str | None = None) -> None:
                             console.print(Markdown(msg.content))
                     streaming = False
 
+                elif event.type == EventType.SKILL_ACTIVATED:
+                    skill_name = event.data.get("name", "unknown")
+                    reason = event.data.get("reason", "match")
+                    console.print(
+                        f"\n  [dim]Skill activated: {skill_name} ({reason})[/dim]"
+                    )
+
                 elif event.type == EventType.TOOL_EXECUTION_START:
                     tc: ToolCall = event.data["tool_call"]
                     console.print(f"\n  [dim]Calling {tc.name}...[/dim]", end="")
@@ -137,15 +144,21 @@ def _format_tool_call(tc: ToolCall) -> str:
 
 def _create_provider(settings):
     """Create an LLM provider based on settings."""
-    provider_name = getattr(settings, "llm_provider", "anthropic")
+    provider_name = getattr(settings, "llm_provider", "openai").lower().strip()
 
     if provider_name == "anthropic":
         from sophia.llm.anthropic_provider import AnthropicProvider
         return AnthropicProvider(api_key=settings.anthropic_api_key)
+    if provider_name == "openai":
+        from sophia.llm.openai_provider import OpenAIProvider
+        return OpenAIProvider(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
 
     raise ValueError(
         f"Unsupported LLM provider: '{provider_name}'. "
-        f"Supported providers: anthropic"
+        "Supported providers: anthropic, openai"
     )
 
 
@@ -206,11 +219,17 @@ async def async_main() -> None:
 
     settings = get_settings()
 
-    # Validate API key (for anthropic provider)
-    provider_name = getattr(settings, "llm_provider", "anthropic")
+    # Validate API key for selected provider
+    provider_name = getattr(settings, "llm_provider", "openai").lower().strip()
     if provider_name == "anthropic" and not settings.anthropic_api_key:
         console.print(
             "[red]Error: ANTHROPIC_API_KEY not set.[/red]\n"
+            "Please set it in your .env file or environment."
+        )
+        return
+    if provider_name == "openai" and not settings.openai_api_key:
+        console.print(
+            "[red]Error: OPENAI_API_KEY not set.[/red]\n"
             "Please set it in your .env file or environment."
         )
         return

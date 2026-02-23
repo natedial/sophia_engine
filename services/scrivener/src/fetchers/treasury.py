@@ -22,6 +22,9 @@ BASE_URL = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
 AUCTIONS_ENDPOINT = "/v1/accounting/od/auctions_query"
 UPCOMING_AUCTIONS_ENDPOINT = "/v1/accounting/od/upcoming_auctions"
 
+# TreasuryDirect API for announced securities
+TREASURYDIRECT_ANNOUNCED_URL = "https://www.treasurydirect.gov/TA_WS/securities/announced?format=json"
+
 
 class TreasuryFetcher:
     """Fetcher for Treasury auction data from Fiscal Data API."""
@@ -300,6 +303,135 @@ class TreasuryFetcher:
 
         except Exception as e:
             logger.error(f"Error fetching Treasury auctions: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+            }
+
+    # ---- TreasuryDirect Announced Auctions ----
+
+    def fetch_announced_auctions(self) -> list[dict[str, Any]]:
+        """Fetch announced (future) auctions from TreasuryDirect API.
+
+        Returns:
+            List of announced auction records
+        """
+        response = self._client.get(TREASURYDIRECT_ANNOUNCED_URL)
+        response.raise_for_status()
+
+        results = response.json()
+        logger.info(f"Fetched {len(results)} announced auctions from TreasuryDirect")
+        return results
+
+    def parse_announced_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Parse a TreasuryDirect announced auction record.
+
+        The TreasuryDirect API uses camelCase field names and ISO datetime
+        strings, so this maps them into the same schema as parse_auction_record.
+        """
+
+        def safe_decimal(val: str | None) -> Decimal | None:
+            if val is None or val == "" or val == "null":
+                return None
+            try:
+                return Decimal(val)
+            except Exception:
+                return None
+
+        def safe_date(val: str | None) -> date | None:
+            if val is None or val == "" or val == "null":
+                return None
+            try:
+                # TreasuryDirect returns "2026-02-26T00:00:00" format
+                return datetime.fromisoformat(val).date()
+            except Exception:
+                return None
+
+        return {
+            "cusip": record.get("cusip"),
+            "security_type": record.get("securityType"),
+            "security_term": record.get("securityTerm"),
+            "auction_date": safe_date(record.get("auctionDate")),
+            "issue_date": safe_date(record.get("issueDate")),
+            "maturity_date": safe_date(record.get("maturityDate")),
+            "announcement_date": safe_date(record.get("announcementDate")),
+            "offering_amount": safe_decimal(record.get("offeringAmount")),
+            "auction_format": record.get("auctionFormat"),
+            "interest_rate": safe_decimal(record.get("interestRate")),
+            "reopening": record.get("reopening") == "Yes",
+            "original_cusip": record.get("originalCusip") or None,
+            # Result fields — will be empty for announced/future auctions
+            "high_yield": safe_decimal(record.get("highYield")),
+            "high_discount_rate": safe_decimal(record.get("highDiscountRate")),
+            "bid_to_cover_ratio": safe_decimal(record.get("bidToCoverRatio")),
+            "total_accepted": safe_decimal(record.get("totalAccepted")),
+            "total_tendered": safe_decimal(record.get("totalTendered")),
+            "competitive_accepted": safe_decimal(record.get("competitiveTendersAccepted")),
+            "noncompetitive_accepted": safe_decimal(record.get("noncompetitiveTendersAccepted")),
+        }
+
+    def store_announced_auctions(self, records: list[dict[str, Any]]) -> int:
+        """Store announced auction records in the database.
+
+        Uses upsert so re-running is safe — existing rows get updated
+        with any new data (e.g. results filled in after auction day).
+
+        Args:
+            records: Raw records from TreasuryDirect API
+
+        Returns:
+            Number of records upserted
+        """
+        if not records:
+            return 0
+
+        parsed = [self.parse_announced_record(r) for r in records]
+        valid = [p for p in parsed if p["cusip"] and p["auction_date"]]
+
+        if not valid:
+            return 0
+
+        with get_session() as session:
+            stmt = insert(TreasuryAuction).values(valid)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["cusip", "auction_date"],
+                set_={
+                    "offering_amount": stmt.excluded.offering_amount,
+                    "announcement_date": stmt.excluded.announcement_date,
+                    "auction_format": stmt.excluded.auction_format,
+                    "interest_rate": stmt.excluded.interest_rate,
+                    "high_yield": stmt.excluded.high_yield,
+                    "high_discount_rate": stmt.excluded.high_discount_rate,
+                    "bid_to_cover_ratio": stmt.excluded.bid_to_cover_ratio,
+                    "total_accepted": stmt.excluded.total_accepted,
+                    "total_tendered": stmt.excluded.total_tendered,
+                },
+            )
+            session.execute(stmt)
+
+        logger.info(f"Stored {len(valid)} announced auction records")
+        return len(valid)
+
+    def fetch_and_store_announced(self) -> dict[str, Any]:
+        """Fetch announced auctions from TreasuryDirect and store in database.
+
+        Returns:
+            Summary of fetch operation
+        """
+        logger.info("Fetching announced auctions from TreasuryDirect")
+
+        try:
+            records = self.fetch_announced_auctions()
+            stored = self.store_announced_auctions(records)
+
+            return {
+                "status": "success",
+                "records_fetched": len(records),
+                "records_stored": stored,
+            }
+
+        except Exception as e:
+            logger.error(f"Error fetching announced auctions: {e}")
             return {
                 "status": "error",
                 "error": str(e),
