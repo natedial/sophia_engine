@@ -66,6 +66,9 @@ class AuctionRecord(BaseModel):
     direct_bidder_accepted: float | None
     indirect_bidder_accepted: float | None
     reopening: bool
+    announcement_date: str | None = None
+    auction_format: str | None = None
+    interest_rate: float | None = None
 
 
 class AuctionSummary(BaseModel):
@@ -175,6 +178,25 @@ def get_recent_auctions(
 ):
     """Get recent Treasury auction results."""
     return AuctionQuery.get_recent(days=days, security_type=security_type, limit=limit)
+
+
+@app.get("/auctions/upcoming", response_model=list[AuctionRecord])
+def get_upcoming_auctions(
+    security_type: Annotated[str | None, Query(description="Bill, Note, Bond, TIPS, FRN")] = None,
+    limit: Annotated[int | None, Query(le=100)] = None,
+):
+    """Get upcoming announced Treasury auctions (future auction dates)."""
+    return AuctionQuery.get_upcoming(security_type=security_type, limit=limit)
+
+
+@app.get("/auctions/sync-announced")
+def sync_announced_auctions():
+    """Fetch announced auctions from TreasuryDirect and store in database."""
+    from src.fetchers.treasury import TreasuryFetcher
+
+    fetcher = TreasuryFetcher()
+    result = fetcher.fetch_and_store_announced()
+    return result
 
 
 @app.get("/auctions/summary", response_model=AuctionSummary)

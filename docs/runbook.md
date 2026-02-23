@@ -18,42 +18,67 @@ cd ../../agents/sophia_prima && pip install -e .
 ## Start Services (separate shells)
 
 ```bash
-source /Users/ndial/dev/sophia/.venv/bin/activate
-cd /Users/ndial/dev/sophia/services/scrivener
+source .venv/bin/activate
+cd services/scrivener
 scrivener serve --port 8000
 ```
 
 ```bash
-source /Users/ndial/dev/sophia/.venv/bin/activate
-cd /Users/ndial/dev/sophia/services/sophia_arithmos
+source .venv/bin/activate
+cd services/sophia_arithmos
 python -m sophia_arithmos.main
 ```
 
 ```bash
-source /Users/ndial/dev/sophia/.venv/bin/activate
-cd /Users/ndial/dev/sophia/services/sophia_kampe
+source .venv/bin/activate
+cd services/sophia_kampe
 python -m sophia_kampe.main
 ```
 
 ```bash
-source /Users/ndial/dev/sophia/.venv/bin/activate
-cd /Users/ndial/dev/sophia/services/sophia_pylon
+source .venv/bin/activate
+cd services/sophia_pylon
 # No standalone server; consumed by sophia_prima
 ```
 
 ```bash
-source /Users/ndial/dev/sophia/.venv/bin/activate
-cd /Users/ndial/dev/sophia/agents/sophia_prima
+source .venv/bin/activate
+cd agents/sophia_prima
 python -m sophia.cli
 ```
 
-## Docker Compose (stub)
+## Docker Compose
 
 ```bash
-cd /Users/ndial/dev/sophia/infra
-cp .env.example .env
-docker compose up --build
+make up
 ```
+
+Optional: set `FRED_API_KEY` and `BLS_API_KEY` in `infra/.env` if you want Scrivener to fetch data.
+
+Other commands:
+- `make logs`
+- `make ps`
+- `make down`
+
+Service URLs:
+- `http://localhost:8000` scrivener
+- `http://localhost:8001` sophia_arithmos
+- `http://localhost:8002` sophia_kampe
+- `http://localhost:8003` sophia_canvas
+- `http://localhost:13000` sophia_dashboard
+- `http://localhost:18080` sophia_gateway
+
+Gateway endpoints:
+- `GET /health`
+- `POST /v1/messages` (channel-agnostic ingress)
+- `WS /ws` (connect handshake + typed frames)
+
+Gateway configuration:
+- Set `OPENAI_API_KEY` in `infra/.env` for real model responses.
+- Optional: set `LLM_PROVIDER=anthropic` plus `ANTHROPIC_API_KEY` to switch provider.
+- `PERSONALITY_PATH` and `SOUL_PATH` control the agent prompt components loaded by gateway.
+- Set `TELEGRAM_BOT_TOKEN` (single bot) or `TELEGRAM_ACCOUNTS_JSON` (multi-bot).
+- Optional deterministic bindings via `GATEWAY_BINDINGS_JSON`.
 
 ## Deployment Options (AWS)
 

@@ -85,6 +85,36 @@ def daily_sweep_bls() -> dict:
         _log_sweep("BLS", "daily_sweep", started_at, completed_at)
 
 
+def daily_sweep_treasury_announced() -> dict:
+    """Daily sync of announced Treasury auctions from TreasuryDirect."""
+    logger.info("Starting TreasuryDirect announced auctions sync")
+    started_at = datetime.utcnow()
+
+    try:
+        from src.fetchers.treasury import TreasuryFetcher
+
+        fetcher = TreasuryFetcher()
+        result = fetcher.fetch_and_store_announced()
+
+        if result["status"] == "success":
+            logger.info(
+                f"TreasuryDirect sync complete: {result['records_fetched']} fetched, "
+                f"{result['records_stored']} stored"
+            )
+        else:
+            logger.error(f"TreasuryDirect sync failed: {result.get('error')}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"TreasuryDirect sync failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+    finally:
+        completed_at = datetime.utcnow()
+        _log_sweep("TREASURY", "announced_auctions", started_at, completed_at)
+
+
 def daily_sweep_all() -> dict:
     """Run daily sweep for all sources."""
     logger.info("Starting daily sweep for all sources")
@@ -92,6 +122,7 @@ def daily_sweep_all() -> dict:
     results = {
         "fred": daily_sweep_fred(),
         "bls": daily_sweep_bls(),
+        "treasury_announced": daily_sweep_treasury_announced(),
     }
 
     success = all(r["status"] == "success" for r in results.values())

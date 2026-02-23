@@ -32,7 +32,7 @@ export function ChartToolbar({
   }, [])
 
   return (
-    <div className="chart-toolbar">
+    <div className="chart-toolbar" data-chart-id={chartId}>
       {onRefresh && (
         <button
           className={`toolbar-button ${isRefreshing ? 'is-loading' : ''}`}

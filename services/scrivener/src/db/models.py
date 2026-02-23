@@ -299,6 +299,9 @@ class TreasuryAuction(Base):
     indirect_bidder_accepted: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
     reopening: Mapped[bool] = mapped_column(default=False)
     original_cusip: Mapped[str | None] = mapped_column(String(9))
+    announcement_date: Mapped[date | None] = mapped_column(Date)
+    auction_format: Mapped[str | None] = mapped_column(String(30))
+    interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

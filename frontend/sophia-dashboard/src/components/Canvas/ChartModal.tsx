@@ -54,7 +54,9 @@ export function ChartModal({ chart, onClose, onExport }: ChartModalProps) {
     if (format === 'svg') {
       URL.revokeObjectURL(link.href)
     }
-  }, [chart.id, chart.title])
+
+    onExport?.(format)
+  }, [chart.id, chart.title, onExport])
 
   return (
     <div className="chart-modal-overlay" onClick={onClose}>

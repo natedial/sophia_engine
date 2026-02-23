@@ -1,43 +1,153 @@
-version: "3.9"
-
 services:
-  scrivener:
-    # TODO: add Dockerfile under services/scrivener
-    build: ../services/scrivener
-    ports:
-      - "8000:8000"
+  postgres:
+    image: postgres:16-alpine
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - FRED_API_KEY=${FRED_API_KEY}
-      - BLS_API_KEY=${BLS_API_KEY}
+      POSTGRES_DB: ${POSTGRES_DB:-sophia}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - sophia_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-sophia}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  scrivener:
+    build: ../services/scrivener
+    command:
+      - /bin/sh
+      - -c
+      - |
+        scrivener init-db && scrivener serve --host 0.0.0.0 --port 8000
+    ports:
+      - "${SCRIVENER_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/sophia}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      BLS_API_KEY: ${BLS_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   sophia_arithmos:
-    # TODO: add Dockerfile under services/sophia_arithmos
     build: ../services/sophia_arithmos
     ports:
-      - "8001:8001"
+      - "${ARITHMOS_PORT:-8001}:8001"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   sophia_kampe:
-    # TODO: add Dockerfile under services/sophia_kampe
     build: ../services/sophia_kampe
     ports:
-      - "8002:8002"
+      - "${KAMPE_PORT:-8002}:8002"
     environment:
-      - KAMPE_ARITHMOS__URL=http://sophia_arithmos:8001
+      KAMPE_ARITHMOS__URL: http://sophia_arithmos:8001
+    depends_on:
+      sophia_arithmos:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   sophia_canvas:
     build: ../services/sophia_canvas
+    command:
+      - /bin/sh
+      - -c
+      - |
+        python -c "from sophia_canvas.db.models import Base; from sophia_canvas.db.connection import get_engine; Base.metadata.create_all(bind=get_engine())" && python -m sophia_canvas.main
     ports:
-      - "8003:8003"
+      - "${CANVAS_PORT:-8003}:8003"
     environment:
-      - CANVAS_DATABASE_URL=${DATABASE_URL}
-      - CANVAS_AUTH_ENABLED=false
+      CANVAS_DATABASE_URL: ${CANVAS_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/sophia}
+      CANVAS_AUTH_ENABLED: ${CANVAS_AUTH_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   sophia_dashboard:
     build: ../frontend/sophia-dashboard
     ports:
-      - "3000:80"
+      - "${DASHBOARD_PORT:-13000}:80"
     depends_on:
       - sophia_canvas
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+  sophia_gateway:
+    build:
+      context: ..
+      dockerfile: agents/sophia_prima/Dockerfile
+    ports:
+      - "${GATEWAY_PORT:-18080}:8080"
+    environment:
+      SCRIVENER_BASE_URL: http://scrivener:8000
+      ARITHMOS_BASE_URL: http://sophia_arithmos:8001
+      CANVAS_BASE_URL: http://sophia_canvas:8003
+      CANVAS_DASHBOARD_URL: http://localhost:${DASHBOARD_PORT:-13000}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PERSONALITY_PATH: ${PERSONALITY_PATH:-/workspace/agents/sophia_prima/config/personality.md}
+      SOUL_PATH: ${SOUL_PATH:-/workspace/agents/sophia_prima/config/soul.md}
+      LESSONS_PATH: ${LESSONS_PATH:-/workspace/agents/sophia_prima/config/LESSONS.md}
+      AGENT_FS_ENFORCE_WRITE_POLICY: ${AGENT_FS_ENFORCE_WRITE_POLICY:-true}
+      AGENT_FS_WRITE_ALLOWLIST: ${AGENT_FS_WRITE_ALLOWLIST:-.sophia}
+      AGENT_FS_ENFORCE_READ_POLICY: ${AGENT_FS_ENFORCE_READ_POLICY:-true}
+      AGENT_FS_READ_ALLOWLIST: ${AGENT_FS_READ_ALLOWLIST:-config,skills,.sophia}
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8080
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_POLLING_ENABLED: ${TELEGRAM_POLLING_ENABLED:-true}
+      TELEGRAM_ACCOUNTS_JSON: ${TELEGRAM_ACCOUNTS_JSON:-}
+      GATEWAY_BINDINGS_JSON: ${GATEWAY_BINDINGS_JSON:-}
+    depends_on:
+      scrivener:
+        condition: service_healthy
+      sophia_arithmos:
+        condition: service_healthy
+      sophia_canvas:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   # sophia_pylon is a library used by sophia_prima, no server process.
+
+volumes:
+  sophia_postgres_data:

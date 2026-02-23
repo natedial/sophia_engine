@@ -6,10 +6,21 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sophia.security.filesystem import ReadPolicy, WritePolicy, parse_allowlist
+
 
 def get_project_root() -> Path:
     """Get the project root directory."""
-    return Path(__file__).parent.parent.parent
+    source_root = Path(__file__).resolve().parent.parent.parent
+
+    # In containerized/package installs, cwd can be the checked-out project tree.
+    # Prefer that when config assets are present there.
+    cwd = Path.cwd().resolve()
+    for candidate in [cwd, *cwd.parents]:
+        if (candidate / "config" / "personality.md").exists():
+            return candidate
+
+    return source_root
 
 
 class Settings(BaseSettings):
@@ -23,14 +34,18 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_provider: str = Field(
-        default="anthropic",
+        default="openai",
         description="LLM provider: anthropic, openai, google",
     )
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        description="Base URL for OpenAI-compatible chat completions API",
+    )
     google_api_key: str = Field(default="", description="Google AI API key")
     llm_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="gpt-4.1-mini",
         description="Model to use for chat completions",
     )
 
@@ -38,6 +53,52 @@ class Settings(BaseSettings):
     personality_path: Path = Field(
         default_factory=lambda: get_project_root() / "config" / "personality.md",
         description="Path to personality definition markdown file",
+    )
+    soul_path: Path = Field(
+        default_factory=lambda: get_project_root() / "config" / "soul.md",
+        description="Path to soul definition markdown file",
+    )
+    lessons_path: Path = Field(
+        default_factory=lambda: get_project_root() / "config" / "LESSONS.md",
+        description="Path to read-only seed lessons markdown file",
+    )
+    skills_enabled: bool = Field(
+        default=True,
+        description="Enable local skill discovery and prompt injection",
+    )
+    skills_path: Path = Field(
+        default_factory=lambda: get_project_root() / "skills",
+        description="Path to local skill folders containing SKILL.md files",
+    )
+    skills_max_loaded_chars: int = Field(
+        default=12000,
+        description="Maximum characters loaded from each skill body",
+    )
+    skills_implicit_match_min_overlap: int = Field(
+        default=2,
+        description="Minimum keyword overlap required for implicit skill matching",
+    )
+    agent_fs_enforce_write_policy: bool = Field(
+        default=True,
+        description="Enforce deny-by-default write policy for agent-owned writes",
+    )
+    agent_fs_write_allowlist: str = Field(
+        default=".sophia",
+        description=(
+            "Comma-separated allowlist of writable paths (absolute or project-relative). "
+            "Writes outside these roots are denied when policy is enabled."
+        ),
+    )
+    agent_fs_enforce_read_policy: bool = Field(
+        default=True,
+        description="Enforce deny-by-default read policy for agent-owned reads",
+    )
+    agent_fs_read_allowlist: str = Field(
+        default="config,skills,.sophia",
+        description=(
+            "Comma-separated allowlist of readable paths (absolute or project-relative). "
+            "Reads outside these roots are denied when policy is enabled."
+        ),
     )
 
     # Backend Services
@@ -63,10 +124,35 @@ class Settings(BaseSettings):
         default=None,
         description="Telegram bot token",
     )
+    telegram_polling_enabled: bool = Field(
+        default=True,
+        description="Enable Telegram long polling in gateway mode",
+    )
+    telegram_accounts_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON list of Telegram account configs. "
+            "Each item: {account_id, bot_token}. "
+            "When empty, TELEGRAM_BOT_TOKEN is used as a single account."
+        ),
+    )
 
     # Web Server
     web_host: str = Field(default="0.0.0.0", description="Web server host")
     web_port: int = Field(default=8080, description="Web server port")
+
+    # Surface gateway
+    gateway_default_agent_id: str = Field(
+        default="sophia_prima",
+        description="Default agent id for gateway routing",
+    )
+    gateway_bindings_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON list of deterministic gateway binding rules. "
+            "Fields: channel, account_id, peer_id, agent_id, session_id."
+        ),
+    )
 
     # Memory Framework
     memory_enabled: bool = Field(
@@ -81,9 +167,17 @@ class Settings(BaseSettings):
         default=3,
         description="Top episodic memories to inject into prompt context",
     )
+    memory_lessons_top_k: int = Field(
+        default=4,
+        description="Top lessons memories to inject into prompt context",
+    )
     memory_semantic_top_k: int = Field(
         default=3,
         description="Top semantic memories to inject into prompt context",
+    )
+    memory_lesson_promotion_min_repeats: int = Field(
+        default=2,
+        description="Minimum repeated non-explicit candidate count before lesson promotion",
     )
     memory_semantic_search_enabled: bool = Field(
         default=True,
@@ -185,6 +279,26 @@ class Settings(BaseSettings):
         default=40,
         description="Maximum number of episodic records compacted in one pass",
     )
+
+    def build_write_policy(self) -> WritePolicy:
+        """Build filesystem write policy from settings."""
+        return WritePolicy(
+            enabled=self.agent_fs_enforce_write_policy,
+            allowed_roots=parse_allowlist(
+                self.agent_fs_write_allowlist,
+                project_root=get_project_root(),
+            ),
+        )
+
+    def build_read_policy(self) -> ReadPolicy:
+        """Build filesystem read policy from settings."""
+        return ReadPolicy(
+            enabled=self.agent_fs_enforce_read_policy,
+            allowed_roots=parse_allowlist(
+                self.agent_fs_read_allowlist,
+                project_root=get_project_root(),
+            ),
+        )
 
 
 # Global settings instance

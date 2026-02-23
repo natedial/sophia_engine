@@ -169,6 +169,13 @@ SCRIVENER_TOOLS = [
                 required=False,
                 default=7,
             ),
+            ToolParameter(
+                name="key_only",
+                type=ToolParameterType.BOOLEAN,
+                description="If true, include only official press-release calendar items.",
+                required=False,
+                default=False,
+            ),
         ],
     ),
     ToolDefinition(
@@ -179,7 +186,15 @@ SCRIVENER_TOOLS = [
     ToolDefinition(
         name="get_releases_week",
         description="Get this week's economic data releases. Provides the full calendar for the current week.",
-        parameters=[],
+        parameters=[
+            ToolParameter(
+                name="key_only",
+                type=ToolParameterType.BOOLEAN,
+                description="If true, include only official press-release calendar items.",
+                required=False,
+                default=False,
+            ),
+        ],
     ),
     ToolDefinition(
         name="get_releases_summary",
@@ -270,12 +285,15 @@ class ScrivenerToolExecutor:
                 # Releases
                 case "get_releases_upcoming":
                     data = await self.client.get_releases_upcoming(
-                        parameters.get("days", 7)
+                        parameters.get("days", 7),
+                        parameters.get("key_only", False),
                     )
                 case "get_releases_today":
                     data = await self.client.get_releases_today()
                 case "get_releases_week":
-                    data = await self.client.get_releases_week()
+                    data = await self.client.get_releases_week(
+                        parameters.get("key_only", False)
+                    )
                 case "get_releases_summary":
                     data = await self.client.get_releases_summary()
                 # Speeches

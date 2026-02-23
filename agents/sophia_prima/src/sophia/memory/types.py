@@ -18,6 +18,7 @@ class MemoryLevel(str, Enum):
     """Memory layers used by the agent."""
 
     PROCEDURAL = "procedural"
+    LESSONS = "lessons"
     WORKING = "working"
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
@@ -37,6 +38,11 @@ MEMORY_LEVEL_SPECS: tuple[MemoryLevelSpec, ...] = (
         level=MemoryLevel.PROCEDURAL,
         purpose="Agent behavior rules, style constraints, and operating policies.",
         timeframe="Weeks to months (changes only when configuration changes).",
+    ),
+    MemoryLevelSpec(
+        level=MemoryLevel.LESSONS,
+        purpose="Validated operating lessons learned from user corrections and stable directives.",
+        timeframe="Weeks to months (durable, high-signal guidance).",
     ),
     MemoryLevelSpec(
         level=MemoryLevel.WORKING,
@@ -89,6 +95,7 @@ class MemoryMatch:
 class MemorySnapshot:
     """Grouped memory context prepared for prompt injection."""
 
+    lessons: list[MemoryRecord]
     working_lines: list[str]
     episodic: list[MemoryRecord]
     semantic: list[MemoryRecord]
@@ -103,6 +110,10 @@ class MemorySnapshot:
         if self.working_lines:
             parts.append("Working memory:")
             parts.extend(f"- {line}" for line in self.working_lines)
+
+        if self.lessons:
+            parts.append("Lessons memory:")
+            parts.extend(f"- {rec.content}" for rec in self.lessons)
 
         if self.episodic:
             parts.append("Episodic memory:")

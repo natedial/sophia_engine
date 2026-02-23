@@ -200,6 +200,7 @@ class SQLiteMemoryStore:
             self._embed_levels.add(MemoryLevel.EPISODIC)
         if embed_semantic:
             self._embed_levels.add(MemoryLevel.SEMANTIC)
+            self._embed_levels.add(MemoryLevel.LESSONS)
         self._ensure_schema()
 
     def add(self, record: MemoryRecord) -> None:

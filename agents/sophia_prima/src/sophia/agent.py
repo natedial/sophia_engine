@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
@@ -15,6 +17,7 @@ from sophia.events import (
     message_delta,
     message_end,
     message_start,
+    skill_activated,
     tool_execution_end,
     tool_execution_start,
     turn_end,
@@ -31,10 +34,31 @@ from sophia.llm.types import (
 )
 from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_store
 from sophia.personality.loader import Personality, load_personality
+from sophia.skills.models import SkillMatch
+from sophia.skills.registry import SkillRegistry
 
 # Type aliases for steering / follow-up callbacks
 SteeringCallback = Callable[[], list[Message] | None]
 FollowUpCallback = Callable[[], str | None]
+logger = logging.getLogger("sophia.agent")
+
+
+def _parse_lessons_markdown(raw: str) -> list[str]:
+    """Parse markdown list/plain lines into lesson strings."""
+    lessons: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        normalized = re.sub(r"^[-*]\s+", "", stripped)
+        normalized = re.sub(r"^\d+\.\s+", "", normalized)
+        normalized = normalized.strip()
+        if not normalized:
+            continue
+        lessons.append(normalized)
+    return lessons
 
 
 class AgentConfig:
@@ -78,13 +102,26 @@ class SophiaAgent:
     ) -> None:
         self.provider = provider
         self.settings = settings or get_settings()
+        self.read_policy = self.settings.build_read_policy()
+        self.write_policy = self.settings.build_write_policy()
+        self.seed_lessons = self._load_lessons()
         self.pylon = pylon or Pylon()
         self.preflight_result = preflight_result
         self.config = agent_config or AgentConfig()
         self.canvas_id = canvas_id
         if memory_manager is not None:
             self.memory = memory_manager
+            self.memory.set_seed_lessons(self.seed_lessons)
         else:
+            if self.settings.memory_store_backend.lower().strip() == "sqlite":
+                self.read_policy.ensure_allowed(
+                    self.settings.memory_store_path,
+                    purpose="memory_store_path",
+                )
+                self.write_policy.ensure_allowed(
+                    self.settings.memory_store_path,
+                    purpose="memory_store_path",
+                )
             memory_store = create_memory_store(
                 backend=self.settings.memory_store_backend,
                 sqlite_path=self.settings.memory_store_path,
@@ -117,8 +154,12 @@ class SophiaAgent:
                 config=MemoryManagerConfig(
                     enabled=self.settings.memory_enabled,
                     working_window=self.settings.memory_working_window,
+                    lessons_recall_k=self.settings.memory_lessons_top_k,
                     episodic_recall_k=self.settings.memory_episodic_top_k,
                     semantic_recall_k=self.settings.memory_semantic_top_k,
+                    lesson_promotion_min_repeats=(
+                        self.settings.memory_lesson_promotion_min_repeats
+                    ),
                     compaction_enabled=self.settings.memory_compaction_enabled,
                     compaction_every_n_turns=self.settings.memory_compaction_every_n_turns,
                     compaction_max_episodic_per_session=(
@@ -126,17 +167,53 @@ class SophiaAgent:
                     ),
                     compaction_batch_size=self.settings.memory_compaction_batch_size,
                 ),
+                seed_lessons=self.seed_lessons,
             )
         self.get_steering_messages = get_steering_messages
         self.get_follow_up_messages = get_follow_up_messages
         self.personality = self._load_personality()
+        self.soul = self._load_soul()
+        self.skills = SkillRegistry(
+            skills_root=self.settings.skills_path,
+            enabled=self.settings.skills_enabled,
+            max_loaded_chars=self.settings.skills_max_loaded_chars,
+            implicit_min_overlap=self.settings.skills_implicit_match_min_overlap,
+            read_policy=self.read_policy,
+        )
 
     # ------------------------------------------------------------------
     # Personality
     # ------------------------------------------------------------------
 
     def _load_personality(self) -> Personality:
+        self.read_policy.ensure_allowed(
+            self.settings.personality_path,
+            purpose="personality_path",
+        )
         return load_personality(self.settings.personality_path)
+
+    def _load_soul(self) -> str:
+        soul_path = self.settings.soul_path
+        self.read_policy.ensure_allowed(
+            soul_path,
+            purpose="soul_path",
+        )
+        if not soul_path.exists():
+            logger.warning("Soul file not found: %s", soul_path)
+            return ""
+        return soul_path.read_text(encoding="utf-8").strip()
+
+    def _load_lessons(self) -> list[str]:
+        lessons_path = self.settings.lessons_path
+        if not lessons_path.exists():
+            return []
+
+        self.read_policy.ensure_allowed(
+            lessons_path,
+            purpose="lessons_path",
+        )
+        raw = lessons_path.read_text(encoding="utf-8")
+        return _parse_lessons_markdown(raw)
 
     # ------------------------------------------------------------------
     # System prompt
@@ -146,13 +223,13 @@ class SophiaAgent:
         self,
         context: ConversationContext | None = None,
         memory_context: str | None = None,
+        active_skill: SkillMatch | None = None,
+        active_tools: list[ToolSchema] | None = None,
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
-        only_healthy = self.preflight_result is not None
-        tools = self.pylon.get_tools(only_healthy=only_healthy)
-        if tools:
-            tool_names = [t.name for t in tools]
+        if active_tools:
+            tool_names = [t.name for t in active_tools]
             dynamic_context["Available tools"] = ", ".join(tool_names)
             dynamic_context["Tool use policy"] = (
                 "When a user asks for data or computations and tools are available, "
@@ -175,7 +252,36 @@ class SophiaAgent:
         if memory_context:
             dynamic_context["Memory context"] = memory_context
 
-        return self.personality.to_system_prompt(dynamic_context)
+        if active_skill is not None:
+            active_lines = [f"Name: {active_skill.skill.name}"]
+            if active_skill.skill.description:
+                active_lines.append(f"Description: {active_skill.skill.description}")
+            active_lines.append(
+                f"Match: {active_skill.reason} (score={active_skill.score:.2f})"
+            )
+            if active_skill.skill.allowed_tools is not None:
+                if active_skill.skill.allowed_tools:
+                    active_lines.append(
+                        "Tool allowlist: " + ", ".join(active_skill.skill.allowed_tools)
+                    )
+                else:
+                    active_lines.append("Tool allowlist: (none)")
+            if active_skill.skill.read_allowlist:
+                active_lines.append(
+                    "Read scope: " + ", ".join(active_skill.skill.read_allowlist)
+                )
+            if active_skill.skill.write_allowlist:
+                active_lines.append(
+                    "Write scope: " + ", ".join(active_skill.skill.write_allowlist)
+                )
+            active_lines.append("Instructions:")
+            active_lines.append(active_skill.skill.body)
+            dynamic_context["Active skill"] = "\n".join(active_lines)
+
+        system_prompt = self.personality.to_system_prompt(dynamic_context)
+        if self.soul:
+            system_prompt = f"{system_prompt}\n\n{self.soul}"
+        return system_prompt
 
     @staticmethod
     def _build_enforced_tool_prompt(system_prompt: str) -> str:
@@ -232,6 +338,17 @@ class SophiaAgent:
             return ToolResult.fail(f"Unknown tool: {tool_call.name}", ErrorType.INVALID_INPUT)
         return await self.pylon.execute_tool(tool_call.name, tool_call.input)
 
+    @staticmethod
+    def _scope_tools_for_skill(
+        tools: list[ToolSchema],
+        active_skill: SkillMatch | None,
+    ) -> list[ToolSchema]:
+        if active_skill is None or active_skill.skill.allowed_tools is None:
+            return tools
+
+        allowed = set(active_skill.skill.allowed_tools)
+        return [tool for tool in tools if tool.name in allowed]
+
     # ------------------------------------------------------------------
     # Primary method — async generator of AgentEvents
     # ------------------------------------------------------------------
@@ -250,8 +367,7 @@ class SophiaAgent:
         yield agent_start(context.session_id)
 
         context.add_user_message(message)
-        tools = self._get_tool_schemas()
-        allowed_tool_names = {t.name for t in tools}
+        available_tools = self._get_tool_schemas()
 
         turn = 0
 
@@ -261,12 +377,27 @@ class SophiaAgent:
             yield turn_start(turn)
 
             active_user_message = self._latest_user_text(context) or message
+            active_skill = self.skills.match(active_user_message)
+            if active_skill is not None:
+                yield skill_activated(
+                    name=active_skill.skill.name,
+                    reason=active_skill.reason,
+                    score=active_skill.score,
+                    path=str(active_skill.skill.path),
+                )
+            turn_tools = self._scope_tools_for_skill(available_tools, active_skill)
+            allowed_tool_names = {tool.name for tool in turn_tools}
             memory_context = self.memory.recall_for_prompt(
                 session_id=context.session_id,
                 query=active_user_message,
                 messages=context.messages,
             )
-            system_prompt = self._build_system_prompt(context, memory_context)
+            system_prompt = self._build_system_prompt(
+                context,
+                memory_context,
+                active_skill=active_skill,
+                active_tools=turn_tools,
+            )
             iterations = 0
             last_message: Message | None = None
 
@@ -291,7 +422,7 @@ class SophiaAgent:
                 if self.config.stream:
                     completion = None
                     async for event in self._stream_and_yield(
-                        system_prompt, transformed, tools
+                        system_prompt, transformed, turn_tools
                     ):
                         if isinstance(event, AgentEvent):
                             yield event
@@ -304,7 +435,7 @@ class SophiaAgent:
                         model=self.settings.llm_model,
                         system=system_prompt,
                         messages=transformed,
-                        tools=tools or None,
+                        tools=turn_tools or None,
                     )
 
                 assistant_msg = completion.message
@@ -317,7 +448,10 @@ class SophiaAgent:
                 # If no tool calls, check enforcement then break
                 if not assistant_msg.tool_calls:
                     # Tool enforcement check (first iteration only)
-                    if iterations == 1 and self._should_enforce_tools(message, tools):
+                    if iterations == 1 and self._should_enforce_tools(
+                        active_user_message,
+                        turn_tools,
+                    ):
                         enforced_prompt = self._build_enforced_tool_prompt(system_prompt)
                         system_prompt = enforced_prompt
                         # Remove the assistant message we just added and retry

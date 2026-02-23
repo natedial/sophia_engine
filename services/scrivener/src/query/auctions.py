@@ -1,5 +1,6 @@
 """Query utilities for Treasury auction data."""
 
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -9,9 +10,70 @@ from sqlalchemy import and_, func, desc
 from src.db import get_session
 from src.db.models import TreasuryAuction
 
+logger = logging.getLogger(__name__)
+
 
 class AuctionQuery:
     """Query interface for Treasury auction data."""
+
+    @staticmethod
+    def _auto_sync_announced() -> bool:
+        """Try to sync announced auctions from TreasuryDirect when table has no future rows."""
+        try:
+            from src.fetchers.treasury import TreasuryFetcher
+
+            fetcher = TreasuryFetcher()
+            result = fetcher.fetch_and_store_announced()
+            return result.get("status") == "success"
+        except Exception as exc:
+            logger.warning("Announced auctions auto-sync failed: %s", exc)
+            return False
+
+    @staticmethod
+    def get_upcoming(
+        security_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Get upcoming (future) auction announcements.
+
+        Self-heals: if no future auctions exist in the DB, fetches
+        from TreasuryDirect and retries.
+
+        Args:
+            security_type: Filter by type (Bill, Note, Bond, TIPS, FRN)
+            limit: Max results to return
+
+        Returns:
+            List of upcoming auction records
+        """
+        results = AuctionQuery._query_upcoming(security_type, limit)
+
+        if not results and AuctionQuery._auto_sync_announced():
+            results = AuctionQuery._query_upcoming(security_type, limit)
+
+        return results
+
+    @staticmethod
+    def _query_upcoming(
+        security_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        with get_session() as session:
+            query = session.query(TreasuryAuction).filter(
+                TreasuryAuction.auction_date >= date.today()
+            )
+
+            if security_type:
+                query = query.filter(TreasuryAuction.security_type == security_type)
+
+            query = query.order_by(TreasuryAuction.auction_date)
+
+            if limit:
+                query = query.limit(limit)
+
+            results = query.all()
+
+            return [AuctionQuery._to_dict(a) for a in results]
 
     @staticmethod
     def get_recent(
@@ -243,4 +305,7 @@ class AuctionQuery:
             "direct_bidder_accepted": to_float(auction.direct_bidder_accepted),
             "indirect_bidder_accepted": to_float(auction.indirect_bidder_accepted),
             "reopening": auction.reopening,
+            "announcement_date": auction.announcement_date.isoformat() if auction.announcement_date else None,
+            "auction_format": auction.auction_format,
+            "interest_rate": to_float(auction.interest_rate),
         }
