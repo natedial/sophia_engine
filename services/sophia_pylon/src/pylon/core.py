@@ -1,5 +1,6 @@
 """Pylon - Main gateway interface for backend services."""
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -7,10 +8,12 @@ from typing import Any
 from pylon.clients.arithmos import ArithmosClient
 from pylon.clients.canvas import CanvasClient
 from pylon.clients.scrivener import ScrivenerClient
+from pylon.clients.tholos import TholosClient
 from pylon.tools.arithmos import ArithmosToolExecutor
 from pylon.tools.base import ErrorType, ToolDefinition, ToolResult
 from pylon.tools.canvas import CanvasToolExecutor
 from pylon.tools.scrivener import ScrivenerToolExecutor
+from pylon.tools.tholos import TholosToolExecutor
 
 
 @dataclass
@@ -20,8 +23,9 @@ class PylonConfig:
     scrivener_url: str = "http://localhost:8000"
     arithmos_url: str = "http://localhost:8001"
     canvas_url: str = "http://localhost:8003"
-    # Future services:
-    # kampe_url: str = "http://localhost:8002"
+    tholos_url: str = "http://localhost:8004"
+    max_concurrency_per_service: int = 8
+    tool_timeout_sec: float = 30.0
 
 
 @dataclass
@@ -105,11 +109,13 @@ class Pylon:
         self._scrivener_client = ScrivenerClient(base_url=self.config.scrivener_url)
         self._arithmos_client = ArithmosClient(base_url=self.config.arithmos_url)
         self._canvas_client = CanvasClient(base_url=self.config.canvas_url)
+        self._tholos_client = TholosClient(base_url=self.config.tholos_url)
 
         # Initialize tool executors
         self._scrivener_executor = ScrivenerToolExecutor(self._scrivener_client)
         self._arithmos_executor = ArithmosToolExecutor(self._arithmos_client)
         self._canvas_executor = CanvasToolExecutor(self._canvas_client, self._scrivener_client)
+        self._tholos_executor = TholosToolExecutor(self._tholos_client)
 
         # Build tool routing table: tool_name -> (executor, service_name)
         self._tool_executors: dict[str, tuple[Any, str]] = {}
@@ -118,6 +124,10 @@ class Pylon:
 
         # Track service health status (updated by preflight)
         self._service_status: dict[str, ServiceStatus] = {}
+        self._service_semaphores: dict[str, asyncio.Semaphore] = {
+            service_name: asyncio.Semaphore(max(1, self.config.max_concurrency_per_service))
+            for service_name in self._service_tools
+        }
 
     def _register_tools(self) -> None:
         """Register all tools from all services."""
@@ -142,11 +152,19 @@ class Pylon:
             canvas_tools.append(tool.name)
         self._service_tools["canvas"] = canvas_tools
 
+        # Register Tholos tools
+        tholos_tools = []
+        for tool in self._tholos_executor.get_tools():
+            self._tool_executors[tool.name] = (self._tholos_executor, "tholos")
+            tholos_tools.append(tool.name)
+        self._service_tools["tholos"] = tholos_tools
+
     async def close(self) -> None:
         """Close all client connections."""
         await self._scrivener_client.close()
         await self._arithmos_client.close()
         await self._canvas_client.close()
+        await self._tholos_client.close()
 
     # -------------------------------------------------------------------------
     # Health Checks & Pre-flight
@@ -167,6 +185,8 @@ class Pylon:
                 healthy = await self._arithmos_client.health_check()
             elif name == "canvas":
                 healthy = await self._canvas_client.health_check()
+            elif name == "tholos":
+                healthy = await self._tholos_client.health_check()
             else:
                 healthy = False
 
@@ -267,6 +287,14 @@ class Pylon:
                     continue
             tools.append(tool)
 
+        # Tholos tools
+        for tool in self._tholos_executor.get_tools():
+            if only_healthy:
+                status = self._service_status.get("tholos")
+                if status and not status.healthy:
+                    continue
+            tools.append(tool)
+
         return tools
 
     def get_tools_as_anthropic_schema(self, only_healthy: bool = False) -> list[dict[str, Any]]:
@@ -311,7 +339,24 @@ class Pylon:
                 ErrorType.SERVICE_UNAVAILABLE,
             )
 
-        return await executor.execute(tool_name, parameters)
+        semaphore = self._service_semaphores.get(service_name)
+        if semaphore is None:
+            return ToolResult.fail(
+                f"No concurrency guard configured for service '{service_name}'",
+                ErrorType.UNKNOWN,
+            )
+
+        try:
+            async with semaphore:
+                return await asyncio.wait_for(
+                    executor.execute(tool_name, parameters),
+                    timeout=max(0.1, self.config.tool_timeout_sec),
+                )
+        except TimeoutError:
+            return ToolResult.fail(
+                f"Tool '{tool_name}' timed out after {self.config.tool_timeout_sec:.1f}s",
+                ErrorType.TIMEOUT,
+            )
 
     # -------------------------------------------------------------------------
     # Direct Client Access (for non-LLM consumers)
@@ -331,3 +376,8 @@ class Pylon:
     def canvas(self) -> CanvasClient:
         """Direct access to Canvas client for non-LLM use cases."""
         return self._canvas_client
+
+    @property
+    def tholos(self) -> TholosClient:
+        """Direct access to Tholos client for non-LLM use cases."""
+        return self._tholos_client

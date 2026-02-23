@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from typing import AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
@@ -18,6 +19,9 @@ from sophia.events import (
     message_end,
     message_start,
     skill_activated,
+    subagent_end,
+    subagent_error,
+    subagent_start,
     tool_execution_end,
     tool_execution_start,
     turn_end,
@@ -36,6 +40,7 @@ from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_stor
 from sophia.personality.loader import Personality, load_personality
 from sophia.skills.models import SkillMatch
 from sophia.skills.registry import SkillRegistry
+from sophia.subagents import SubagentOrchestrator, SubagentProfile, SubagentResult, SubagentTask
 
 # Type aliases for steering / follow-up callbacks
 SteeringCallback = Callable[[], list[Message] | None]
@@ -180,6 +185,49 @@ class SophiaAgent:
             implicit_min_overlap=self.settings.skills_implicit_match_min_overlap,
             read_policy=self.read_policy,
         )
+        self.subagent_profiles = self._build_subagent_profiles()
+        self.subagents = SubagentOrchestrator(
+            profiles=self.subagent_profiles,
+            max_parallel_workers=self.settings.subagents_max_parallel_workers,
+        )
+
+    def _build_subagent_profiles(self) -> dict[str, SubagentProfile]:
+        default_timeout = self.settings.subagents_default_timeout_sec
+        default_iters = self.settings.subagents_default_max_tool_iterations
+        default_budget = self.settings.subagents_default_token_budget_chars
+        default_result_chars = self.settings.subagents_default_max_result_chars
+
+        return {
+            "research_worker": SubagentProfile(
+                name="research_worker",
+                instructions=(
+                    "You are a delegated research worker. Use tools to gather evidence, "
+                    "then return concise factual findings with key values and dates."
+                ),
+                allowed_tools=None,
+                max_tool_iterations=default_iters,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
+            "chart_worker": SubagentProfile(
+                name="chart_worker",
+                instructions=(
+                    "You are a delegated chart worker. Use canvas creation tools to create "
+                    "a chart relevant to the request, then report what was created."
+                ),
+                allowed_tools={
+                    "create_timeseries_chart",
+                    "create_comparison_chart",
+                    "create_scatter_chart",
+                    "create_yield_curve_chart",
+                },
+                max_tool_iterations=default_iters,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Personality
@@ -225,6 +273,7 @@ class SophiaAgent:
         memory_context: str | None = None,
         active_skill: SkillMatch | None = None,
         active_tools: list[ToolSchema] | None = None,
+        subagent_context: str | None = None,
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
@@ -251,6 +300,9 @@ class SophiaAgent:
 
         if memory_context:
             dynamic_context["Memory context"] = memory_context
+
+        if subagent_context:
+            dynamic_context["Subagent findings"] = subagent_context
 
         if active_skill is not None:
             active_lines = [f"Name: {active_skill.skill.name}"]
@@ -349,6 +401,144 @@ class SophiaAgent:
         allowed = set(active_skill.skill.allowed_tools)
         return [tool for tool in tools if tool.name in allowed]
 
+    @staticmethod
+    def _scope_tools_for_profile(
+        tools: list[ToolSchema],
+        profile: SubagentProfile,
+    ) -> list[ToolSchema]:
+        if profile.allowed_tools is None:
+            return tools
+        return [tool for tool in tools if tool.name in profile.allowed_tools]
+
+    def _should_delegate_subagents(
+        self,
+        message: str,
+        available_tools: list[ToolSchema],
+    ) -> bool:
+        if not self.settings.subagents_enabled:
+            return False
+        planned = self.subagents.plan_for_message(
+            message=message,
+            available_tools=available_tools,
+            canvas_id=self.canvas_id,
+        )
+        return bool(planned)
+
+    @staticmethod
+    def _format_subagent_summary(result: SubagentResult) -> str:
+        if result.success:
+            summary = result.content.strip()
+            if summary:
+                return f"[{result.profile_name}] {summary}"
+            return f"[{result.profile_name}] completed"
+        error = result.error or "Unknown subagent failure"
+        return f"[{result.profile_name}] ERROR: {error}"
+
+    def _build_subagent_context(self, results: list[SubagentResult]) -> str:
+        lines = ["Delegated subagent outputs:"]
+        for res in results:
+            lines.append(f"- {self._format_subagent_summary(res)}")
+        lines.append("Use these findings as additional context and validate where needed.")
+        return "\n".join(lines)
+
+    async def _run_subagent_task(
+        self,
+        task: SubagentTask,
+        profile: SubagentProfile,
+        parent_run_id: str,
+    ) -> SubagentResult:
+        sub_run_id = f"{parent_run_id}:{task.task_id}"
+        context = ConversationContext(session_id=f"{task.task_id}:{sub_run_id}")
+        context.add_user_message(task.prompt)
+
+        available_tools = self._scope_tools_for_profile(self._get_tool_schemas(), profile)
+        allowed_tool_names = {tool.name for tool in available_tools}
+        worker_prompt = self._build_system_prompt(
+            context=context,
+            memory_context=None,
+            active_skill=None,
+            active_tools=available_tools,
+        )
+        worker_prompt = (
+            f"{worker_prompt}\n\n"
+            f"SUBAGENT PROFILE: {profile.name}\n"
+            f"{profile.instructions}\n"
+            "Return only execution findings for the supervisor. "
+            "Do not address the user directly."
+        )
+
+        chars_used = 0
+        iterations = 0
+        last_message = ""
+
+        while iterations < max(1, profile.max_tool_iterations):
+            iterations += 1
+            transformed = apply_transforms(context.messages, self.config.context_transformers)
+            completion = await self.provider.complete(
+                model=self.settings.llm_model,
+                system=worker_prompt,
+                messages=transformed,
+                tools=available_tools or None,
+            )
+
+            assistant_msg = completion.message
+            last_message = assistant_msg.content.strip()
+            chars_used += len(assistant_msg.content)
+
+            if chars_used > profile.token_budget_chars:
+                return SubagentResult(
+                    task_id=task.task_id,
+                    profile_name=profile.name,
+                    run_id=sub_run_id,
+                    success=False,
+                    error="Subagent token budget exceeded",
+                    token_chars_used=chars_used,
+                )
+
+            context.add_assistant_message(assistant_msg)
+            if not assistant_msg.tool_calls:
+                content = last_message[: profile.max_result_chars]
+                return SubagentResult(
+                    task_id=task.task_id,
+                    profile_name=profile.name,
+                    run_id=sub_run_id,
+                    success=True,
+                    content=content,
+                    token_chars_used=chars_used,
+                )
+
+            tool_results: list[ToolResultMessage] = []
+            for tc in assistant_msg.tool_calls:
+                result = await self._execute_tool(tc, allowed_tool_names)
+                content = result.to_content()
+                chars_used += len(content)
+                if chars_used > profile.token_budget_chars:
+                    return SubagentResult(
+                        task_id=task.task_id,
+                        profile_name=profile.name,
+                        run_id=sub_run_id,
+                        success=False,
+                        error="Subagent token budget exceeded",
+                        token_chars_used=chars_used,
+                    )
+                tool_results.append(
+                    ToolResultMessage(
+                        tool_call_id=tc.id,
+                        content=content,
+                        is_error=not result.success,
+                    )
+                )
+            context.add_tool_results(tool_results)
+
+        return SubagentResult(
+            task_id=task.task_id,
+            profile_name=profile.name,
+            run_id=sub_run_id,
+            success=False,
+            error="Subagent max tool iterations reached",
+            token_chars_used=chars_used,
+        )
+
     # ------------------------------------------------------------------
     # Primary method — async generator of AgentEvents
     # ------------------------------------------------------------------
@@ -357,6 +547,10 @@ class SophiaAgent:
         self,
         message: str,
         context: ConversationContext,
+        *,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        task_id: str | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """
         Process a user message, yielding AgentEvents as the agent works.
@@ -364,17 +558,78 @@ class SophiaAgent:
         This is the primary interface — callers iterate the generator and
         handle events (render text, show tool progress, etc.).
         """
-        yield agent_start(context.session_id)
+        active_run_id = run_id or str(uuid.uuid4())
+        yield agent_start(
+            context.session_id,
+            run_id=active_run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        )
 
         context.add_user_message(message)
         available_tools = self._get_tool_schemas()
+        subagent_context: str | None = None
+        if self._should_delegate_subagents(message, available_tools):
+            tasks = self.subagents.plan_for_message(
+                message=message,
+                available_tools=available_tools,
+                canvas_id=self.canvas_id,
+            )
+            child_run_ids: dict[str, str] = {}
+            for delegated_task in tasks:
+                profile_name = delegated_task.profile_name
+                child_run_id = f"{active_run_id}:{delegated_task.task_id}"
+                child_run_ids[delegated_task.task_id] = child_run_id
+                yield subagent_start(
+                    name=profile_name,
+                    task=delegated_task.prompt,
+                    run_id=child_run_id,
+                    parent_run_id=active_run_id,
+                    task_id=delegated_task.task_id,
+                )
+
+            results = await self.subagents.execute_plan(
+                tasks=tasks,
+                parent_run_id=active_run_id,
+                run_worker=self._run_subagent_task,
+            )
+            for result in results:
+                summary = self._format_subagent_summary(result)
+                child_run_id = child_run_ids.get(
+                    result.task_id,
+                    f"{active_run_id}:{result.task_id}",
+                )
+                if result.success:
+                    yield subagent_end(
+                        name=result.profile_name,
+                        summary=summary,
+                        run_id=child_run_id,
+                        parent_run_id=active_run_id,
+                        task_id=result.task_id,
+                    )
+                else:
+                    yield subagent_error(
+                        name=result.profile_name,
+                        error=result.error or "Unknown subagent failure",
+                        timed_out=result.timed_out,
+                        run_id=child_run_id,
+                        parent_run_id=active_run_id,
+                        task_id=result.task_id,
+                    )
+            if results:
+                subagent_context = self._build_subagent_context(results)
 
         turn = 0
 
         # OUTER LOOP: follow-up messages
         while True:
             turn += 1
-            yield turn_start(turn)
+            yield turn_start(
+                turn,
+                run_id=active_run_id,
+                parent_run_id=parent_run_id,
+                task_id=task_id,
+            )
 
             active_user_message = self._latest_user_text(context) or message
             active_skill = self.skills.match(active_user_message)
@@ -384,6 +639,9 @@ class SophiaAgent:
                     reason=active_skill.reason,
                     score=active_skill.score,
                     path=str(active_skill.skill.path),
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
                 )
             turn_tools = self._scope_tools_for_skill(available_tools, active_skill)
             allowed_tool_names = {tool.name for tool in turn_tools}
@@ -397,6 +655,7 @@ class SophiaAgent:
                 memory_context,
                 active_skill=active_skill,
                 active_tools=turn_tools,
+                subagent_context=subagent_context,
             )
             iterations = 0
             last_message: Message | None = None
@@ -417,12 +676,21 @@ class SophiaAgent:
                 )
 
                 # Call provider
-                yield message_start()
+                yield message_start(
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
 
                 if self.config.stream:
                     completion = None
                     async for event in self._stream_and_yield(
-                        system_prompt, transformed, turn_tools
+                        system_prompt,
+                        transformed,
+                        turn_tools,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
                     ):
                         if isinstance(event, AgentEvent):
                             yield event
@@ -439,7 +707,12 @@ class SophiaAgent:
                     )
 
                 assistant_msg = completion.message
-                yield message_end(assistant_msg)
+                yield message_end(
+                    assistant_msg,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
 
                 # Add assistant message to context
                 context.add_assistant_message(assistant_msg)
@@ -463,13 +736,25 @@ class SophiaAgent:
                 # Execute tool calls
                 tool_results: list[ToolResultMessage] = []
                 for tc in assistant_msg.tool_calls:
-                    yield tool_execution_start(tc)
+                    yield tool_execution_start(
+                        tc,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
 
                     result = await self._execute_tool(tc, allowed_tool_names)
                     content = result.to_content()
                     is_error = not result.success
 
-                    yield tool_execution_end(tc, content, is_error)
+                    yield tool_execution_end(
+                        tc,
+                        content,
+                        is_error,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
 
                     tool_results.append(
                         ToolResultMessage(
@@ -489,7 +774,12 @@ class SophiaAgent:
                 # Add tool results to context
                 context.add_tool_results(tool_results)
 
-            yield turn_end(turn)
+            yield turn_end(
+                turn,
+                run_id=active_run_id,
+                parent_run_id=parent_run_id,
+                task_id=task_id,
+            )
 
             if last_message is not None:
                 self.memory.ingest_turn(
@@ -507,7 +797,12 @@ class SophiaAgent:
 
             break
 
-        yield agent_end(context.session_id)
+        yield agent_end(
+            context.session_id,
+            run_id=active_run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        )
 
     # ------------------------------------------------------------------
     # Streaming helper
@@ -518,6 +813,10 @@ class SophiaAgent:
         system: str,
         messages: list[Message],
         tools: list[ToolSchema],
+        *,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        task_id: str | None = None,
     ) -> AsyncGenerator[AgentEvent | CompletionResponse, None]:
         """Stream from provider, yielding AgentEvents for deltas and the
         CompletionResponse as the final item."""
@@ -528,7 +827,12 @@ class SophiaAgent:
             tools=tools or None,
         ):
             if isinstance(event, ContentDelta):
-                yield message_delta(event.text)
+                yield message_delta(
+                    event.text,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
             elif isinstance(event, StreamComplete):
                 yield event.response
 
