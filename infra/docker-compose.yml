@@ -103,6 +103,23 @@ services:
       timeout: 5s
       retries: 8
 
+  sophia_tholos:
+    build: ../services/sophia_tholos
+    ports:
+      - "${THOLOS_PORT:-8004}:8004"
+    environment:
+      THOLOS_DB_PATH: /corpus/chunks.sqlite
+      THOLOS_NPZ_PATH: /corpus/embeddings.npz
+    volumes:
+      - ${RESEARCH_CORPUS_PATH:-../../research-store/distill_out}:/corpus:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   sophia_gateway:
     build:
       context: ..
@@ -113,6 +130,7 @@ services:
       SCRIVENER_BASE_URL: http://scrivener:8000
       ARITHMOS_BASE_URL: http://sophia_arithmos:8001
       CANVAS_BASE_URL: http://sophia_canvas:8003
+      THOLOS_BASE_URL: http://sophia_tholos:8004
       CANVAS_DASHBOARD_URL: http://localhost:${DASHBOARD_PORT:-13000}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
@@ -138,6 +156,8 @@ services:
       sophia_arithmos:
         condition: service_healthy
       sophia_canvas:
+        condition: service_healthy
+      sophia_tholos:
         condition: service_healthy
     healthcheck:
       test:

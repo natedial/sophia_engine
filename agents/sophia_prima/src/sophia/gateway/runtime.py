@@ -167,6 +167,7 @@ class GatewayRuntime:
             scrivener_url=self.settings.scrivener_base_url,
             arithmos_url=self.settings.arithmos_base_url,
             canvas_url=self.settings.canvas_base_url,
+            tholos_url=self.settings.tholos_base_url,
         )
         pylon = Pylon(config)
         # Prime health state before serving traffic.

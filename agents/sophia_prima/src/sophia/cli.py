@@ -117,6 +117,23 @@ async def chat_loop(agent: SophiaAgent, session_id: str | None = None) -> None:
                         console.print(f" [green]done[/green]")
                     tools_used.append(_format_tool_call(tc))
 
+                elif event.type == EventType.SUBAGENT_START:
+                    name = event.data.get("name", "subagent")
+                    task = event.data.get("task", "")
+                    display_task = task[:80] + "..." if len(task) > 80 else task
+                    console.print(f"\n  [dim]Subagent start: {name} - {display_task}[/dim]")
+
+                elif event.type == EventType.SUBAGENT_END:
+                    name = event.data.get("name", "subagent")
+                    summary = event.data.get("summary", "")
+                    display_summary = summary[:120] + "..." if len(summary) > 120 else summary
+                    console.print(f"\n  [dim]Subagent done: {name} - {display_summary}[/dim]")
+
+                elif event.type == EventType.SUBAGENT_ERROR:
+                    name = event.data.get("name", "subagent")
+                    error = event.data.get("error", "unknown error")
+                    console.print(f"\n  [yellow]Subagent error ({name}): {error}[/yellow]")
+
             # Show tool summary after all events
             if tools_used:
                 console.print(f"\n[dim]Tools used: {' → '.join(tools_used)}[/dim]")
@@ -168,6 +185,7 @@ async def setup_pylon(settings) -> tuple[Pylon, PreflightResult]:
         scrivener_url=settings.scrivener_base_url,
         arithmos_url=settings.arithmos_base_url,
         canvas_url=settings.canvas_base_url,
+        tholos_url=settings.tholos_base_url,
     )
     pylon = Pylon(config)
 

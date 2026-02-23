@@ -114,6 +114,10 @@ class Settings(BaseSettings):
         default="http://localhost:8003",
         description="Base URL for Canvas visualization service",
     )
+    tholos_base_url: str = Field(
+        default="http://localhost:8004",
+        description="Base URL for Tholos research search service",
+    )
     canvas_dashboard_url: str = Field(
         default="http://localhost:3000",
         description="Frontend dashboard URL shown to user at session start",
@@ -278,6 +282,32 @@ class Settings(BaseSettings):
     memory_compaction_batch_size: int = Field(
         default=40,
         description="Maximum number of episodic records compacted in one pass",
+    )
+
+    # Subagent Orchestration (thin-slice)
+    subagents_enabled: bool = Field(
+        default=False,
+        description="Enable supervisor-driven subagent delegation flow",
+    )
+    subagents_max_parallel_workers: int = Field(
+        default=2,
+        description="Maximum delegated workers running concurrently",
+    )
+    subagents_default_timeout_sec: float = Field(
+        default=20.0,
+        description="Default timeout applied to one delegated worker task",
+    )
+    subagents_default_max_tool_iterations: int = Field(
+        default=4,
+        description="Default max tool-loop iterations for delegated workers",
+    )
+    subagents_default_token_budget_chars: int = Field(
+        default=24000,
+        description="Approximate token budget for delegated workers (character proxy)",
+    )
+    subagents_default_max_result_chars: int = Field(
+        default=4000,
+        description="Maximum worker summary length merged back to supervisor",
     )
 
     def build_write_policy(self) -> WritePolicy:
