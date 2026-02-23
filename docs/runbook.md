@@ -76,6 +76,7 @@ Gateway endpoints:
 Gateway configuration:
 - Set `OPENAI_API_KEY` in `infra/.env` for real model responses.
 - Optional: set `LLM_PROVIDER=anthropic` plus `ANTHROPIC_API_KEY` to switch provider.
+- Optional: set `LLM_PROVIDER=groq` plus `GROQ_API_KEY` to switch provider.
 - `PERSONALITY_PATH` and `SOUL_PATH` control the agent prompt components loaded by gateway.
 - Set `TELEGRAM_BOT_TOKEN` (single bot) or `TELEGRAM_ACCOUNTS_JSON` (multi-bot).
 - Optional deterministic bindings via `GATEWAY_BINDINGS_JSON`.

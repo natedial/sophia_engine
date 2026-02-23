@@ -46,5 +46,6 @@ Gateway notes:
 - `sophia_gateway` serves `GET /health`, `POST /v1/messages`, and `WS /ws`.
 - Set `OPENAI_API_KEY` in `infra/.env` to enable live agent responses.
 - Optional: set `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` to use Anthropic instead.
+- Optional: set `LLM_PROVIDER=groq` + `GROQ_API_KEY` to use Groq (OpenAI-compatible API).
 - Optional: set `PERSONALITY_PATH` and `SOUL_PATH` to override prompt component files.
 - Set `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_ACCOUNTS_JSON`) to enable Telegram polling.

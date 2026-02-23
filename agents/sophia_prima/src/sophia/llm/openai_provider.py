@@ -185,7 +185,7 @@ class OpenAIProvider:
         content = message_raw.get("content") or ""
 
         tool_calls: list[ToolCall] = []
-        for i, tc in enumerate(message_raw.get("tool_calls", [])):
+        for i, tc in enumerate(message_raw.get("tool_calls") or []):
             function = tc.get("function") or {}
             name = str(function.get("name") or "")
             args_raw = function.get("arguments") or "{}"

@@ -22,9 +22,11 @@ Environment-driven routing:
 - `GATEWAY_BINDINGS_JSON`
 
 LLM provider:
-- `LLM_PROVIDER` (`openai` default, `anthropic` optional)
+- `LLM_PROVIDER` (`openai` default, `anthropic` or `groq` optional)
 - `OPENAI_API_KEY` (required when `LLM_PROVIDER=openai`)
 - `OPENAI_BASE_URL` (optional override)
+- `GROQ_API_KEY` (required when `LLM_PROVIDER=groq`)
+- `GROQ_BASE_URL` (optional override; default `https://api.groq.com`)
 - `ANTHROPIC_API_KEY` (required when `LLM_PROVIDER=anthropic`)
 - `PERSONALITY_PATH` (optional personality markdown override)
 - `SOUL_PATH` (optional soul markdown override)
