@@ -156,10 +156,18 @@ class GatewayRuntime:
                 api_key=self.settings.openai_api_key,
                 base_url=self.settings.openai_base_url,
             )
+        if provider_name == "groq":
+            if not self.settings.groq_api_key:
+                raise ValueError("GROQ_API_KEY is required for gateway operation")
+            from sophia.llm.groq_provider import GroqProvider
+            return GroqProvider(
+                api_key=self.settings.groq_api_key,
+                base_url=self.settings.groq_base_url,
+            )
 
         raise ValueError(
             f"unsupported llm_provider '{self.settings.llm_provider}', "
-            "gateway currently supports: anthropic, openai"
+            "gateway currently supports: anthropic, openai, groq"
         )
 
     async def _create_pylon(self) -> Pylon:

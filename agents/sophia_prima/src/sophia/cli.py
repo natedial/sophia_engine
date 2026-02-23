@@ -172,10 +172,16 @@ def _create_provider(settings):
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
         )
+    if provider_name == "groq":
+        from sophia.llm.groq_provider import GroqProvider
+        return GroqProvider(
+            api_key=settings.groq_api_key,
+            base_url=settings.groq_base_url,
+        )
 
     raise ValueError(
         f"Unsupported LLM provider: '{provider_name}'. "
-        "Supported providers: anthropic, openai"
+        "Supported providers: anthropic, openai, groq"
     )
 
 
@@ -248,6 +254,12 @@ async def async_main() -> None:
     if provider_name == "openai" and not settings.openai_api_key:
         console.print(
             "[red]Error: OPENAI_API_KEY not set.[/red]\n"
+            "Please set it in your .env file or environment."
+        )
+        return
+    if provider_name == "groq" and not settings.groq_api_key:
+        console.print(
+            "[red]Error: GROQ_API_KEY not set.[/red]\n"
             "Please set it in your .env file or environment."
         )
         return

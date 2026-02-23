@@ -35,13 +35,18 @@ class Settings(BaseSettings):
     # LLM Configuration
     llm_provider: str = Field(
         default="openai",
-        description="LLM provider: anthropic, openai, google",
+        description="LLM provider: anthropic, openai, groq",
     )
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
     openai_base_url: str = Field(
         default="https://api.openai.com/v1",
         description="Base URL for OpenAI-compatible chat completions API",
+    )
+    groq_api_key: str = Field(default="", description="Groq API key")
+    groq_base_url: str = Field(
+        default="https://api.groq.com",
+        description="Base URL for Groq API (SDK appends /openai/v1 internally)",
     )
     google_api_key: str = Field(default="", description="Google AI API key")
     llm_model: str = Field(

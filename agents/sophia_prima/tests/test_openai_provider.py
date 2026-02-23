@@ -44,3 +44,25 @@ def test_openai_parse_response_with_tool_calls() -> None:
     assert len(completion.message.tool_calls) == 1
     assert completion.message.tool_calls[0].name == "get_latest_value"
     assert completion.message.tool_calls[0].input == {"series_id": "UNRATE"}
+
+
+def test_openai_parse_response_with_null_tool_calls() -> None:
+    raw = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "tool_calls": None,
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 2},
+    }
+
+    completion = OpenAIProvider._parse_response(raw)
+
+    assert completion.stop_reason == StopReason.END_TURN
+    assert completion.message.content == "ok"
+    assert completion.message.tool_calls == []
