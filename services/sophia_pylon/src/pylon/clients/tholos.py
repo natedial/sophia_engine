@@ -29,6 +29,17 @@ class TholosClient(BaseClient):
         semantic_weight: float | None = None,
         min_lexical_score: float | None = None,
         semantic_tail_mode: str | None = None,
+        run_id: str | None = None,
+        run_ids: list[str] | None = None,
+        source_paths: list[str] | None = None,
+        exclude_source_paths: list[str] | None = None,
+        source_path_prefix: str | None = None,
+        source_path_contains: str | None = None,
+        min_page_number: int | None = None,
+        max_page_number: int | None = None,
+        max_per_source: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, Any]:
         """Hybrid search over the research corpus."""
         client = await self._get_client()
@@ -41,6 +52,28 @@ class TholosClient(BaseClient):
             body["min_lexical_score"] = min_lexical_score
         if semantic_tail_mode is not None:
             body["semantic_tail_mode"] = semantic_tail_mode
+        if run_id is not None:
+            body["run_id"] = run_id
+        if run_ids is not None:
+            body["run_ids"] = run_ids
+        if source_paths is not None:
+            body["source_paths"] = source_paths
+        if exclude_source_paths is not None:
+            body["exclude_source_paths"] = exclude_source_paths
+        if source_path_prefix is not None:
+            body["source_path_prefix"] = source_path_prefix
+        if source_path_contains is not None:
+            body["source_path_contains"] = source_path_contains
+        if min_page_number is not None:
+            body["min_page_number"] = min_page_number
+        if max_page_number is not None:
+            body["max_page_number"] = max_page_number
+        if max_per_source is not None:
+            body["max_per_source"] = max_per_source
+        if date_from is not None:
+            body["date_from"] = date_from
+        if date_to is not None:
+            body["date_to"] = date_to
         response = await client.post("/search", json=body)
         response.raise_for_status()
         return response.json()

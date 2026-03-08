@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, AsyncIterator
 
 import httpx
@@ -63,7 +64,12 @@ class OpenAIProvider:
             tools=tools,
             max_tokens=max_tokens,
         )
-        response = await self._client.post("/chat/completions", json=payload)
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"OpenAI API timeout: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"OpenAI API transport error: {exc}") from exc
         if response.status_code >= 400:
             raise RuntimeError(
                 f"OpenAI API error HTTP {response.status_code}: {response.text}"
@@ -107,9 +113,10 @@ class OpenAIProvider:
         tools: list[ToolSchema] | None,
         max_tokens: int,
     ) -> dict[str, Any]:
+        token_param = _max_tokens_param_for_model(model)
         payload: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            token_param: max_tokens,
             "messages": self._messages_to_openai(system=system, messages=messages),
         }
         if tools:
@@ -182,7 +189,7 @@ class OpenAIProvider:
         choice = choices[0]
 
         message_raw = choice.get("message", {})
-        content = message_raw.get("content") or ""
+        content = _coerce_content_to_text(message_raw.get("content"))
 
         tool_calls: list[ToolCall] = []
         for i, tc in enumerate(message_raw.get("tool_calls") or []):
@@ -197,7 +204,14 @@ class OpenAIProvider:
                 )
             )
 
+        # Groq gpt-oss models can emit tool calls inline in message content
+        # instead of OpenAI's `tool_calls` array. Parse those tags as a fallback.
+        if not tool_calls:
+            content, tool_calls = _extract_inline_tool_calls(content)
+
         stop_reason = _STOP_REASON_MAP.get(choice.get("finish_reason"), StopReason.END_TURN)
+        if tool_calls:
+            stop_reason = StopReason.TOOL_USE
         usage_raw = raw.get("usage") or {}
         usage = TokenUsage(
             input_tokens=int(usage_raw.get("prompt_tokens", 0)),
@@ -236,3 +250,79 @@ def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     return {"value": parsed}
+
+
+_INLINE_TOOL_CALL_RE = re.compile(
+    r"<\|tool_call_begin\|>(?P<name>.*?)"
+    r"<\|tool_call_argument_begin\|>(?P<args>.*?)"
+    r"<\|tool_call_end\|>",
+    flags=re.DOTALL,
+)
+
+
+def _max_tokens_param_for_model(model: str) -> str:
+    """Map model families to OpenAI token-budget parameter names."""
+    if model.strip().lower().startswith("gpt-5"):
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
+def _coerce_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _extract_inline_tool_calls(content: str) -> tuple[str, list[ToolCall]]:
+    if "<|tool_call_begin|>" not in content:
+        return content, []
+
+    matches = list(_INLINE_TOOL_CALL_RE.finditer(content))
+    if not matches:
+        return content, []
+
+    tool_calls: list[ToolCall] = []
+    cleaned = content
+    for i, match in enumerate(matches):
+        raw_name = match.group("name").strip()
+        args_raw = match.group("args").strip()
+        tool_id = f"tool_call_{i + 1}"
+
+        if ":" in raw_name:
+            name_head, name_tail = raw_name.rsplit(":", 1)
+            if name_tail.strip().isdigit():
+                raw_name = name_head.strip()
+                tool_id = f"tool_call_{name_tail.strip()}"
+
+        if raw_name.startswith("functions."):
+            raw_name = raw_name[len("functions.") :]
+
+        if not raw_name:
+            continue
+
+        tool_calls.append(
+            ToolCall(
+                id=tool_id,
+                name=raw_name,
+                input=_parse_tool_arguments(args_raw),
+            )
+        )
+
+        cleaned = cleaned.replace(match.group(0), "")
+
+    cleaned = (
+        cleaned.replace("<|tool_calls_section_begin|>", "")
+        .replace("<|tool_calls_section_end|>", "")
+        .strip()
+    )
+    return cleaned, tool_calls

@@ -7,6 +7,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -25,6 +26,36 @@ class SearchResult:
     lexical_score: float
     semantic_score: float
     hybrid_score: float
+
+
+@dataclass(frozen=True)
+class SearchScope:
+    run_ids: tuple[str, ...] = ()
+    source_paths: tuple[str, ...] = ()
+    exclude_source_paths: tuple[str, ...] = ()
+    source_path_prefix: str | None = None
+    source_path_contains: str | None = None
+    min_page_number: int | None = None
+    max_page_number: int | None = None
+    max_per_source: int | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+
+    @property
+    def has_filters(self) -> bool:
+        return any(
+            (
+                self.run_ids,
+                self.source_paths,
+                self.exclude_source_paths,
+                self.source_path_prefix,
+                self.source_path_contains,
+                self.min_page_number is not None,
+                self.max_page_number is not None,
+                self.date_from,
+                self.date_to,
+            )
+        )
 
 
 class HybridSearchEngine:
@@ -48,6 +79,16 @@ class HybridSearchEngine:
         query: str,
         limit: int = 10,
         run_id: str | None = None,
+        run_ids: list[str] | None = None,
+        source_paths: list[str] | None = None,
+        exclude_source_paths: list[str] | None = None,
+        source_path_prefix: str | None = None,
+        source_path_contains: str | None = None,
+        min_page_number: int | None = None,
+        max_page_number: int | None = None,
+        max_per_source: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
         keyword_weight: float = 0.55,
         semantic_weight: float = 0.45,
         min_lexical_score: float = 0.05,
@@ -58,20 +99,49 @@ class HybridSearchEngine:
         if not query or limit <= 0:
             return []
 
+        scope = self._build_scope(
+            run_id=run_id,
+            run_ids=run_ids,
+            source_paths=source_paths,
+            exclude_source_paths=exclude_source_paths,
+            source_path_prefix=source_path_prefix,
+            source_path_contains=source_path_contains,
+            min_page_number=min_page_number,
+            max_page_number=max_page_number,
+            max_per_source=max_per_source,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        allowed_chunk_ids = self._chunk_ids_for_scope(scope) if scope.has_filters else None
+        if allowed_chunk_ids is not None and not allowed_chunk_ids:
+            return []
+
         self._last_semantic_error = None
         candidate_limit = max(limit * 8, 50)
 
         lexical_scores: dict[str, float] = {}
         if keyword_weight > 0.0 or semantic_weight <= 0.0:
-            lexical_scores = self._lexical_scores(query, run_id=run_id, limit=candidate_limit)
+            lexical_scores = self._lexical_scores(
+                query,
+                scope=scope,
+                limit=candidate_limit,
+            )
 
         semantic_scores: dict[str, float] = {}
         if semantic_weight > 0.0:
-            semantic_scores = self._semantic_scores(query, run_id=run_id, limit=candidate_limit)
+            semantic_scores = self._semantic_scores(
+                query,
+                allowed_chunk_ids=allowed_chunk_ids,
+                limit=candidate_limit,
+            )
 
         if semantic_weight > 0.0 and not semantic_scores:
             if not lexical_scores:
-                lexical_scores = self._lexical_scores(query, run_id=run_id, limit=candidate_limit)
+                lexical_scores = self._lexical_scores(
+                    query,
+                    scope=scope,
+                    limit=candidate_limit,
+                )
             semantic_weight = 0.0
             keyword_weight = 1.0
         elif lexical_scores and not semantic_scores:
@@ -118,14 +188,23 @@ class HybridSearchEngine:
             final_scores.append((chunk_id, lexical, semantic, hybrid))
 
         final_scores.sort(key=lambda row: row[3], reverse=True)
-        top = final_scores[:limit]
-        metadata = self._load_chunk_metadata([row[0] for row in top])
+        selection_pool = final_scores[:limit]
+        if scope.max_per_source:
+            pool_size = min(len(final_scores), max(limit * 6, limit))
+            selection_pool = final_scores[:pool_size]
+        metadata = self._load_chunk_metadata([row[0] for row in selection_pool])
 
         results: list[SearchResult] = []
-        for chunk_id, lexical, semantic, hybrid in top:
+        source_counts: dict[str, int] = {}
+        for chunk_id, lexical, semantic, hybrid in selection_pool:
             chunk = metadata.get(chunk_id)
             if not chunk:
                 continue
+            if scope.max_per_source:
+                source_key = str(chunk.get("source_path") or "").strip().lower() or "__none__"
+                if source_counts.get(source_key, 0) >= scope.max_per_source:
+                    continue
+                source_counts[source_key] = source_counts.get(source_key, 0) + 1
             results.append(
                 SearchResult(
                     chunk_id=chunk_id,
@@ -140,6 +219,8 @@ class HybridSearchEngine:
                     hybrid_score=hybrid,
                 )
             )
+            if len(results) >= limit:
+                break
 
         return results
 
@@ -177,18 +258,18 @@ class HybridSearchEngine:
         except Exception:
             return []
 
-    def _lexical_scores(self, query: str, run_id: str | None, limit: int) -> dict[str, float]:
+    def _lexical_scores(self, query: str, scope: SearchScope, limit: int) -> dict[str, float]:
         text_query, keyword_query, phrase_query = self._build_lexical_queries(query)
         text_rows = self._fts_query(
             table="chunks_fts",
             query=text_query,
-            run_id=run_id,
+            scope=scope,
             limit=limit,
         )
         keyword_rows = self._fts_query(
             table="keyword_fts",
             query=keyword_query,
-            run_id=run_id,
+            scope=scope,
             limit=limit,
         )
         phrase_rows: list[tuple[str, float]] = []
@@ -196,7 +277,7 @@ class HybridSearchEngine:
             phrase_rows = self._fts_query(
                 table="chunks_fts",
                 query=phrase_query,
-                run_id=run_id,
+                scope=scope,
                 limit=limit,
             )
 
@@ -223,7 +304,7 @@ class HybridSearchEngine:
         self,
         table: str,
         query: str,
-        run_id: str | None,
+        scope: SearchScope,
         limit: int,
     ) -> list[tuple[str, float]]:
         if not query.strip():
@@ -236,9 +317,10 @@ class HybridSearchEngine:
             f"WHERE {table} MATCH ?"
         )
         params: list[object] = [query]
-        if run_id:
-            sql += " AND c.run_id = ?"
-            params.append(run_id)
+        scope_conditions, scope_params = self._build_scope_sql(scope)
+        if scope_conditions:
+            sql += " AND " + " AND ".join(scope_conditions)
+            params.extend(scope_params)
         sql += " ORDER BY score LIMIT ?"
         params.append(limit)
 
@@ -253,7 +335,12 @@ class HybridSearchEngine:
                 rows = conn.execute(sql, params).fetchall()
         return [(str(row[0]), float(row[1])) for row in rows]
 
-    def _semantic_scores(self, query: str, run_id: str | None, limit: int) -> dict[str, float]:
+    def _semantic_scores(
+        self,
+        query: str,
+        allowed_chunk_ids: set[str] | None,
+        limit: int,
+    ) -> dict[str, float]:
         if self._embedding_matrix is None or self._embedding_chunk_ids is None:
             return {}
         if self._embedding_matrix.size == 0:
@@ -268,11 +355,13 @@ class HybridSearchEngine:
             self._last_semantic_error = f"{type(exc).__name__}: {message[:180]}"
             return {}
 
-        if run_id:
-            allowed_ids = self._chunk_ids_for_run(run_id)
-            if not allowed_ids:
+        if allowed_chunk_ids is not None:
+            if not allowed_chunk_ids:
                 return {}
-            mask = np.array([chunk_id in allowed_ids for chunk_id in self._embedding_chunk_ids], dtype=bool)
+            mask = np.array(
+                [chunk_id in allowed_chunk_ids for chunk_id in self._embedding_chunk_ids],
+                dtype=bool,
+            )
             if not np.any(mask):
                 return {}
             idxs = np.where(mask)[0]
@@ -324,10 +413,108 @@ class HybridSearchEngine:
             }
         return metadata
 
-    def _chunk_ids_for_run(self, run_id: str) -> set[str]:
+    def _chunk_ids_for_scope(self, scope: SearchScope) -> set[str]:
+        sql = "SELECT chunk_id FROM chunks c"
+        params: list[object] = []
+        scope_conditions, scope_params = self._build_scope_sql(scope)
+        if scope_conditions:
+            sql += " WHERE " + " AND ".join(scope_conditions)
+            params.extend(scope_params)
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute("SELECT chunk_id FROM chunks WHERE run_id = ?", (run_id,)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return {str(row[0]) for row in rows}
+
+    @staticmethod
+    def _build_scope(
+        *,
+        run_id: str | None,
+        run_ids: list[str] | None,
+        source_paths: list[str] | None,
+        exclude_source_paths: list[str] | None,
+        source_path_prefix: str | None,
+        source_path_contains: str | None,
+        min_page_number: int | None,
+        max_page_number: int | None,
+        max_per_source: int | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> SearchScope:
+        run_scope = _normalize_string_sequence(run_ids)
+        if isinstance(run_id, str) and run_id.strip():
+            run_scope.add(run_id.strip())
+
+        include_sources = _normalize_string_sequence(source_paths)
+        exclude_sources = _normalize_string_sequence(exclude_source_paths)
+
+        prefix = source_path_prefix.strip() if isinstance(source_path_prefix, str) else ""
+        contains = source_path_contains.strip() if isinstance(source_path_contains, str) else ""
+        min_page = min_page_number if isinstance(min_page_number, int) and min_page_number > 0 else None
+        max_page = max_page_number if isinstance(max_page_number, int) and max_page_number > 0 else None
+        if min_page is not None and max_page is not None and min_page > max_page:
+            min_page, max_page = max_page, min_page
+
+        per_source = max_per_source if isinstance(max_per_source, int) and max_per_source > 0 else None
+        if per_source is not None:
+            per_source = max(1, min(20, per_source))
+
+        return SearchScope(
+            run_ids=tuple(sorted(run_scope)),
+            source_paths=tuple(sorted(include_sources)),
+            exclude_source_paths=tuple(sorted(exclude_sources)),
+            source_path_prefix=prefix or None,
+            source_path_contains=contains or None,
+            min_page_number=min_page,
+            max_page_number=max_page,
+            max_per_source=per_source,
+            date_from=date_from.strip() if isinstance(date_from, str) and date_from.strip() else None,
+            date_to=date_to.strip() if isinstance(date_to, str) and date_to.strip() else None,
+        )
+
+    @staticmethod
+    def _build_scope_sql(scope: SearchScope) -> tuple[list[str], list[Any]]:
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if scope.run_ids:
+            placeholders = ",".join("?" for _ in scope.run_ids)
+            conditions.append(f"c.run_id IN ({placeholders})")
+            params.extend(scope.run_ids)
+
+        if scope.source_paths:
+            placeholders = ",".join("?" for _ in scope.source_paths)
+            conditions.append(f"c.source_path IN ({placeholders})")
+            params.extend(scope.source_paths)
+
+        if scope.exclude_source_paths:
+            placeholders = ",".join("?" for _ in scope.exclude_source_paths)
+            conditions.append(f"(c.source_path IS NULL OR c.source_path NOT IN ({placeholders}))")
+            params.extend(scope.exclude_source_paths)
+
+        if scope.source_path_prefix:
+            conditions.append("LOWER(COALESCE(c.source_path, '')) LIKE ?")
+            params.append(f"{scope.source_path_prefix.lower()}%")
+
+        if scope.source_path_contains:
+            conditions.append("LOWER(COALESCE(c.source_path, '')) LIKE ?")
+            params.append(f"%{scope.source_path_contains.lower()}%")
+
+        if scope.min_page_number is not None:
+            conditions.append("c.page_number >= ?")
+            params.append(scope.min_page_number)
+
+        if scope.max_page_number is not None:
+            conditions.append("c.page_number <= ?")
+            params.append(scope.max_page_number)
+
+        if scope.date_from:
+            conditions.append("c.created_at >= ?")
+            params.append(scope.date_from)
+
+        if scope.date_to:
+            conditions.append("c.created_at <= ?")
+            params.append(scope.date_to)
+
+        return conditions, params
 
     def _to_keyword_query(self, query: str) -> str:
         tokens = re.findall(r'"[^"]+"|\w[\w\-]*', query.lower())
@@ -440,3 +627,16 @@ def _best_query_phrase(query: str) -> str | None:
         return None
     longest = max(runs, key=len)
     return " ".join(longest)
+
+
+def _normalize_string_sequence(values: list[str] | tuple[str, ...] | None) -> set[str]:
+    normalized: set[str] = set()
+    if not values:
+        return normalized
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if cleaned:
+            normalized.add(cleaned)
+    return normalized

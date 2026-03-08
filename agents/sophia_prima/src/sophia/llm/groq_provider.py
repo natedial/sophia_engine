@@ -68,7 +68,10 @@ class GroqProvider:
             response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             status = getattr(exc, "status_code", "unknown")
-            if status == 401:
+            lowered = str(exc).lower()
+            if "timeout" in lowered or "timed out" in lowered:
+                raise RuntimeError(f"Groq API timeout: {exc}") from exc
+            if status in {401, 413, 429}:
                 fallback = await asyncio.to_thread(
                     self._fallback_client.post,
                     "/chat/completions",
@@ -76,6 +79,31 @@ class GroqProvider:
                 )
                 if fallback.status_code < 400:
                     return OpenAIProvider._parse_response(fallback.json())
+
+                # If token windows are exceeded, retry with progressively smaller payloads.
+                if fallback.status_code in {413, 429}:
+                    slim_payload = _build_slim_payload(payload)
+                    slim = await asyncio.to_thread(
+                        self._fallback_client.post,
+                        "/chat/completions",
+                        json=slim_payload,
+                    )
+                    if slim.status_code < 400:
+                        return OpenAIProvider._parse_response(slim.json())
+
+                    emergency_payload = _build_emergency_payload(payload)
+                    emergency = await asyncio.to_thread(
+                        self._fallback_client.post,
+                        "/chat/completions",
+                        json=emergency_payload,
+                    )
+                    if emergency.status_code < 400:
+                        return OpenAIProvider._parse_response(emergency.json())
+
+                    raise RuntimeError(
+                        f"Groq API error HTTP {emergency.status_code}: {emergency.text}"
+                    ) from exc
+
                 raise RuntimeError(
                     f"Groq API error HTTP {fallback.status_code}: {fallback.text}"
                 ) from exc
@@ -121,3 +149,69 @@ def _normalize_groq_base_url(raw: str) -> str:
     if base.endswith(suffix):
         base = base[: -len(suffix)] or "https://api.groq.com"
     return base
+
+
+def _build_slim_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a reduced payload for constrained Groq plans.
+
+    Drops tool schemas and reduces max_tokens to improve odds of fitting
+    model/org token windows.
+    """
+    slim = dict(payload)
+    slim.pop("tools", None)
+    slim.pop("tool_choice", None)
+    max_tokens = int(slim.get("max_tokens", 512) or 512)
+    slim["max_tokens"] = min(max_tokens, 512)
+    return slim
+
+
+def _build_emergency_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a minimal payload likely to fit strict TPM limits."""
+    messages = payload.get("messages") or []
+    system_text = ""
+    latest_user_text = ""
+    latest_any_text = ""
+
+    for msg in messages:
+        role = str(msg.get("role") or "")
+        content = _as_text(msg.get("content"))
+        if role == "system" and content and not system_text:
+            system_text = content
+        if role == "user" and content:
+            latest_user_text = content
+        if content:
+            latest_any_text = content
+
+    prompt_text = latest_user_text or latest_any_text or "Please respond concisely."
+    emergency_messages: list[dict[str, str]] = []
+    if system_text:
+        emergency_messages.append({"role": "system", "content": _truncate(system_text, 1200)})
+    emergency_messages.append({"role": "user", "content": _truncate(prompt_text, 2000)})
+
+    emergency = dict(payload)
+    emergency["messages"] = emergency_messages
+    emergency.pop("tools", None)
+    emergency.pop("tool_choice", None)
+    max_tokens = int(emergency.get("max_tokens", 256) or 256)
+    emergency["max_tokens"] = min(max_tokens, 256)
+    return emergency
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+def _as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""

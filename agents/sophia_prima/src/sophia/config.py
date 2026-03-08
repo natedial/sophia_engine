@@ -53,6 +53,10 @@ class Settings(BaseSettings):
         default="gpt-4.1-mini",
         description="Model to use for chat completions",
     )
+    llm_request_timeout_sec: float = Field(
+        default=180.0,
+        description="HTTP timeout (seconds) for LLM completion requests",
+    )
 
     # Personality
     personality_path: Path = Field(

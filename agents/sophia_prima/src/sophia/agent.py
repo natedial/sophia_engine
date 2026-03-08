@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
-from typing import AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 
@@ -202,7 +203,9 @@ class SophiaAgent:
                 name="research_worker",
                 instructions=(
                     "You are a delegated research worker. Use tools to gather evidence, "
-                    "then return concise factual findings with key values and dates."
+                    "then return concise factual findings with key values and dates. "
+                    "Include citations with source_path, page_number, and chunk_id for "
+                    "material claims, and flag contradictory evidence."
                 ),
                 allowed_tools=None,
                 max_tool_iterations=default_iters,
@@ -285,6 +288,29 @@ class SophiaAgent:
                 "you must call the appropriate tool(s) before answering. "
                 "Do not fabricate numbers. If tools are unavailable, explain the limitation."
             )
+            if "search_research" in tool_names:
+                dynamic_context["Research retrieval policy"] = (
+                    "When using Tholos research tools:\n"
+                    "1) For broad/open questions, run 2-3 focused search_research calls "
+                    "covering different angles (e.g., pro/neutral/critical).\n"
+                    "2) Prefer precision defaults unless recall is too low: "
+                    "keyword_weight=0.65, semantic_weight=0.35, min_lexical_score=0.08, "
+                    "semantic_tail_mode='demote'.\n"
+                    "3) Synthesize only from retrieved evidence and cite key claims in the "
+                    "exact form (source_path: <path>, p.<page_number>, chunk_id: <id>). "
+                    "Do not use shorthand like 'supabase:214' or unlabeled IDs.\n"
+                    "4) Separate evidence from interpretation and explicitly note major "
+                    "disagreement across sources.\n"
+                    "5) If the user asks to inspect or dig into a citation, call "
+                    "get_research_chunk with the cited chunk_id before answering.\n"
+                    "6) If the user asks to narrow scope, pass search_research scope params "
+                    "(run_id/run_ids, source_paths, exclude_source_paths, "
+                    "source_path_prefix/source_path_contains, page bounds, date_from/date_to, "
+                    "max_per_source).\n"
+                    "7) End research answers with a short natural-language follow-up hint, "
+                    "for example: 'If you want, ask why a specific claim appears in chunk_id "
+                    "<id> and I'll unpack the exact passage.'"
+                )
 
         if self.preflight_result:
             service_status = self.preflight_result.for_system_prompt()
@@ -341,9 +367,40 @@ class SophiaAgent:
             "\n\n## Tool Use Requirement\n"
             "If tools are available and the user asks for data or computations, "
             "you must call the appropriate tool(s) before answering. "
-            "Do not answer from memory."
+            "Do not answer from memory. If you skip tool calls, the response is invalid."
         )
         return f"{system_prompt}{enforcement}"
+
+    @staticmethod
+    def _build_hard_tool_prompt(system_prompt: str, tools: list[ToolSchema]) -> str:
+        tool_names = ", ".join(tool.name for tool in tools) if tools else "(none)"
+        enforcement = (
+            "\n\n## Hard Tool Requirement\n"
+            "Your previous response did not use tools. "
+            "You must emit at least one valid tool call before any narrative answer.\n"
+            f"Available tools: {tool_names}\n"
+            "If no tool is suitable, explain why after first attempting the closest tool."
+        )
+        return f"{system_prompt}{enforcement}"
+
+    @staticmethod
+    def _build_citation_repair_prompt(
+        system_prompt: str,
+        *,
+        allowed_chunk_ids: set[str],
+    ) -> str:
+        sorted_ids = sorted(allowed_chunk_ids)
+        cited_ids = ", ".join(sorted_ids[:40]) if sorted_ids else "(none)"
+        repair = (
+            "\n\n## Citation Integrity Requirement\n"
+            "If you cite chunk_id values, they must exactly match tool output from this turn. "
+            "Do not fabricate citation IDs.\n"
+            "Use exact citation format: (source_path: <path>, p.<page_number>, chunk_id: <id>). "
+            "Do not use shorthand like 'supabase:214'.\n"
+            f"Allowed chunk_id values: {cited_ids}\n"
+            "Regenerate your answer now with valid citations only."
+        )
+        return f"{system_prompt}{repair}"
 
     # ------------------------------------------------------------------
     # Tool helpers
@@ -375,8 +432,29 @@ class SophiaAgent:
             "compute", "regression", "mean", "median", "std",
             "percent change", "yoy", "mom", "moving average",
             "normalize", "log", "difference",
+            "research", "evidence", "source", "sources", "study", "studies",
+            "paper", "papers", "consensus", "view", "views",
+            "citation", "citations", "cite", "cited",
+            "document", "documents", "provenance",
         )
-        return any(kw in message for kw in keywords)
+        if any(kw in message for kw in keywords):
+            return True
+
+        if re.search(
+            r"\b(where|what)\b.{0,25}\b(from|source|document|documents|citation|citations)\b",
+            message,
+        ):
+            return True
+
+        if re.search(r"\bsection\s+\d+[a-z]?\b|§\s*\d+", message):
+            return True
+
+        return bool(
+            re.search(
+                r"\bchunk(?:[_\-\s]?id)?\b|\bchunk[_\-][a-z0-9._:\-]+\b",
+                message,
+            )
+        )
 
     @staticmethod
     def _latest_user_text(context: ConversationContext) -> str:
@@ -409,6 +487,378 @@ class SophiaAgent:
         if profile.allowed_tools is None:
             return tools
         return [tool for tool in tools if tool.name in profile.allowed_tools]
+
+    @staticmethod
+    def _build_research_prefetch_input(
+        user_message: str,
+        *,
+        query_override: str | None = None,
+        recall_mode: bool = False,
+    ) -> dict[str, Any]:
+        query = re.sub(r"\s+", " ", (query_override or user_message or "").strip())
+        if recall_mode:
+            return {
+                "query": query,
+                "limit": 8,
+                "keyword_weight": 0.45,
+                "semantic_weight": 0.55,
+                "min_lexical_score": 0.0,
+                "semantic_tail_mode": "keep",
+                "max_per_source": 2,
+            }
+        return {
+            "query": query,
+            "limit": 8,
+            "keyword_weight": 0.65,
+            "semantic_weight": 0.35,
+            "min_lexical_score": 0.08,
+            "semantic_tail_mode": "demote",
+            "max_per_source": 2,
+        }
+
+    @staticmethod
+    def _search_result_count(content: str) -> int:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return 0
+        if not isinstance(payload, dict):
+            return 0
+        count = payload.get("count")
+        if isinstance(count, int):
+            return max(0, count)
+        results = payload.get("results")
+        if isinstance(results, list):
+            return len(results)
+        return 0
+
+    @staticmethod
+    def _extract_evidence_rows_from_tool_output(
+        tool_name: str,
+        content: str,
+    ) -> list[dict[str, Any]]:
+        if tool_name not in {"search_research", "get_research_chunk"}:
+            return []
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+
+        rows: list[dict[str, Any]] = []
+        if tool_name == "search_research":
+            results = payload.get("results")
+            if isinstance(results, list):
+                for result in results:
+                    if not isinstance(result, dict):
+                        continue
+                    chunk_id = result.get("chunk_id")
+                    source_path = result.get("source_path")
+                    page_number = result.get("page_number")
+                    text = result.get("text")
+                    if isinstance(chunk_id, str) and isinstance(text, str):
+                        rows.append(
+                            {
+                                "chunk_id": chunk_id.strip(),
+                                "source_path": source_path if isinstance(source_path, str) else "",
+                                "page_number": page_number if isinstance(page_number, int) else None,
+                                "text": text.strip(),
+                                "hybrid_score": (
+                                    float(result.get("hybrid_score"))
+                                    if isinstance(result.get("hybrid_score"), (int, float))
+                                    else 0.0
+                                ),
+                                "lexical_score": (
+                                    float(result.get("lexical_score"))
+                                    if isinstance(result.get("lexical_score"), (int, float))
+                                    else 0.0
+                                ),
+                            }
+                        )
+        else:
+            chunk_id = payload.get("chunk_id")
+            source_path = payload.get("source_path")
+            page_number = payload.get("page_number")
+            text = payload.get("text")
+            if isinstance(chunk_id, str) and isinstance(text, str):
+                rows.append(
+                    {
+                        "chunk_id": chunk_id.strip(),
+                        "source_path": source_path if isinstance(source_path, str) else "",
+                        "page_number": page_number if isinstance(page_number, int) else None,
+                        "text": text.strip(),
+                        "hybrid_score": 0.0,
+                        "lexical_score": 0.0,
+                    }
+                )
+        return rows
+
+    @staticmethod
+    def _should_emit_evidence_fallback(user_message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(report|reports|fallout|fallouts|next steps?|expect|expects|outlook)\b",
+                (user_message or "").lower(),
+            )
+        )
+
+    @staticmethod
+    def _trim_sentence(text: str, *, max_chars: int = 260) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        if not cleaned:
+            return ""
+        if len(cleaned) <= max_chars:
+            return cleaned
+        clipped = cleaned[:max_chars]
+        cutoff = max(clipped.rfind("."), clipped.rfind(";"), clipped.rfind(","))
+        if cutoff >= max_chars // 2:
+            return clipped[: cutoff + 1].strip()
+        return f"{clipped.rstrip()}..."
+
+    @classmethod
+    def _build_evidence_fallback_response(
+        cls,
+        *,
+        user_message: str,
+        evidence_rows: list[dict[str, Any]],
+    ) -> str | None:
+        if not evidence_rows or not cls._should_emit_evidence_fallback(user_message):
+            return None
+
+        ranked_rows = sorted(
+            evidence_rows,
+            key=lambda row: (
+                float(row.get("hybrid_score") or 0.0),
+                float(row.get("lexical_score") or 0.0),
+            ),
+            reverse=True,
+        )
+        selected_rows: list[dict[str, Any]] = []
+        seen_sources: set[str] = set()
+        for row in ranked_rows:
+            source_key = str(row.get("source_path") or "").strip().lower()
+            if source_key and source_key in seen_sources:
+                continue
+            selected_rows.append(row)
+            if source_key:
+                seen_sources.add(source_key)
+            if len(selected_rows) >= 4:
+                break
+        if len(selected_rows) < 4:
+            for row in ranked_rows:
+                if row in selected_rows:
+                    continue
+                selected_rows.append(row)
+                if len(selected_rows) >= 4:
+                    break
+
+        lines = ["Retrieved research evidence currently indicates:"]
+        for row in selected_rows:
+            snippet = cls._trim_sentence(str(row.get("text") or ""))
+            if not snippet:
+                continue
+            source_path = str(row.get("source_path") or "unknown")
+            page_number = row.get("page_number")
+            page = page_number if isinstance(page_number, int) and page_number > 0 else "?"
+            chunk_id = str(row.get("chunk_id") or "unknown")
+            lines.append(
+                f"- {snippet} (source_path: {source_path}, p.{page}, chunk_id: {chunk_id})"
+            )
+
+        if len(lines) == 1:
+            return None
+
+        lines.append(
+            "If you want, ask why a specific claim appears in a chunk_id and I will unpack the exact passage."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_research_probe_queries(user_message: str) -> list[str]:
+        raw = re.sub(r"\s+", " ", (user_message or "").strip())
+        raw = re.sub(r"\badn\b", "and", raw, flags=re.IGNORECASE)
+        if not raw:
+            return []
+
+        stop_words = {
+            "a", "an", "and", "any", "are", "as", "at", "be", "by", "do", "for",
+            "from", "give", "how", "i", "in", "is", "it", "last", "me", "of", "on",
+            "or", "our", "that", "the", "this", "to", "was", "what", "when", "where",
+            "which", "who", "why", "with", "you", "your", "week", "specific", "broad",
+            "range", "view", "views", "document", "documents", "citation", "citations",
+            "being", "been", "down", "just", "only", "recent", "recently", "now",
+            "out", "since", "report", "reports", "focus", "seem", "ruled", "ruling",
+            "friday",
+        }
+        keywords: list[str] = []
+        for token in re.findall(r"[a-z0-9]+", raw.lower()):
+            if len(token) < 3:
+                continue
+            if token in stop_words:
+                continue
+            normalized = token[:-1] if token.endswith("s") and len(token) > 4 else token
+            if normalized not in keywords:
+                keywords.append(normalized)
+
+        priority_order = {
+            "ieepa": 0,
+            "tariff": 1,
+            "unconstitutional": 2,
+            "supreme": 3,
+            "court": 4,
+            "section": 5,
+        }
+        keywords = sorted(
+            keywords,
+            key=lambda token: (
+                priority_order.get(token, 100),
+                -len(token),
+                token,
+            ),
+        )
+
+        fallback_phrase = " ".join(keywords[:8]).strip()
+        probes: list[str] = [raw]
+        if fallback_phrase and fallback_phrase != raw.lower():
+            probes.append(fallback_phrase)
+
+        if "ieepa" in keywords and "tariff" in keywords:
+            legal_probe_terms = ["ieepa", "tariff"]
+            if "supreme" in keywords:
+                legal_probe_terms.extend(["supreme", "court"])
+            lowered_raw = raw.lower()
+            if "ruling" in lowered_raw or "ruled" in lowered_raw:
+                legal_probe_terms.append("ruling")
+            probes.append(" ".join(legal_probe_terms))
+
+        probes.extend(keywords[:4])
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in probes:
+            normalized_query = query.strip()
+            if not normalized_query:
+                continue
+            key = normalized_query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized_query)
+        return deduped
+
+    @staticmethod
+    def _extract_chunk_ids_from_tool_output(tool_name: str, content: str) -> set[str]:
+        if tool_name not in {"search_research", "get_research_chunk"}:
+            return set()
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return set()
+
+        chunk_ids: set[str] = set()
+        if isinstance(payload, dict):
+            chunk_id = payload.get("chunk_id")
+            if isinstance(chunk_id, str) and chunk_id.strip():
+                chunk_ids.add(chunk_id.strip())
+            results = payload.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if isinstance(item, dict):
+                        item_chunk_id = item.get("chunk_id")
+                        if isinstance(item_chunk_id, str) and item_chunk_id.strip():
+                            chunk_ids.add(item_chunk_id.strip())
+        return chunk_ids
+
+    @staticmethod
+    def _extract_chunk_ids_from_text(text: str) -> set[str]:
+        chunk_ids = set()
+        pattern = re.compile(
+            r"chunk_id(?:\s*[:=]\s*|\s+)[\"'“”]?([A-Za-z0-9._:\-]+)",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(text or ""):
+            chunk_id = match.group(1).strip()
+            if chunk_id:
+                chunk_ids.add(chunk_id)
+        return chunk_ids
+
+    @classmethod
+    def _has_invalid_chunk_citations(
+        cls,
+        text: str,
+        *,
+        allowed_chunk_ids: set[str],
+    ) -> bool:
+        lowered = (text or "").lower()
+        for match in re.finditer(r"\(([^)]*supabase:\d+[^)]*)\)", text or "", flags=re.IGNORECASE):
+            citation_block = match.group(1).lower()
+            if "source_path" not in citation_block:
+                return True
+
+        # Citation blocks that include pages must include both source_path and chunk_id labels.
+        for match in re.finditer(r"\(([^)]*p\.\s*\d+[^)]*)\)", text or "", flags=re.IGNORECASE):
+            citation_block = match.group(1).lower()
+            if "source_path" not in citation_block or "chunk_id" not in citation_block:
+                return True
+
+        cited = cls._extract_chunk_ids_from_text(text)
+        if "chunk_id" in lowered and not cited:
+            return True
+        if not cited:
+            return False
+        return not cited.issubset(allowed_chunk_ids)
+
+    @staticmethod
+    def _requires_explicit_citations(user_message: str) -> bool:
+        message = (user_message or "").lower()
+        return bool(
+            re.search(
+                r"\b(citation|citations|cite|cited|source|sources|document|documents|"
+                r"where.*from|what.*from)\b",
+                message,
+            )
+        )
+
+    @classmethod
+    def _requires_research_citations(
+        cls,
+        user_message: str,
+        tools: list[ToolSchema],
+    ) -> bool:
+        if cls._requires_explicit_citations(user_message):
+            return True
+
+        tool_names = {tool.name for tool in tools}
+        if not ({"search_research", "get_research_chunk", "list_research_sources"} & tool_names):
+            return False
+
+        message = (user_message or "").lower()
+
+        # Fast path for synthesis-style prompts that should be evidence-grounded.
+        if re.search(
+            r"\b(range of views|broad range|consensus|debate|research-backed|evidence)\b",
+            message,
+        ):
+            return True
+
+        # Legal/policy recency questions should not be answered from model memory.
+        if re.search(
+            r"\b(supreme court|ruling|struck down|section\s+\d+|§\s*\d+|last week|recent)\b",
+            message,
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def _has_structured_citations(text: str) -> bool:
+        lowered = (text or "").lower()
+        return (
+            "source_path:" in lowered
+            and "chunk_id" in lowered
+            and re.search(r"\bp\.\s*\d+", lowered) is not None
+        )
 
     def _should_delegate_subagents(
         self,
@@ -659,6 +1109,89 @@ class SophiaAgent:
             )
             iterations = 0
             last_message: Message | None = None
+            tools_required_for_turn = self._should_enforce_tools(
+                active_user_message,
+                turn_tools,
+            )
+            citations_required_for_turn = self._requires_research_citations(
+                active_user_message,
+                turn_tools,
+            )
+            tool_enforcement_attempts = 0
+            used_tools_this_turn = False
+            cited_chunk_ids_seen: set[str] = set()
+            evidence_by_chunk: dict[str, dict[str, Any]] = {}
+            citation_repair_attempted = False
+
+            # Deterministic bootstrap: prefetch evidence for citation-required
+            # research prompts so the model starts with grounded context.
+            if citations_required_for_turn and "search_research" in allowed_tool_names:
+                probe_queries = self._build_research_probe_queries(active_user_message)[:3]
+                successful_prefetches = 0
+                for probe_index, probe_query in enumerate(probe_queries):
+                    prefetch_call = ToolCall(
+                        id=f"prefetch-search-research-{turn}-{probe_index}",
+                        name="search_research",
+                        input=self._build_research_prefetch_input(
+                            active_user_message,
+                            query_override=probe_query,
+                            recall_mode=probe_index > 0,
+                        ),
+                    )
+                    yield tool_execution_start(
+                        prefetch_call,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
+                    prefetch_result = await self._execute_tool(prefetch_call, allowed_tool_names)
+                    prefetch_content = prefetch_result.to_content()
+                    used_tools_this_turn = True
+                    cited_chunk_ids_seen.update(
+                        self._extract_chunk_ids_from_tool_output(
+                            prefetch_call.name,
+                            prefetch_content,
+                        )
+                    )
+                    for row in self._extract_evidence_rows_from_tool_output(
+                        prefetch_call.name,
+                        prefetch_content,
+                    ):
+                        chunk_id = str(row.get("chunk_id") or "").strip()
+                        if chunk_id and chunk_id not in evidence_by_chunk:
+                            evidence_by_chunk[chunk_id] = row
+                    context.add_assistant_message(
+                        Message(
+                            role=Role.ASSISTANT,
+                            tool_calls=[prefetch_call],
+                        )
+                    )
+                    context.add_tool_results(
+                        [
+                            ToolResultMessage(
+                                tool_call_id=prefetch_call.id,
+                                content=prefetch_content,
+                                is_error=not prefetch_result.success,
+                            )
+                        ]
+                    )
+                    yield tool_execution_end(
+                        prefetch_call,
+                        prefetch_content,
+                        is_error=not prefetch_result.success,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
+                    if prefetch_result.success and self._search_result_count(prefetch_content) > 0:
+                        successful_prefetches += 1
+                        if successful_prefetches >= 2:
+                            break
+                if cited_chunk_ids_seen:
+                    system_prompt = self._build_citation_repair_prompt(
+                        system_prompt,
+                        allowed_chunk_ids=cited_chunk_ids_seen,
+                    )
 
             # INNER LOOP: tool calls
             while iterations < self.config.max_tool_iterations:
@@ -720,22 +1253,73 @@ class SophiaAgent:
 
                 # If no tool calls, check enforcement then break
                 if not assistant_msg.tool_calls:
-                    # Tool enforcement check (first iteration only)
-                    if iterations == 1 and self._should_enforce_tools(
-                        active_user_message,
-                        turn_tools,
+                    if (
+                        tools_required_for_turn
+                        and not used_tools_this_turn
+                        and tool_enforcement_attempts < 2
                     ):
-                        enforced_prompt = self._build_enforced_tool_prompt(system_prompt)
-                        system_prompt = enforced_prompt
+                        tool_enforcement_attempts += 1
+                        if tool_enforcement_attempts == 1:
+                            system_prompt = self._build_enforced_tool_prompt(system_prompt)
+                        else:
+                            system_prompt = self._build_hard_tool_prompt(system_prompt, turn_tools)
                         # Remove the assistant message we just added and retry
                         context.messages.pop()
                         continue
+
+                    if tools_required_for_turn and not used_tools_this_turn:
+                        assistant_msg.content = (
+                            "I couldn't ground this response in live tool output, so I won't "
+                            "synthesize from memory. Please retry and I'll run the research "
+                            "tools first."
+                        )
+                        context.messages[-1] = assistant_msg
+
+                    has_invalid_chunk_citations = self._has_invalid_chunk_citations(
+                        assistant_msg.content,
+                        allowed_chunk_ids=cited_chunk_ids_seen,
+                    )
+                    has_structured_citations = self._has_structured_citations(
+                        assistant_msg.content
+                    )
+                    citation_issue = (
+                        has_invalid_chunk_citations
+                        or (citations_required_for_turn and not has_structured_citations)
+                    )
+
+                    # If cited chunk IDs don't match retrieved chunks, force one repair pass.
+                    if (
+                        not citation_repair_attempted
+                        and citation_issue
+                    ):
+                        citation_repair_attempted = True
+                        system_prompt = self._build_citation_repair_prompt(
+                            system_prompt,
+                            allowed_chunk_ids=cited_chunk_ids_seen,
+                        )
+                        context.messages.pop()
+                        continue
+                    if citation_repair_attempted and citation_issue:
+                        fallback = self._build_evidence_fallback_response(
+                            user_message=active_user_message,
+                            evidence_rows=list(evidence_by_chunk.values()),
+                        )
+                        if fallback:
+                            assistant_msg.content = fallback
+                        else:
+                            assistant_msg.content = (
+                                "I couldn't produce citation-grounded output from the research "
+                                "tool results in this turn. Please retry and I will fetch sources "
+                                "again before summarizing."
+                            )
+                        context.messages[-1] = assistant_msg
 
                     break
 
                 # Execute tool calls
                 tool_results: list[ToolResultMessage] = []
                 for tc in assistant_msg.tool_calls:
+                    used_tools_this_turn = True
                     yield tool_execution_start(
                         tc,
                         run_id=active_run_id,
@@ -746,6 +1330,13 @@ class SophiaAgent:
                     result = await self._execute_tool(tc, allowed_tool_names)
                     content = result.to_content()
                     is_error = not result.success
+                    cited_chunk_ids_seen.update(
+                        self._extract_chunk_ids_from_tool_output(tc.name, content)
+                    )
+                    for row in self._extract_evidence_rows_from_tool_output(tc.name, content):
+                        chunk_id = str(row.get("chunk_id") or "").strip()
+                        if chunk_id and chunk_id not in evidence_by_chunk:
+                            evidence_by_chunk[chunk_id] = row
 
                     yield tool_execution_end(
                         tc,

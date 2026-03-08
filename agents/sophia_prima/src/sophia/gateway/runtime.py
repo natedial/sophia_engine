@@ -129,7 +129,23 @@ class GatewayRuntime:
             raise RuntimeError(f"no agent registered for id '{decision.agent_id}'")
 
         async with session.lock:
-            assistant = await agent.chat(text, session.context)
+            try:
+                assistant = await agent.chat(text, session.context)
+            except RuntimeError as exc:
+                if _is_provider_capacity_error(exc):
+                    logger.warning("Provider capacity/limit error: %s", exc)
+                    return OutboundMessage(
+                        text=(
+                            "I hit a temporary model capacity limit while processing that. "
+                            "Please retry in a few seconds."
+                        ),
+                        session_id=decision.session_id,
+                        agent_id=decision.agent_id,
+                        channel=message.channel,
+                        account_id=message.account_id,
+                        peer_id=message.peer_id,
+                    )
+                raise
 
         return OutboundMessage(
             text=assistant.content.strip() or "(empty response)",
@@ -139,6 +155,11 @@ class GatewayRuntime:
             account_id=message.account_id,
             peer_id=message.peer_id,
         )
+
+    def clear_session(self, message: InboundMessage) -> bool:
+        """Clear the resolved session for a given inbound envelope."""
+        decision = self.router.resolve(message)
+        return self._sessions.pop(decision.session_id, None) is not None
 
     def _create_provider(self) -> ModelProvider:
         provider_name = self.settings.llm_provider.lower().strip()
@@ -155,6 +176,7 @@ class GatewayRuntime:
             return OpenAIProvider(
                 api_key=self.settings.openai_api_key,
                 base_url=self.settings.openai_base_url,
+                timeout=self.settings.llm_request_timeout_sec,
             )
         if provider_name == "groq":
             if not self.settings.groq_api_key:
@@ -163,6 +185,7 @@ class GatewayRuntime:
             return GroqProvider(
                 api_key=self.settings.groq_api_key,
                 base_url=self.settings.groq_base_url,
+                timeout=self.settings.llm_request_timeout_sec,
             )
 
         raise ValueError(
@@ -181,3 +204,24 @@ class GatewayRuntime:
         # Prime health state before serving traffic.
         await pylon.preflight()
         return pylon
+
+
+def _is_provider_capacity_error(exc: RuntimeError) -> bool:
+    text = str(exc).lower()
+    return (
+        "groq api error http 413" in text
+        or "groq api error http 429" in text
+        or "openai api error http 429" in text
+        or "openai api timeout" in text
+        or "groq api timeout" in text
+        or "readtimeout" in text
+        or "timed out" in text
+        or "insufficient_quota" in text
+        or "billing_hard_limit_reached" in text
+        or "requests per day (rpd)" in text
+        or "tokens per minute (tpm)" in text
+        or "requests per minute (rpm)" in text
+        or "rate_limit_exceeded" in text
+        or "request too large" in text
+        or "rate limit reached" in text
+    )

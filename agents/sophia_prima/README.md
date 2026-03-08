@@ -28,6 +28,7 @@ LLM provider:
 - `GROQ_API_KEY` (required when `LLM_PROVIDER=groq`)
 - `GROQ_BASE_URL` (optional override; default `https://api.groq.com`)
 - `ANTHROPIC_API_KEY` (required when `LLM_PROVIDER=anthropic`)
+- `LLM_REQUEST_TIMEOUT_SEC` (optional HTTP timeout; default `180`)
 - `PERSONALITY_PATH` (optional personality markdown override)
 - `SOUL_PATH` (optional soul markdown override)
 - `LESSONS_PATH` (optional read-only `LESSONS.md` seed layer path)
