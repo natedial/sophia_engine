@@ -134,6 +134,7 @@ services:
       CANVAS_DASHBOARD_URL: http://localhost:${DASHBOARD_PORT:-13000}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+      LLM_REQUEST_TIMEOUT_SEC: ${LLM_REQUEST_TIMEOUT_SEC:-180}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       GROQ_API_KEY: ${GROQ_API_KEY:-}

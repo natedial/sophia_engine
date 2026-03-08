@@ -41,6 +41,7 @@ class TelegramChannelAdapter:
         """Start telegram polling and message handlers."""
         app = Application.builder().token(self.account.bot_token).build()
         app.add_handler(CommandHandler("start", self._on_start))
+        app.add_handler(CommandHandler("reset", self._on_reset))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         await app.initialize()
         await app.start()
@@ -66,6 +67,33 @@ class TelegramChannelAdapter:
         if update.effective_message is None:
             return
         await update.effective_message.reply_text("Sophia gateway is online. Send a message to begin.")
+
+    async def _on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_message is None or update.effective_chat is None:
+            return
+
+        inbound = InboundMessage(
+            channel="telegram",
+            account_id=self.account.account_id,
+            peer_id=str(update.effective_chat.id),
+            user_id=str(update.effective_user.id) if update.effective_user else None,
+            message_id=str(update.effective_message.message_id),
+            text="/reset",
+            metadata={
+                "chat_type": update.effective_chat.type,
+            },
+        )
+
+        cleared = self.runtime.clear_session(inbound)
+        if cleared:
+            await update.effective_message.reply_text(
+                "Session reset for this chat."
+            )
+            return
+
+        await update.effective_message.reply_text(
+            "No active session to reset for this chat."
+        )
 
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_message is None or update.effective_chat is None:

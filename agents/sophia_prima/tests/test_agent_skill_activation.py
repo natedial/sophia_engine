@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ from sophia.agent import AgentConfig, SophiaAgent
 from sophia.config import Settings
 from sophia.context import ConversationContext
 from sophia.events import EventType
-from sophia.llm.types import CompletionResponse, Message, Role, StopReason, TokenUsage
+from sophia.llm.types import CompletionResponse, Message, Role, StopReason, TokenUsage, ToolSchema
 from sophia.memory import MemoryManager, MemoryManagerConfig
 from sophia.memory.store import InMemoryMemoryStore
 
@@ -48,6 +49,24 @@ class DummyPylon:
         raise AssertionError("No tool execution expected in this test")
 
 
+class DummyToolResult:
+    def __init__(self, *, success: bool = True, payload: dict | None = None) -> None:
+        self.success = success
+        self._payload = payload or {
+            "results": [
+                {
+                    "chunk_id": "c-1",
+                    "source_path": "test.pdf",
+                    "page_number": 1,
+                    "text": "evidence",
+                }
+            ]
+        }
+
+    def to_content(self) -> str:
+        return json.dumps(self._payload)
+
+
 class DummyToolDef:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -58,11 +77,22 @@ class DummyToolDef:
 
 
 class DummyPylonWithTools(DummyPylon):
-    def __init__(self, tool_names: list[str]) -> None:
+    def __init__(
+        self,
+        tool_names: list[str],
+        *,
+        tool_result: DummyToolResult | None = None,
+    ) -> None:
         self._tools = [DummyToolDef(name) for name in tool_names]
+        self.executions: list[tuple[str, dict]] = []
+        self._tool_result = tool_result or DummyToolResult()
 
     def get_tools(self, only_healthy: bool = True):
         return self._tools
+
+    async def execute_tool(self, name: str, payload: dict):
+        self.executions.append((name, payload))
+        return self._tool_result
 
 
 class ToolRecordingProvider(DummyProvider):
@@ -83,6 +113,27 @@ class ToolRecordingProvider(DummyProvider):
         self.tools_seen.append([t.name for t in (tools or [])])
         return CompletionResponse(
             message=Message(role=Role.ASSISTANT, content="ok"),
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+class CitationProvider(DummyProvider):
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools=None,
+        max_tokens: int = 4096,
+    ) -> CompletionResponse:
+        self.system_prompts.append(system)
+        return CompletionResponse(
+            message=Message(
+                role=Role.ASSISTANT,
+                content="Claim (source_path: test.pdf, p.1, chunk_id: c-1)",
+            ),
             stop_reason=StopReason.END_TURN,
             usage=TokenUsage(input_tokens=1, output_tokens=1),
         )
@@ -299,3 +350,403 @@ async def test_agent_injects_seed_lessons_into_memory_context(tmp_path: Path) ->
     assert provider.system_prompts
     assert "Lessons memory:" in provider.system_prompts[0]
     assert "Always verify release dates using tools." in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_injects_research_retrieval_policy_when_tholos_tools_present(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(["search_research", "get_research_chunk"]),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-research-protocol")
+
+    _ = [event async for event in agent.run("summarize tariff debate evidence", context)]
+
+    assert provider.system_prompts
+    assert "Research retrieval policy" in provider.system_prompts[0]
+    assert "keyword_weight=0.65" in provider.system_prompts[0]
+    assert "chunk_id" in provider.system_prompts[0]
+
+
+def test_should_enforce_tools_for_research_queries() -> None:
+    tools = [
+        ToolSchema(
+            name="search_research",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+
+    assert SophiaAgent._should_enforce_tools(
+        "What's the broad range of views on tariffs?",
+        tools,
+    )
+    assert SophiaAgent._should_enforce_tools(
+        "Why does BofA see refund payments as likely in chunk_id c-17?",
+        tools,
+    )
+    assert SophiaAgent._should_enforce_tools(
+        "any specific citations on section 122",
+        tools,
+    )
+    assert SophiaAgent._should_enforce_tools(
+        "what documents is that take from?",
+        tools,
+    )
+    assert not SophiaAgent._should_enforce_tools("Tell me a short joke.", tools)
+
+
+def test_requires_explicit_citations_and_structured_format() -> None:
+    assert SophiaAgent._requires_explicit_citations("any specific citations on section 122")
+    assert SophiaAgent._requires_explicit_citations("what documents is that take from?")
+    assert not SophiaAgent._requires_explicit_citations("give me a short joke")
+
+    assert SophiaAgent._has_structured_citations(
+        "Claim (source_path: a.pdf, p.6, chunk_id: c-1)"
+    )
+    assert not SophiaAgent._has_structured_citations("Claim (supabase:214, p.6)")
+
+
+def test_requires_research_citations_for_synthesis_and_legal_recency_queries() -> None:
+    tools = [
+        ToolSchema(
+            name="search_research",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+
+    assert SophiaAgent._requires_research_citations(
+        "What's the broad range of views on tariffs being struck down by the supreme court last week?",
+        tools,
+    )
+    assert SophiaAgent._requires_research_citations(
+        "any specific citations on section 122",
+        tools,
+    )
+    assert not SophiaAgent._requires_research_citations(
+        "What's the latest CPI print?",
+        tools,
+    )
+
+
+def test_build_research_prefetch_input_uses_tuned_defaults() -> None:
+    payload = SophiaAgent._build_research_prefetch_input(
+        "  any specific citations on   section 122  "
+    )
+    assert payload["query"] == "any specific citations on section 122"
+    assert payload["limit"] == 8
+    assert payload["keyword_weight"] == 0.65
+    assert payload["semantic_weight"] == 0.35
+    assert payload["min_lexical_score"] == 0.08
+    assert payload["semantic_tail_mode"] == "demote"
+    assert payload["max_per_source"] == 2
+
+    recall_payload = SophiaAgent._build_research_prefetch_input(
+        "tariffs and supreme court",
+        query_override="tariff supreme court",
+        recall_mode=True,
+    )
+    assert recall_payload["query"] == "tariff supreme court"
+    assert recall_payload["min_lexical_score"] == 0.0
+    assert recall_payload["semantic_tail_mode"] == "keep"
+    assert recall_payload["max_per_source"] == 2
+
+
+def test_build_research_probe_queries_normalizes_keywords() -> None:
+    probes = SophiaAgent._build_research_probe_queries(
+        "What's the broad range of views on tariffs being struck down by the supreme court last week?"
+    )
+    assert probes
+    assert probes[0].startswith("What's the broad range")
+    assert any("tariff" in probe for probe in probes)
+
+    ieepa_probes = SophiaAgent._build_research_probe_queries(
+        "what do reports since last friday expect about IEEPA tariffs being ruled unconstitutional adn fallout"
+    )
+    assert any("ieepa" in probe for probe in ieepa_probes)
+    assert any("tariff" in probe for probe in ieepa_probes)
+    assert "ieepa" in ieepa_probes[1]
+
+    ruling_probes = SophiaAgent._build_research_probe_queries(
+        "after the supreme court ruling on ieepa tariffs, what next?"
+    )
+    assert any("ieepa tariff supreme court ruling" in probe for probe in ruling_probes)
+
+
+def test_search_result_count_parses_json_payload() -> None:
+    assert SophiaAgent._search_result_count('{"count": 3, "results": []}') == 3
+    assert SophiaAgent._search_result_count('{"results": [{"chunk_id":"c-1"}]}') == 1
+    assert SophiaAgent._search_result_count("not-json") == 0
+
+
+def test_build_evidence_fallback_response_only_for_report_style_prompts() -> None:
+    rows = [
+        {
+            "chunk_id": "c-1",
+            "source_path": "supabase:1",
+            "page_number": 5,
+            "text": "Analysts expect a limited near-term market impact if IEEPA tariffs are struck down.",
+        }
+    ]
+    assert (
+        SophiaAgent._build_evidence_fallback_response(
+            user_message="what do reports expect after the ruling?",
+            evidence_rows=rows,
+        )
+        is not None
+    )
+    assert (
+        SophiaAgent._build_evidence_fallback_response(
+            user_message="any specific citations on section 122",
+            evidence_rows=rows,
+        )
+        is None
+    )
+
+
+def test_chunk_id_extraction_from_tholos_tool_output() -> None:
+    search_payload = (
+        '{\n'
+        '  "results": [\n'
+        '    {"chunk_id": "c-1", "text": "a"},\n'
+        '    {"chunk_id": "c-2", "text": "b"}\n'
+        "  ]\n"
+        "}"
+    )
+    chunk_payload = '{"chunk_id":"c-3","text":"full chunk"}'
+
+    assert SophiaAgent._extract_chunk_ids_from_tool_output("search_research", search_payload) == {
+        "c-1",
+        "c-2",
+    }
+    assert SophiaAgent._extract_chunk_ids_from_tool_output("get_research_chunk", chunk_payload) == {
+        "c-3"
+    }
+
+
+def test_invalid_chunk_citations_are_detected() -> None:
+    text = (
+        "Evidence A (source_path: a.pdf, p.1, chunk_id: c-1)\n"
+        "Evidence B (source_path: b.pdf, p.2, chunk_id: fake-999)"
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        text,
+        allowed_chunk_ids={"c-1", "c-2"},
+    )
+    assert not SophiaAgent._has_invalid_chunk_citations(
+        "No citations here.",
+        allowed_chunk_ids={"c-1", "c-2"},
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        "Claim (chunk_id: c-1)",
+        allowed_chunk_ids=set(),
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        "Claim (chunk_id “c-1”)",
+        allowed_chunk_ids=set(),
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        "Claim (chunk_id: §4.2)",
+        allowed_chunk_ids={"c-1"},
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        "Claim (supabase:214, p.6)",
+        allowed_chunk_ids={"c-1"},
+    )
+    assert SophiaAgent._has_invalid_chunk_citations(
+        "Claim (source_path: paper.pdf, p.6)",
+        allowed_chunk_ids={"c-1"},
+    )
+    assert not SophiaAgent._has_invalid_chunk_citations(
+        "Claim (source_path: supabase:214, p.6, chunk_id: c-1)",
+        allowed_chunk_ids={"c-1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_refuses_ungrounded_research_answer_when_tools_not_used(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(["search_research"]),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-grounding")
+
+    final = await agent.chat(
+        "Give me research-backed views on tariffs with sources.",
+        context,
+    )
+
+    assert "couldn't produce citation-grounded output" in final.content
+    assert len(provider.system_prompts) >= 2
+
+
+@pytest.mark.asyncio
+async def test_agent_refuses_uncited_research_synthesis_without_tool_grounding(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(["search_research"]),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-research-views")
+
+    final = await agent.chat(
+        "What's the broad range of views on tariffs being struck down by the supreme court last week?",
+        context,
+    )
+
+    assert "couldn't produce citation-grounded output" in final.content
+
+
+@pytest.mark.asyncio
+async def test_agent_prefetches_research_before_completion_for_citation_turns(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = CitationProvider()
+    pylon = DummyPylonWithTools(["search_research"])
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-prefetch")
+
+    final = await agent.chat(
+        "any specific citations on section 122",
+        context,
+    )
+
+    assert "chunk_id: c-1" in final.content
+    assert pylon.executions
+    tool_name, payload = pylon.executions[0]
+    assert tool_name == "search_research"
+    assert payload["query"] == "any specific citations on section 122"
+    assert payload["keyword_weight"] == 0.65
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_evidence_fallback_for_report_queries(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    pylon = DummyPylonWithTools(["search_research"])
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-report-fallback")
+
+    final = await agent.chat(
+        "now that the supreme court ruling on IEEPA is out, what do reports since last friday expect about tariff fallout?",
+        context,
+    )
+
+    assert "Retrieved research evidence currently indicates" in final.content
+    assert "(source_path: test.pdf, p.1, chunk_id: c-1)" in final.content

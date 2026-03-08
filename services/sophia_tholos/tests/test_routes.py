@@ -98,6 +98,49 @@ class TestSearch:
         resp = client_no_corpus.post("/search", json={"query": "test"})
         assert resp.status_code == 503
 
+    def test_search_rejects_invalid_date_window(self, client):
+        resp = client.post(
+            "/search",
+            json={
+                "query": "ieepa",
+                "date_from": "2026-02-24",
+                "date_to": "2026-02-19",
+            },
+        )
+        assert resp.status_code == 422
+
+    def test_search_forwards_scope_filters(self, client, mock_engine):
+        resp = client.post(
+            "/search",
+            json={
+                "query": "ieepa tariffs",
+                "run_id": "run-a",
+                "run_ids": ["run-a", "run-b"],
+                "source_paths": ["supabase:150"],
+                "exclude_source_paths": ["supabase:999"],
+                "source_path_prefix": "supabase:",
+                "source_path_contains": "150",
+                "min_page_number": 2,
+                "max_page_number": 20,
+                "max_per_source": 2,
+                "date_from": "2026-02-19",
+                "date_to": "2026-02-24",
+            },
+        )
+        assert resp.status_code == 200
+        _, kwargs = mock_engine.search.call_args
+        assert kwargs["run_id"] == "run-a"
+        assert kwargs["run_ids"] == ["run-a", "run-b"]
+        assert kwargs["source_paths"] == ["supabase:150"]
+        assert kwargs["exclude_source_paths"] == ["supabase:999"]
+        assert kwargs["source_path_prefix"] == "supabase:"
+        assert kwargs["source_path_contains"] == "150"
+        assert kwargs["min_page_number"] == 2
+        assert kwargs["max_page_number"] == 20
+        assert kwargs["max_per_source"] == 2
+        assert kwargs["date_from"] == "2026-02-19 00:00:00"
+        assert kwargs["date_to"] == "2026-02-24 23:59:59"
+
 
 class TestGetChunk:
     def test_get_chunk_success(self, client, mock_engine):
