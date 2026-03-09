@@ -131,6 +131,7 @@ services:
       ARITHMOS_BASE_URL: http://sophia_arithmos:8001
       CANVAS_BASE_URL: http://sophia_canvas:8003
       THOLOS_BASE_URL: http://sophia_tholos:8004
+      FED_TRACKER_URL: ${FED_TRACKER_URL:-http://host.docker.internal:8005}
       CANVAS_DASHBOARD_URL: http://localhost:${DASHBOARD_PORT:-13000}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}

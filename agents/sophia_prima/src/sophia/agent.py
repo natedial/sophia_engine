@@ -311,6 +311,26 @@ class SophiaAgent:
                     "for example: 'If you want, ask why a specific claim appears in chunk_id "
                     "<id> and I'll unpack the exact passage.'"
                 )
+            if "fed_speaker_brief" in tool_names:
+                dynamic_context["Fed Tracker policy"] = (
+                    "When using Fed Textual Change Tracker tools:\n"
+                    "1) For high-level questions about a Fed speaker's current stance or "
+                    "rhetoric, start with fed_speaker_brief.\n"
+                    "2) For analytical questions (e.g. 'how has X shifted?'), use "
+                    "fed_speaker_question — it queries structured artifacts and returns "
+                    "evidence-based answers.\n"
+                    "3) For specific structural analysis, use the specialized tools:\n"
+                    "   - fed_speaker_comparisons: t-1 diffs between consecutive speeches\n"
+                    "   - fed_speaker_theme_drift: long-term evolution on a theme\n"
+                    "   - fed_speaker_orphaned_concepts: themes that were emphasized then dropped\n"
+                    "   - fed_speaker_timeline: chronological communication history\n"
+                    "4) If a document may not yet be ingested, call fed_ingest_url first, "
+                    "then query.\n"
+                    "5) Use full speaker names as they appear in Federal Reserve publications "
+                    "(e.g. 'Christopher J. Waller', 'Jerome H. Powell').\n"
+                    "6) These tools analyze textual/sentiment patterns only — do not use them "
+                    "for market pricing inference."
+                )
 
         if self.preflight_result:
             service_status = self.preflight_result.for_system_prompt()
@@ -436,6 +456,8 @@ class SophiaAgent:
             "paper", "papers", "consensus", "view", "views",
             "citation", "citations", "cite", "cited",
             "document", "documents", "provenance",
+            "tone", "rhetoric", "drift", "hawkish", "dovish",
+            "fomc", "fed chair", "fed president", "fed governor",
         )
         if any(kw in message for kw in keywords):
             return True
@@ -449,9 +471,34 @@ class SophiaAgent:
         if re.search(r"\bsection\s+\d+[a-z]?\b|§\s*\d+", message):
             return True
 
+        if re.search(
+            r"\bchunk(?:[_\-\s]?id)?\b|\bchunk[_\-][a-z0-9._:\-]+\b",
+            message,
+        ):
+            return True
+
+        # Fed-official role references (governor, chair, president of ... Fed)
+        if re.search(
+            r"\b(governor|chair(?:man|woman)?|vice\s+chair|president)\b"
+            r".{0,30}"
+            r"\b(fed|federal\s+reserve|reserve\s+bank)\b",
+            message,
+        ):
+            return True
+
+        # Reverse: "the Fed's governor", "FOMC members"
+        if re.search(
+            r"\b(fed|fomc|federal\s+reserve)\b.{0,20}\b(member|official|speaker|governor|chair|president)s?\b",
+            message,
+        ):
+            return True
+
+        # Rhetorical/analytical shift language near a person or institution
         return bool(
             re.search(
-                r"\bchunk(?:[_\-\s]?id)?\b|\bchunk[_\-][a-z0-9._:\-]+\b",
+                r"\b(shift|pivot|evolv|chang|soften|harden|walk\s*back|temper|signal)"
+                r".{0,40}"
+                r"\b(stance|tone|rhetoric|language|messaging|position|view|outlook)\b",
                 message,
             )
         )
@@ -1119,6 +1166,7 @@ class SophiaAgent:
             )
             tool_enforcement_attempts = 0
             used_tools_this_turn = False
+            used_research_tools_this_turn = False
             cited_chunk_ids_seen: set[str] = set()
             evidence_by_chunk: dict[str, dict[str, Any]] = {}
             citation_repair_attempted = False
@@ -1147,6 +1195,9 @@ class SophiaAgent:
                     prefetch_result = await self._execute_tool(prefetch_call, allowed_tool_names)
                     prefetch_content = prefetch_result.to_content()
                     used_tools_this_turn = True
+                    # Note: do NOT set used_research_tools_this_turn here.
+                    # The prefetch is a speculative bootstrap — citation enforcement
+                    # should only activate when the LLM itself chooses research tools.
                     cited_chunk_ids_seen.update(
                         self._extract_chunk_ids_from_tool_output(
                             prefetch_call.name,
@@ -1284,7 +1335,11 @@ class SophiaAgent:
                     )
                     citation_issue = (
                         has_invalid_chunk_citations
-                        or (citations_required_for_turn and not has_structured_citations)
+                        or (
+                            citations_required_for_turn
+                            and used_research_tools_this_turn
+                            and not has_structured_citations
+                        )
                     )
 
                     # If cited chunk IDs don't match retrieved chunks, force one repair pass.
@@ -1318,8 +1373,11 @@ class SophiaAgent:
 
                 # Execute tool calls
                 tool_results: list[ToolResultMessage] = []
+                _RESEARCH_TOOL_NAMES = {"search_research", "get_research_chunk", "list_research_sources"}
                 for tc in assistant_msg.tool_calls:
                     used_tools_this_turn = True
+                    if tc.name in _RESEARCH_TOOL_NAMES:
+                        used_research_tools_this_turn = True
                     yield tool_execution_start(
                         tc,
                         run_id=active_run_id,

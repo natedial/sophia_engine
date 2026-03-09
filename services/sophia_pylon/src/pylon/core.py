@@ -7,11 +7,13 @@ from typing import Any
 
 from pylon.clients.arithmos import ArithmosClient
 from pylon.clients.canvas import CanvasClient
+from pylon.clients.fed_tracker import FedTrackerClient
 from pylon.clients.scrivener import ScrivenerClient
 from pylon.clients.tholos import TholosClient
 from pylon.tools.arithmos import ArithmosToolExecutor
 from pylon.tools.base import ErrorType, ToolDefinition, ToolResult
 from pylon.tools.canvas import CanvasToolExecutor
+from pylon.tools.fed_tracker import FedTrackerToolExecutor
 from pylon.tools.scrivener import ScrivenerToolExecutor
 from pylon.tools.tholos import TholosToolExecutor
 
@@ -24,6 +26,7 @@ class PylonConfig:
     arithmos_url: str = "http://localhost:8001"
     canvas_url: str = "http://localhost:8003"
     tholos_url: str = "http://localhost:8004"
+    fed_tracker_url: str = "http://127.0.0.1:8005"
     max_concurrency_per_service: int = 8
     tool_timeout_sec: float = 30.0
 
@@ -110,12 +113,14 @@ class Pylon:
         self._arithmos_client = ArithmosClient(base_url=self.config.arithmos_url)
         self._canvas_client = CanvasClient(base_url=self.config.canvas_url)
         self._tholos_client = TholosClient(base_url=self.config.tholos_url)
+        self._fed_tracker_client = FedTrackerClient(base_url=self.config.fed_tracker_url)
 
         # Initialize tool executors
         self._scrivener_executor = ScrivenerToolExecutor(self._scrivener_client)
         self._arithmos_executor = ArithmosToolExecutor(self._arithmos_client)
         self._canvas_executor = CanvasToolExecutor(self._canvas_client, self._scrivener_client)
         self._tholos_executor = TholosToolExecutor(self._tholos_client)
+        self._fed_tracker_executor = FedTrackerToolExecutor(self._fed_tracker_client)
 
         # Build tool routing table: tool_name -> (executor, service_name)
         self._tool_executors: dict[str, tuple[Any, str]] = {}
@@ -159,12 +164,20 @@ class Pylon:
             tholos_tools.append(tool.name)
         self._service_tools["tholos"] = tholos_tools
 
+        # Register Fed Tracker tools
+        fed_tracker_tools = []
+        for tool in self._fed_tracker_executor.get_tools():
+            self._tool_executors[tool.name] = (self._fed_tracker_executor, "fed_tracker")
+            fed_tracker_tools.append(tool.name)
+        self._service_tools["fed_tracker"] = fed_tracker_tools
+
     async def close(self) -> None:
         """Close all client connections."""
         await self._scrivener_client.close()
         await self._arithmos_client.close()
         await self._canvas_client.close()
         await self._tholos_client.close()
+        await self._fed_tracker_client.close()
 
     # -------------------------------------------------------------------------
     # Health Checks & Pre-flight
@@ -187,6 +200,8 @@ class Pylon:
                 healthy = await self._canvas_client.health_check()
             elif name == "tholos":
                 healthy = await self._tholos_client.health_check()
+            elif name == "fed_tracker":
+                healthy = await self._fed_tracker_client.health_check()
             else:
                 healthy = False
 
@@ -295,6 +310,14 @@ class Pylon:
                     continue
             tools.append(tool)
 
+        # Fed Tracker tools
+        for tool in self._fed_tracker_executor.get_tools():
+            if only_healthy:
+                status = self._service_status.get("fed_tracker")
+                if status and not status.healthy:
+                    continue
+            tools.append(tool)
+
         return tools
 
     def get_tools_as_anthropic_schema(self, only_healthy: bool = False) -> list[dict[str, Any]]:
@@ -381,3 +404,8 @@ class Pylon:
     def tholos(self) -> TholosClient:
         """Direct access to Tholos client for non-LLM use cases."""
         return self._tholos_client
+
+    @property
+    def fed_tracker(self) -> FedTrackerClient:
+        """Direct access to Fed Tracker client for non-LLM use cases."""
+        return self._fed_tracker_client
