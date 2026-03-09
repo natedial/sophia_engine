@@ -127,6 +127,10 @@ class Settings(BaseSettings):
         default="http://localhost:8004",
         description="Base URL for Tholos research search service",
     )
+    fed_tracker_url: str = Field(
+        default="http://127.0.0.1:8005",
+        description="Base URL for Fed Textual Change Tracker service",
+    )
     canvas_dashboard_url: str = Field(
         default="http://localhost:3000",
         description="Frontend dashboard URL shown to user at session start",
