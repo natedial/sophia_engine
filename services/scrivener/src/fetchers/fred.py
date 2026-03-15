@@ -148,17 +148,21 @@ class FredFetcher(BaseFetcher):
         vintages = self._client.get_series_all_releases(external_id)
 
         observations = []
+        revision_counts: dict[date, int] = {}
         for _, row in vintages.iterrows():
             if row["value"] != row["value"]:  # NaN check
                 continue
-            obs_date = row.name
+            obs_date = row.get("date", row.name)
             if hasattr(obs_date, "date"):
                 obs_date = obs_date.date()
             if start_date <= obs_date <= end_date:
+                revision_num = revision_counts.get(obs_date, 0)
+                revision_counts[obs_date] = revision_num + 1
                 observations.append({
                     "date": obs_date,
                     "value": float(row["value"]),
                     "release_date": row.get("realtime_start"),
+                    "revision_num": revision_num,
                 })
 
         return observations
@@ -179,6 +183,32 @@ class FredFetcher(BaseFetcher):
             start_date=start_date,
             end_date=end_date,
         )
+
+    def search_series_candidates(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search FRED for candidate series matching a free-text query."""
+        results = self._client.search(query, limit=limit)
+        candidates: list[dict[str, Any]] = []
+        try:
+            iterator = results.iterrows()
+        except AttributeError:
+            return candidates
+
+        for external_id, row in iterator:
+            candidate = {
+                "external_id": str(external_id),
+                "name": row.get("title") or str(external_id),
+                "description": row.get("notes"),
+                "source": self.source_name,
+                "frequency": row.get("frequency"),
+                "units": row.get("units"),
+            }
+            candidates.append(candidate)
+        return candidates
 
     # -------------------------------------------------------------------------
     # Release Calendar Methods
@@ -315,10 +345,14 @@ class FredFetcher(BaseFetcher):
         release_dates = self.fetch_release_dates(days_ahead=days_ahead)
         inserted = 0
         skipped = 0
+        removed = 0
+        today = date.today()
+        end_date = today + timedelta(days=days_ahead)
 
         with get_session() as session:
             # Build a map of fred_release_id -> release.id
             releases = {r.fred_release_id: r.id for r in session.query(Release).all()}
+            desired_dates_by_release: dict[int, set[date]] = {}
 
             for rd in release_dates:
                 fred_id = rd["fred_release_id"]
@@ -329,6 +363,7 @@ class FredFetcher(BaseFetcher):
 
                 release_id = releases[fred_id]
                 release_date_val = rd["release_date"]
+                desired_dates_by_release.setdefault(release_id, set()).add(release_date_val)
 
                 # Check if already exists
                 existing = session.query(ReleaseDate).filter_by(
@@ -346,10 +381,31 @@ class FredFetcher(BaseFetcher):
                 else:
                     skipped += 1
 
+            if desired_dates_by_release:
+                existing_rows = (
+                    session.query(ReleaseDate)
+                    .filter(
+                        ReleaseDate.release_id.in_(desired_dates_by_release.keys()),
+                        ReleaseDate.release_date >= today,
+                        ReleaseDate.release_date <= end_date,
+                    )
+                    .all()
+                )
+                for row in existing_rows:
+                    desired_dates = desired_dates_by_release.get(row.release_id, set())
+                    if row.release_date not in desired_dates:
+                        session.delete(row)
+                        removed += 1
+
             session.commit()
 
-        logger.info(f"Synced release dates: {inserted} inserted, {skipped} skipped")
-        return {"inserted": inserted, "skipped": skipped}
+        logger.info(
+            "Synced release dates: %s inserted, %s skipped, %s removed",
+            inserted,
+            skipped,
+            removed,
+        )
+        return {"inserted": inserted, "skipped": skipped, "removed": removed}
 
     def get_upcoming_releases(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming releases from the database.

@@ -506,12 +506,14 @@ class HybridSearchEngine:
             conditions.append("c.page_number <= ?")
             params.append(scope.max_page_number)
 
+        source_date_expr = "DATE(COALESCE(NULLIF(c.source_date, ''), c.created_at))"
+
         if scope.date_from:
-            conditions.append("c.created_at >= ?")
+            conditions.append(f"{source_date_expr} >= DATE(?)")
             params.append(scope.date_from)
 
         if scope.date_to:
-            conditions.append("c.created_at <= ?")
+            conditions.append(f"{source_date_expr} <= DATE(?)")
             params.append(scope.date_to)
 
         return conditions, params

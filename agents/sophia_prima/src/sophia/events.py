@@ -19,6 +19,7 @@ class EventType(str, Enum):
     MESSAGE_START = "message_start"
     MESSAGE_DELTA = "message_delta"
     MESSAGE_END = "message_end"
+    RESEARCH_PLAN_CREATED = "research_plan_created"
     SKILL_ACTIVATED = "skill_activated"
     TOOL_EXECUTION_START = "tool_execution_start"
     TOOL_EXECUTION_UPDATE = "tool_execution_update"
@@ -175,6 +176,36 @@ def message_end(
         type=EventType.MESSAGE_END,
         data=_inject_run_context(
             {"message": message},
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        ),
+    )
+
+
+def research_plan_created(
+    playbook_id: str,
+    summary: str,
+    indicator_families: tuple[str, ...] = (),
+    indicator_queries: tuple[dict[str, object], ...] = (),
+    capability_checks: tuple[dict[str, object], ...] = (),
+    acquisition_decisions: tuple[dict[str, object], ...] = (),
+    *,
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    task_id: str | None = None,
+) -> AgentEvent:
+    return AgentEvent(
+        type=EventType.RESEARCH_PLAN_CREATED,
+        data=_inject_run_context(
+            {
+                "playbook_id": playbook_id,
+                "summary": summary,
+                "indicator_families": indicator_families,
+                "indicator_queries": indicator_queries,
+                "capability_checks": capability_checks,
+                "acquisition_decisions": acquisition_decisions,
+            },
             run_id=run_id,
             parent_run_id=parent_run_id,
             task_id=task_id,

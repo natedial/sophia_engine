@@ -34,20 +34,22 @@ def daily_sweep_fred() -> dict:
             f"{total_records} total records"
         )
 
-        return {
+        result = {
             "status": "success",
             "series_fetched": success_count,
             "series_failed": len(results) - success_count,
             "total_records": total_records,
         }
+        return result
 
     except Exception as e:
         logger.error(f"Daily FRED sweep failed: {e}")
-        return {"status": "error", "error": str(e)}
+        result = {"status": "error", "error": str(e)}
+        return result
 
     finally:
         completed_at = datetime.utcnow()
-        _log_sweep("FRED", "daily_sweep", started_at, completed_at)
+        _log_sweep("FRED", "daily_sweep", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
 def daily_sweep_bls() -> dict:
@@ -69,20 +71,22 @@ def daily_sweep_bls() -> dict:
             f"{total_records} total records"
         )
 
-        return {
+        result = {
             "status": "success",
             "series_fetched": success_count,
             "series_failed": len(results) - success_count,
             "total_records": total_records,
         }
+        return result
 
     except Exception as e:
         logger.error(f"Daily BLS sweep failed: {e}")
-        return {"status": "error", "error": str(e)}
+        result = {"status": "error", "error": str(e)}
+        return result
 
     finally:
         completed_at = datetime.utcnow()
-        _log_sweep("BLS", "daily_sweep", started_at, completed_at)
+        _log_sweep("BLS", "daily_sweep", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
 def daily_sweep_treasury_announced() -> dict:
@@ -108,11 +112,12 @@ def daily_sweep_treasury_announced() -> dict:
 
     except Exception as e:
         logger.error(f"TreasuryDirect sync failed: {e}")
-        return {"status": "error", "error": str(e)}
+        result = {"status": "error", "error": str(e)}
+        return result
 
     finally:
         completed_at = datetime.utcnow()
-        _log_sweep("TREASURY", "announced_auctions", started_at, completed_at)
+        _log_sweep("TREASURY", "announced_auctions", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
 def daily_sweep_all() -> dict:
@@ -159,30 +164,38 @@ def fetch_series_on_release(source: str, series_ids: list[str], release_name: st
             f"{total_records} records"
         )
 
-        return {
+        result = {
             "status": "success",
             "release": release_name,
             "series_fetched": success_count,
             "total_records": total_records,
         }
+        return result
 
     except Exception as e:
         logger.error(f"Release fetch failed ({release_name}): {e}")
-        return {"status": "error", "release": release_name, "error": str(e)}
+        result = {"status": "error", "release": release_name, "error": str(e)}
+        return result
 
     finally:
         completed_at = datetime.utcnow()
-        _log_sweep(source, f"release_{release_name}", started_at, completed_at)
+        _log_sweep(source, f"release_{release_name}", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
-def _log_sweep(source: str, job_type: str, started_at: datetime, completed_at: datetime) -> None:
+def _log_sweep(
+    source: str,
+    job_type: str,
+    started_at: datetime,
+    completed_at: datetime,
+    status: str,
+) -> None:
     """Log a sweep operation to the database."""
     try:
         with get_session() as session:
             log = FetchLog(
                 started_at=started_at,
                 completed_at=completed_at,
-                status="completed",
+                status=status,
             )
             session.add(log)
     except Exception as e:

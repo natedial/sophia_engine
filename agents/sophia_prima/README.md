@@ -6,6 +6,7 @@ It now includes:
 - Interactive CLI (`sophia`)
 - Surface gateway daemon (`sophia-gateway`) with deterministic routing
 - Telegram channel adapter support via gateway-owned polling
+- Optional Codex-backed `dev_worker` subagent for delegated repo changes
 
 ## Run Gateway
 
@@ -36,6 +37,15 @@ LLM provider:
 - `AGENT_FS_WRITE_ALLOWLIST` (comma-separated writable roots, default `.sophia`)
 - `AGENT_FS_ENFORCE_READ_POLICY` (`true` default, deny-by-default read guard)
 - `AGENT_FS_READ_ALLOWLIST` (comma-separated readable roots, default `config,skills,.sophia`)
+- `DEV_WORKER_ENABLED` (`false` default)
+- `DEV_WORKER_CODEX_COMMAND` (`codex` default)
+- `DEV_WORKER_MODEL` (optional Codex model override)
+- `DEV_WORKER_CODEX_SANDBOX` (`workspace-write` default)
+- `DEV_WORKER_WORKSPACE_ROOT` (repo/worktree root the dev worker may edit)
+- `DEV_WORKER_OUTPUT_DIR` (default `.sophia/dev_worker`)
+
+When enabling `dev_worker`, widen `AGENT_FS_READ_ALLOWLIST` and `AGENT_FS_WRITE_ALLOWLIST`
+to include the repo/worktree root you want Codex to inspect and modify.
 
 Telegram:
 - `TELEGRAM_BOT_TOKEN` (single account fallback)

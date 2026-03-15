@@ -77,42 +77,164 @@ class SubagentOrchestrator:
         """Create a deterministic task plan for the delegated thin-slice."""
         lowered = message.lower()
         wants_research = any(token in lowered for token in ("research", "analy", "brief"))
+        wants_quant = any(
+            token in lowered
+            for token in (
+                "compute",
+                "calcula",
+                "regression",
+                "correl",
+                "volatility",
+                "mean",
+                "median",
+                "std",
+                "percent change",
+                "yoy",
+                "mom",
+            )
+        )
+        wants_citation_audit = any(
+            token in lowered for token in ("citation", "citations", "source", "sources", "audit")
+        )
+        wants_memory = any(
+            token in lowered for token in ("remember", "memory", "lesson", "preference")
+        )
         wants_chart = any(
             token in lowered for token in ("chart", "plot", "visual", "dashboard", "canvas")
         )
-        if not (wants_research and wants_chart and canvas_id):
-            return []
+        wants_scheduler = any(
+            token in lowered for token in ("scheduler", "cron", "scheduled job", "task runner")
+        )
+        wants_data_pipeline = any(
+            token in lowered
+            for token in (
+                "data pipe",
+                "pipeline",
+                "connector",
+                "ingest",
+                "ingestion",
+                "fetcher",
+                "source data",
+                "etl",
+            )
+        )
+        wants_engineering_action = any(
+            token in lowered
+            for token in (
+                "build",
+                "implement",
+                "scaffold",
+                "wire",
+                "integrate",
+                "add",
+                "create",
+                "set up",
+                "setup",
+                "plumb",
+            )
+        )
+        if not any((wants_research, wants_quant, wants_citation_audit, wants_memory, wants_chart)):
+            if not any((wants_scheduler, wants_data_pipeline, wants_engineering_action)):
+                return []
 
         tool_names = {t.name for t in available_tools}
         has_data_tools = any(
             name.startswith("get_") or name.startswith("search_")
             for name in tool_names
         )
+        has_compute_tools = "compute" in tool_names or "list_computation_types" in tool_names
         has_chart_tools = any(
             name.startswith("create_") and name.endswith("_chart")
             for name in tool_names
         )
-        if not has_data_tools or not has_chart_tools:
-            return []
-
-        return [
-            SubagentTask(
-                task_id="research",
-                profile_name="research_worker",
-                prompt=(
-                    "Collect the strongest factual evidence for this request.\n"
-                    f"User request: {message}"
-                ),
-            ),
-            SubagentTask(
-                task_id="chart",
-                profile_name="chart_worker",
-                prompt=(
-                    f"Create one chart on canvas_id={canvas_id} that best supports this request.\n"
-                    f"User request: {message}"
-                ),
-            ),
-        ]
+        tasks: list[SubagentTask] = []
+        should_delegate_dev = False
+        dev_reasons: list[str] = []
+        if wants_research and not has_data_tools:
+            should_delegate_dev = True
+            dev_reasons.append("data sourcing/retrieval capability is missing")
+        if wants_quant and not has_compute_tools:
+            should_delegate_dev = True
+            dev_reasons.append("deterministic compute capability is missing")
+        if wants_scheduler:
+            should_delegate_dev = True
+            dev_reasons.append("scheduler/task automation capability is requested")
+        if wants_data_pipeline and wants_engineering_action:
+            should_delegate_dev = True
+            dev_reasons.append("data pipeline/integration work is requested")
+        if wants_research and has_data_tools:
+            tasks.append(
+                SubagentTask(
+                    task_id="research",
+                    profile_name="research_worker",
+                    prompt=(
+                        "Collect the strongest factual evidence for this request.\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        if should_delegate_dev:
+            reasons_text = "; ".join(dev_reasons) if dev_reasons else "engineering work is requested"
+            tasks.append(
+                SubagentTask(
+                    task_id="dev",
+                    profile_name="dev_worker",
+                    prompt=(
+                        "Inspect the repository and implement or scaffold the missing capability "
+                        "needed for this request.\n"
+                        f"Why delegated: {reasons_text}\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        if wants_quant and has_compute_tools:
+            tasks.append(
+                SubagentTask(
+                    task_id="quant",
+                    profile_name="quant_worker",
+                    prompt=(
+                        "Run the smallest set of computations needed to support the request. "
+                        "Return concrete outputs and any modeling caveats.\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        if wants_chart and canvas_id and has_data_tools and has_chart_tools:
+            tasks.append(
+                SubagentTask(
+                    task_id="chart",
+                    profile_name="chart_worker",
+                    prompt=(
+                        f"Create one chart on canvas_id={canvas_id} that best supports this request.\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        if wants_citation_audit and "search_research" in tool_names:
+            tasks.append(
+                SubagentTask(
+                    task_id="citation_audit",
+                    profile_name="citation_auditor",
+                    prompt=(
+                        "Identify the strongest evidence sources, the most likely citation gaps, "
+                        "and any claims that require explicit sourcing.\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        if wants_memory:
+            tasks.append(
+                SubagentTask(
+                    task_id="memory",
+                    profile_name="memory_curator",
+                    prompt=(
+                        "Extract the durable user preference, lesson, or project memory that "
+                        "should survive this turn, and explain why.\n"
+                        f"User request: {message}"
+                    ),
+                )
+            )
+        return tasks
 
     async def execute_plan(
         self,

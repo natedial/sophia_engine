@@ -10,8 +10,11 @@ from typing import Any, AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 
+from sophia.agent_profiles import AgentProfile
 from sophia.config import Settings, get_settings
 from sophia.context import ConversationContext, apply_transforms, summarize_long_tool_results
+from sophia.dev_worker import CodexDevWorker
+from sophia.episto_adapter import EpistoPlannerAdapter
 from sophia.events import (
     AgentEvent,
     agent_end,
@@ -19,6 +22,7 @@ from sophia.events import (
     message_delta,
     message_end,
     message_start,
+    research_plan_created,
     skill_activated,
     subagent_end,
     subagent_error,
@@ -105,9 +109,14 @@ class SophiaAgent:
         get_steering_messages: SteeringCallback | None = None,
         get_follow_up_messages: FollowUpCallback | None = None,
         canvas_id: str | None = None,
+        profile: AgentProfile | None = None,
     ) -> None:
         self.provider = provider
         self.settings = settings or get_settings()
+        self.profile = profile or AgentProfile(
+            agent_id="sophia_prima",
+            label="Sophia Prima",
+        )
         self.read_policy = self.settings.build_read_policy()
         self.write_policy = self.settings.build_write_policy()
         self.seed_lessons = self._load_lessons()
@@ -181,16 +190,26 @@ class SophiaAgent:
         self.soul = self._load_soul()
         self.skills = SkillRegistry(
             skills_root=self.settings.skills_path,
-            enabled=self.settings.skills_enabled,
+            enabled=(
+                self.settings.skills_enabled
+                if self.profile.skills_enabled is None
+                else self.profile.skills_enabled
+            ),
             max_loaded_chars=self.settings.skills_max_loaded_chars,
             implicit_min_overlap=self.settings.skills_implicit_match_min_overlap,
             read_policy=self.read_policy,
+        )
+        self.subagents_enabled = (
+            self.settings.subagents_enabled
+            if self.profile.subagents_enabled is None
+            else self.profile.subagents_enabled
         )
         self.subagent_profiles = self._build_subagent_profiles()
         self.subagents = SubagentOrchestrator(
             profiles=self.subagent_profiles,
             max_parallel_workers=self.settings.subagents_max_parallel_workers,
         )
+        self.episto = EpistoPlannerAdapter(self.pylon)
 
     def _build_subagent_profiles(self) -> dict[str, SubagentProfile]:
         default_timeout = self.settings.subagents_default_timeout_sec
@@ -213,6 +232,24 @@ class SophiaAgent:
                 token_budget_chars=default_budget,
                 max_result_chars=default_result_chars,
             ),
+            "quant_worker": SubagentProfile(
+                name="quant_worker",
+                instructions=(
+                    "You are a delegated quantitative worker. Prefer deterministic compute "
+                    "tools, keep assumptions explicit, and return compact numeric findings."
+                ),
+                allowed_tools={
+                    "compute",
+                    "list_computation_types",
+                    "get_observations",
+                    "get_series_change",
+                    "get_latest_value",
+                },
+                max_tool_iterations=default_iters,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
             "chart_worker": SubagentProfile(
                 name="chart_worker",
                 instructions=(
@@ -226,6 +263,49 @@ class SophiaAgent:
                     "create_yield_curve_chart",
                 },
                 max_tool_iterations=default_iters,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
+            "citation_auditor": SubagentProfile(
+                name="citation_auditor",
+                instructions=(
+                    "You are a delegated citation auditor. Focus on evidence quality, source "
+                    "coverage, contradictory findings, and missing provenance."
+                ),
+                allowed_tools={
+                    "search_research",
+                    "get_research_chunk",
+                    "list_research_sources",
+                    "fed_speaker_question",
+                    "fed_speaker_brief",
+                },
+                max_tool_iterations=default_iters,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
+            "memory_curator": SubagentProfile(
+                name="memory_curator",
+                instructions=(
+                    "You are a delegated memory curator. Extract only durable user facts, "
+                    "preferences, or project lessons that should persist beyond the current turn."
+                ),
+                allowed_tools=None,
+                max_tool_iterations=2,
+                timeout_sec=default_timeout,
+                token_budget_chars=default_budget,
+                max_result_chars=default_result_chars,
+            ),
+            "dev_worker": SubagentProfile(
+                name="dev_worker",
+                instructions=(
+                    "You are a delegated development worker. Inspect the repo, make the "
+                    "smallest durable code or config change needed, verify it where practical, "
+                    "and report the implementation outcome back to the supervisor."
+                ),
+                allowed_tools=set(),
+                max_tool_iterations=1,
                 timeout_sec=default_timeout,
                 token_budget_chars=default_budget,
                 max_result_chars=default_result_chars,
@@ -277,6 +357,7 @@ class SophiaAgent:
         active_skill: SkillMatch | None = None,
         active_tools: list[ToolSchema] | None = None,
         subagent_context: str | None = None,
+        research_plan_context: str | None = None,
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
@@ -288,6 +369,27 @@ class SophiaAgent:
                 "you must call the appropriate tool(s) before answering. "
                 "Do not fabricate numbers. If tools are unavailable, explain the limitation."
             )
+            if {
+                "search_series",
+                "get_series_info",
+                "get_observations",
+            }.issubset(set(tool_names)):
+                dynamic_context["Time series policy"] = (
+                    "When answering from economic time-series tools:\n"
+                    "1) Use search_series only to find candidate ids. Before citing a series, call "
+                    "get_series_info and verify the title, source, frequency, and units match the "
+                    "requested measure and sector.\n"
+                    "2) Do not label a series as hourly earnings, wages, openings, quits, payrolls, "
+                    "or unemployment unless the metadata clearly matches that concept.\n"
+                    "3) If the user asks for a sector-specific series, verify the title/description "
+                    "matches that sector. If the match is ambiguous, say so and ask or choose a safer "
+                    "fallback explicitly.\n"
+                    "4) State the series ids you used in the answer when comparing multiple series.\n"
+                    "5) State units explicitly. For level series reported in thousands, say that or "
+                    "convert cleanly to millions; do not present them as unlabeled raw counts.\n"
+                    "6) If metadata and values conflict with the intended concept, do not use the "
+                    "series. Explain the mismatch instead."
+                )
             if "search_research" in tool_names:
                 dynamic_context["Research retrieval policy"] = (
                     "When using Tholos research tools:\n"
@@ -344,11 +446,29 @@ class SophiaAgent:
                 "Do not ask the user for a canvas ID."
             )
 
+        profile_lines = [f"ID: {self.profile.agent_id}", f"Label: {self.profile.label}"]
+        if self.profile.description:
+            profile_lines.append(f"Description: {self.profile.description}")
+        if self.profile.prompt:
+            profile_lines.append("Operating instructions:")
+            profile_lines.append(self.profile.prompt)
+        if self.profile.tool_allowlist is not None:
+            if self.profile.tool_allowlist:
+                profile_lines.append(
+                    "Tool scope: " + ", ".join(self.profile.tool_allowlist)
+                )
+            else:
+                profile_lines.append("Tool scope: (none)")
+        dynamic_context["Active agent profile"] = "\n".join(profile_lines)
+
         if memory_context:
             dynamic_context["Memory context"] = memory_context
 
         if subagent_context:
             dynamic_context["Subagent findings"] = subagent_context
+
+        if research_plan_context:
+            dynamic_context["Research plan"] = research_plan_context
 
         if active_skill is not None:
             active_lines = [f"Name: {active_skill.skill.name}"]
@@ -422,6 +542,30 @@ class SophiaAgent:
         )
         return f"{system_prompt}{repair}"
 
+    @staticmethod
+    def _build_force_final_response_prompt(system_prompt: str) -> str:
+        requirement = (
+            "\n\n## Final Response Requirement\n"
+            "You have already gathered tool output for this turn. "
+            "Do not call any more tools. Produce a concise natural-language answer now "
+            "using only the tool results already in context. If the evidence is insufficient "
+            "or mismatched, say that plainly."
+        )
+        return f"{system_prompt}{requirement}"
+
+    @staticmethod
+    def _build_tool_loop_fallback_response(*, used_tools: bool) -> str:
+        if used_tools:
+            return (
+                "I gathered tool output for this request, but I couldn't complete a final "
+                "natural-language synthesis in this turn. Please retry and I will continue "
+                "from the fetched data instead of starting over."
+            )
+        return (
+            "I couldn't complete a final response in this turn. Please retry and I will "
+            "try again with a tighter tool plan."
+        )
+
     # ------------------------------------------------------------------
     # Tool helpers
     # ------------------------------------------------------------------
@@ -430,6 +574,9 @@ class SophiaAgent:
         """Get provider-agnostic tool schemas from pylon."""
         only_healthy = self.preflight_result is not None
         tool_defs = self.pylon.get_tools(only_healthy=only_healthy)
+        if self.profile.tool_allowlist is not None:
+            allowed = set(self.profile.tool_allowlist)
+            tool_defs = [td for td in tool_defs if td.name in allowed]
         return [
             ToolSchema(
                 name=td.name,
@@ -912,7 +1059,7 @@ class SophiaAgent:
         message: str,
         available_tools: list[ToolSchema],
     ) -> bool:
-        if not self.settings.subagents_enabled:
+        if not self.subagents_enabled:
             return False
         planned = self.subagents.plan_for_message(
             message=message,
@@ -945,6 +1092,12 @@ class SophiaAgent:
         parent_run_id: str,
     ) -> SubagentResult:
         sub_run_id = f"{parent_run_id}:{task.task_id}"
+        if profile.name == "dev_worker":
+            return await self._run_dev_worker_task(
+                task=task,
+                profile=profile,
+                parent_run_id=parent_run_id,
+            )
         context = ConversationContext(session_id=f"{task.task_id}:{sub_run_id}")
         context.add_user_message(task.prompt)
 
@@ -1034,6 +1187,50 @@ class SophiaAgent:
             success=False,
             error="Subagent max tool iterations reached",
             token_chars_used=chars_used,
+        )
+
+    async def _run_dev_worker_task(
+        self,
+        *,
+        task: SubagentTask,
+        profile: SubagentProfile,
+        parent_run_id: str,
+    ) -> SubagentResult:
+        sub_run_id = f"{parent_run_id}:{task.task_id}"
+        runner = CodexDevWorker(
+            settings=self.settings,
+            read_policy=self.read_policy,
+            write_policy=self.write_policy,
+        )
+        execution = await runner.run(
+            supervisor_task=task.prompt,
+            task_id=sub_run_id.replace(":", "_"),
+            timeout_sec=max(0.1, profile.timeout_sec),
+        )
+        summary_parts: list[str] = []
+        if execution.summary:
+            summary_parts.append(execution.summary.strip())
+        if execution.changed_files:
+            summary_parts.append(
+                "Changed files: " + ", ".join(execution.changed_files[:8])
+            )
+        if execution.verification:
+            summary_parts.append(
+                "Verification: " + "; ".join(execution.verification[:4])
+            )
+        if execution.follow_ups and not execution.success:
+            summary_parts.append(
+                "Follow-ups: " + "; ".join(execution.follow_ups[:4])
+            )
+        summary = " ".join(part for part in summary_parts if part).strip()
+        return SubagentResult(
+            task_id=task.task_id,
+            profile_name=profile.name,
+            run_id=sub_run_id,
+            success=execution.success,
+            content=summary[: profile.max_result_chars],
+            error=execution.error,
+            timed_out=execution.status == "timed_out",
         )
 
     # ------------------------------------------------------------------
@@ -1130,6 +1327,21 @@ class SophiaAgent:
 
             active_user_message = self._latest_user_text(context) or message
             active_skill = self.skills.match(active_user_message)
+            research_plan_context = None
+            plan_context = await self.episto.plan(active_user_message)
+            if plan_context is not None:
+                research_plan_context = plan_context.summary
+                yield research_plan_created(
+                    playbook_id=plan_context.playbook_id,
+                    summary=plan_context.summary,
+                    indicator_families=plan_context.indicator_families,
+                    indicator_queries=plan_context.indicator_queries,
+                    capability_checks=plan_context.capability_checks,
+                    acquisition_decisions=plan_context.acquisition_decisions,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
             if active_skill is not None:
                 yield skill_activated(
                     name=active_skill.skill.name,
@@ -1153,13 +1365,14 @@ class SophiaAgent:
                 active_skill=active_skill,
                 active_tools=turn_tools,
                 subagent_context=subagent_context,
+                research_plan_context=research_plan_context,
             )
             iterations = 0
             last_message: Message | None = None
             tools_required_for_turn = self._should_enforce_tools(
                 active_user_message,
                 turn_tools,
-            )
+            ) and not bool(subagent_context)
             citations_required_for_turn = self._requires_research_citations(
                 active_user_message,
                 turn_tools,
@@ -1291,16 +1504,6 @@ class SophiaAgent:
                     )
 
                 assistant_msg = completion.message
-                yield message_end(
-                    assistant_msg,
-                    run_id=active_run_id,
-                    parent_run_id=parent_run_id,
-                    task_id=task_id,
-                )
-
-                # Add assistant message to context
-                context.add_assistant_message(assistant_msg)
-                last_message = assistant_msg
 
                 # If no tool calls, check enforcement then break
                 if not assistant_msg.tool_calls:
@@ -1314,8 +1517,6 @@ class SophiaAgent:
                             system_prompt = self._build_enforced_tool_prompt(system_prompt)
                         else:
                             system_prompt = self._build_hard_tool_prompt(system_prompt, turn_tools)
-                        # Remove the assistant message we just added and retry
-                        context.messages.pop()
                         continue
 
                     if tools_required_for_turn and not used_tools_this_turn:
@@ -1324,7 +1525,6 @@ class SophiaAgent:
                             "synthesize from memory. Please retry and I'll run the research "
                             "tools first."
                         )
-                        context.messages[-1] = assistant_msg
 
                     has_invalid_chunk_citations = self._has_invalid_chunk_citations(
                         assistant_msg.content,
@@ -1352,7 +1552,6 @@ class SophiaAgent:
                             system_prompt,
                             allowed_chunk_ids=cited_chunk_ids_seen,
                         )
-                        context.messages.pop()
                         continue
                     if citation_repair_attempted and citation_issue:
                         fallback = self._build_evidence_fallback_response(
@@ -1367,9 +1566,30 @@ class SophiaAgent:
                                 "tool results in this turn. Please retry and I will fetch sources "
                                 "again before summarizing."
                             )
-                        context.messages[-1] = assistant_msg
+                    if not assistant_msg.content.strip():
+                        assistant_msg.content = self._build_tool_loop_fallback_response(
+                            used_tools=used_tools_this_turn,
+                        )
+
+                    yield message_end(
+                        assistant_msg,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
+                    context.add_assistant_message(assistant_msg)
+                    last_message = assistant_msg
 
                     break
+
+                yield message_end(
+                    assistant_msg,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
+                context.add_assistant_message(assistant_msg)
+                last_message = assistant_msg
 
                 # Execute tool calls
                 tool_results: list[ToolResultMessage] = []
@@ -1422,6 +1642,43 @@ class SophiaAgent:
 
                 # Add tool results to context
                 context.add_tool_results(tool_results)
+
+            if (
+                last_message is not None
+                and last_message.tool_calls
+                and not last_message.content.strip()
+            ):
+                transformed = apply_transforms(
+                    context.messages, self.config.context_transformers
+                )
+                synthesis_prompt = self._build_force_final_response_prompt(system_prompt)
+                yield message_start(
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
+                completion = await self.provider.complete(
+                    model=self.settings.llm_model,
+                    system=synthesis_prompt,
+                    messages=transformed,
+                    tools=None,
+                )
+                assistant_msg = completion.message
+                if assistant_msg.tool_calls or not assistant_msg.content.strip():
+                    assistant_msg = Message(
+                        role=Role.ASSISTANT,
+                        content=self._build_tool_loop_fallback_response(
+                            used_tools=used_tools_this_turn,
+                        ),
+                    )
+                yield message_end(
+                    assistant_msg,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
+                context.add_assistant_message(assistant_msg)
+                last_message = assistant_msg
 
             yield turn_end(
                 turn,

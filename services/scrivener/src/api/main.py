@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
 
+from src.acquisition import AcquisitionService
 from src.query import SeriesQuery, AuctionQuery
 
 app = FastAPI(
@@ -13,6 +14,30 @@ app = FastAPI(
     description="Economic and markets data query service",
     version="0.1.0",
 )
+
+_acquisition_service: AcquisitionService | None = None
+
+
+def get_acquisition_service() -> AcquisitionService:
+    global _acquisition_service
+    if _acquisition_service is None:
+        _acquisition_service = AcquisitionService()
+    return _acquisition_service
+
+
+def payload_to_request(payload: "SeriesAcquisitionRequest"):
+    from src.acquisition.service import AcquisitionRequest
+
+    return AcquisitionRequest(
+        source=payload.source,
+        external_id=payload.external_id,
+        query=payload.query,
+        retention_target=payload.retention_target,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        max_candidates=payload.max_candidates,
+        promote_if_valid=payload.promote_if_valid,
+    )
 
 
 # --- Response Models ---
@@ -45,7 +70,7 @@ class SeriesChange(BaseModel):
     current_value: float
     previous_date: str
     previous_value: float
-    change: float
+    change: float | None
     change_type: str
 
 
@@ -82,6 +107,17 @@ class AuctionSummary(BaseModel):
     by_type: dict[str, int] | None = None
 
 
+class SeriesAcquisitionRequest(BaseModel):
+    source: str
+    external_id: str | None = None
+    query: str | None = None
+    retention_target: str = "staging"
+    start_date: date | None = None
+    end_date: date | None = None
+    max_candidates: int = 5
+    promote_if_valid: bool = False
+
+
 # --- Health Check ---
 
 @app.get("/health")
@@ -113,7 +149,10 @@ def search_series(
 @app.get("/series/{series_id}", response_model=SeriesInfo)
 def get_series_info(series_id: str, source: str | None = None):
     """Get metadata for a series."""
-    result = SeriesQuery.get_series_info(series_id, source=source)
+    try:
+        result = SeriesQuery.get_series_info(series_id, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:
         raise HTTPException(status_code=404, detail=f"Series '{series_id}' not found")
     return result
@@ -122,7 +161,10 @@ def get_series_info(series_id: str, source: str | None = None):
 @app.get("/series/{series_id}/latest", response_model=LatestValue)
 def get_latest_value(series_id: str, source: str | None = None):
     """Get the most recent value for a series."""
-    result = SeriesQuery.get_latest(series_id, source=source)
+    try:
+        result = SeriesQuery.get_latest(series_id, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:
         raise HTTPException(status_code=404, detail=f"No data found for series '{series_id}'")
     return result
@@ -131,19 +173,27 @@ def get_latest_value(series_id: str, source: str | None = None):
 @app.get("/series/{series_id}/observations", response_model=list[Observation])
 def get_observations(
     series_id: str,
+    days: Annotated[int | None, Query(ge=1, le=3650, description="Trailing window in days")] = None,
     start_date: Annotated[date | None, Query(description="Start date (YYYY-MM-DD)")] = None,
     end_date: Annotated[date | None, Query(description="End date (YYYY-MM-DD)")] = None,
     source: str | None = None,
     limit: Annotated[int | None, Query(le=10000)] = None,
 ):
     """Get observations for a series within a date range."""
-    result = SeriesQuery.get_observations(
-        series_id,
-        start_date=start_date,
-        end_date=end_date,
-        source=source,
-        limit=limit,
-    )
+    resolved_end_date = end_date or date.today()
+    resolved_start_date = start_date
+    if days is not None and resolved_start_date is None:
+        resolved_start_date = resolved_end_date - timedelta(days=days)
+    try:
+        result = SeriesQuery.get_observations(
+            series_id,
+            start_date=resolved_start_date,
+            end_date=resolved_end_date,
+            source=source,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:
         raise HTTPException(status_code=404, detail=f"No observations found for series '{series_id}'")
     return result
@@ -154,18 +204,61 @@ def get_series_change(
     series_id: str,
     periods: Annotated[int, Query(ge=1, le=100)] = 1,
     pct: Annotated[bool, Query(description="Return percentage change")] = True,
+    source: str | None = None,
 ):
     """Calculate change from N periods ago."""
-    result = SeriesQuery.get_change(series_id, periods=periods, pct=pct)
+    try:
+        result = SeriesQuery.get_change(series_id, periods=periods, pct=pct, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:
         raise HTTPException(status_code=404, detail=f"Insufficient data for series '{series_id}'")
     return result
 
 
 @app.post("/series/batch/latest", response_model=dict[str, LatestValue | None])
-def get_multiple_latest(series_ids: list[str]):
+def get_multiple_latest(
+    series_ids: list[str],
+    source: Annotated[str | None, Query(description="Optional source filter")] = None,
+):
     """Get latest values for multiple series."""
-    return SeriesQuery.get_multiple_latest(series_ids)
+    try:
+        return SeriesQuery.get_multiple_latest(series_ids, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/ingestion/resolve")
+def resolve_external_series(payload: SeriesAcquisitionRequest):
+    """Resolve external source candidates for a query or explicit series id."""
+    try:
+        return get_acquisition_service().resolve(
+            request=payload_to_request(payload)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/ingestion/series")
+def ingest_series(payload: SeriesAcquisitionRequest):
+    """Fetch a series from an approved source and write it into Scrivener."""
+    try:
+        result = get_acquisition_service().ingest(
+            request=payload_to_request(payload)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    status = result.get("status")
+    if status == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("message") or "series not found")
+    if status == "ambiguous":
+        raise HTTPException(status_code=409, detail=result)
+    if status == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("ingestion_result", {}).get("error") or "ingestion failed",
+        )
+    return result
 
 
 # --- Auction Endpoints ---
@@ -497,6 +590,7 @@ def list_releases(
             releases = session.query(Release).order_by(Release.name).limit(limit).all()
             results = [
                 {
+                    "id": r.id,
                     "fred_release_id": r.fred_release_id,
                     "name": r.name,
                     "link": r.link,
@@ -507,7 +601,7 @@ def list_releases(
 
     return [
         ReleaseRecord(
-            id=0,  # Not included in search results
+            id=r["id"],
             fred_release_id=r["fred_release_id"],
             name=r["name"],
             link=r.get("link"),
@@ -647,7 +741,6 @@ def get_release_schedule(
 ):
     """Get a release and its upcoming schedule."""
     from src.query import ReleaseQuery
-
     result = ReleaseQuery.get_release_schedule(fred_release_id, days_ahead=days)
 
     if not result:
@@ -665,36 +758,18 @@ def get_release_dates(
     days: Annotated[int, Query(ge=1, le=365)] = 90,
 ):
     """Get upcoming release dates for a specific FRED release."""
-    from src.db import get_session
-    from src.db.models import Release, ReleaseDate
+    from src.query import ReleaseQuery
 
-    with get_session() as session:
-        release = session.query(Release).filter(
-            Release.fred_release_id == fred_release_id
-        ).first()
-
-        if not release:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Release {fred_release_id} not found",
-            )
-
-        end_date = date.today() + timedelta(days=days)
-        dates = (
-            session.query(ReleaseDate)
-            .filter(
-                ReleaseDate.release_id == release.id,
-                ReleaseDate.release_date >= date.today(),
-                ReleaseDate.release_date <= end_date,
-            )
-            .order_by(ReleaseDate.release_date)
-            .all()
+    result = ReleaseQuery.get_release_schedule(fred_release_id, days_ahead=days)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Release {fred_release_id} not found",
         )
-
-        return [
-            {"release_date": rd.release_date.isoformat()}
-            for rd in dates
-        ]
+    return [
+        {"release_date": release_date}
+        for release_date in result["upcoming_dates"]
+    ]
 
 
 @app.post("/releases/sync", response_model=ReleaseSyncResult)

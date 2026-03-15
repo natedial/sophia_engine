@@ -169,6 +169,9 @@ sophia_core/
 - **Retry logic** for transient errors (timeout, rate limit)
 - **CLI: Show tool calls in real-time** as they happen, not just after
 - **Streaming responses** for web/CLI
+- **Deployment isolation for agent-owned config** - move `AGENT_FS_*` and related runtime
+  policy/env out of agent-writable workspace, run under a dedicated low-privilege account,
+  and keep restart/deploy permissions outside agent control
 
 ### Future Enhancements
 - **Skills system** - packaged multi-step workflows (e.g., `/briefing`)

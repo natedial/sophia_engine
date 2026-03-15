@@ -80,6 +80,58 @@ class ScrivenerClient(BaseClient):
         response.raise_for_status()
         return response.json()
 
+    async def resolve_external_series(
+        self,
+        *,
+        source: str,
+        external_id: str | None = None,
+        query: str | None = None,
+        max_candidates: int = 5,
+    ) -> dict[str, Any]:
+        """Resolve source-side candidates for an external series."""
+        client = await self._get_client()
+        response = await client.post(
+            "/ingestion/resolve",
+            json={
+                "source": source,
+                "external_id": external_id,
+                "query": query,
+                "max_candidates": max_candidates,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def ingest_series(
+        self,
+        *,
+        source: str,
+        external_id: str | None = None,
+        query: str | None = None,
+        retention_target: str = "staging",
+        start_date: str | None = None,
+        end_date: str | None = None,
+        max_candidates: int = 5,
+        promote_if_valid: bool = False,
+    ) -> dict[str, Any]:
+        """Ingest an external series into Scrivener."""
+        client = await self._get_client()
+        response = await client.post(
+            "/ingestion/series",
+            json={
+                "source": source,
+                "external_id": external_id,
+                "query": query,
+                "retention_target": retention_target,
+                "start_date": start_date,
+                "end_date": end_date,
+                "max_candidates": max_candidates,
+                "promote_if_valid": promote_if_valid,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_auctions(
         self, security_type: str | None = None, days: int = 30
     ) -> dict[str, Any]:

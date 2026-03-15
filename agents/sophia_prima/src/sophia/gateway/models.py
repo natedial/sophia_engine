@@ -29,3 +29,4 @@ class OutboundMessage:
     channel: str
     account_id: str
     peer_id: str
+    run_id: str | None = None

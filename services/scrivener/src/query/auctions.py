@@ -17,6 +17,16 @@ class AuctionQuery:
     """Query interface for Treasury auction data."""
 
     @staticmethod
+    def _normalized_term(term: str):
+        normalized_input = term.lower().replace(" ", "").replace("-", "")
+        normalized_column = func.replace(
+            func.replace(func.lower(TreasuryAuction.security_term), " ", ""),
+            "-",
+            "",
+        )
+        return normalized_column, normalized_input
+
+    @staticmethod
     def _auto_sync_announced() -> bool:
         """Try to sync announced auctions from TreasuryDirect when table has no future rows."""
         try:
@@ -172,13 +182,14 @@ class AuctionQuery:
         Returns:
             Most recent auction for that security, or None
         """
+        normalized_column, normalized_input = AuctionQuery._normalized_term(term)
         with get_session() as session:
             result = (
                 session.query(TreasuryAuction)
                 .filter(
                     and_(
                         TreasuryAuction.security_type == security_type,
-                        TreasuryAuction.security_term.ilike(f"%{term}%"),
+                        normalized_column == normalized_input,
                     )
                 )
                 .order_by(desc(TreasuryAuction.auction_date))
@@ -203,6 +214,7 @@ class AuctionQuery:
         Returns:
             List of {date, yield} records
         """
+        normalized_column, normalized_input = AuctionQuery._normalized_term(term)
         cutoff = date.today() - timedelta(days=days)
 
         with get_session() as session:
@@ -211,7 +223,7 @@ class AuctionQuery:
                 .filter(
                     and_(
                         TreasuryAuction.security_type == security_type,
-                        TreasuryAuction.security_term.ilike(f"%{term}%"),
+                        normalized_column == normalized_input,
                         TreasuryAuction.auction_date >= cutoff,
                         TreasuryAuction.high_yield.isnot(None),
                     )
@@ -224,7 +236,7 @@ class AuctionQuery:
                 {
                     "date": r.auction_date.isoformat(),
                     "yield": float(r.high_yield),
-                    "bid_to_cover": float(r.bid_to_cover_ratio) if r.bid_to_cover_ratio else None,
+                    "bid_to_cover": float(r.bid_to_cover_ratio) if r.bid_to_cover_ratio is not None else None,
                 }
                 for r in results
             ]
@@ -258,9 +270,9 @@ class AuctionQuery:
             if not results:
                 return {"count": 0}
 
-            yields = [float(r.high_yield) for r in results if r.high_yield]
-            btc_ratios = [float(r.bid_to_cover_ratio) for r in results if r.bid_to_cover_ratio]
-            total_offered = sum(float(r.offering_amount) for r in results if r.offering_amount)
+            yields = [float(r.high_yield) for r in results if r.high_yield is not None]
+            btc_ratios = [float(r.bid_to_cover_ratio) for r in results if r.bid_to_cover_ratio is not None]
+            total_offered = sum(float(r.offering_amount) for r in results if r.offering_amount is not None)
 
             return {
                 "count": len(results),
