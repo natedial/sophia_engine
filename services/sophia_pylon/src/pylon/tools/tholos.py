@@ -184,7 +184,7 @@ THOLOS_TOOLS = [
                 name="date_from",
                 type=ToolParameterType.STRING,
                 description=(
-                    "Optional inclusive lower timestamp bound for chunk created_at "
+                    "Optional inclusive lower date bound for source_date "
                     "(ISO date or datetime, e.g. '2026-02-19')."
                 ),
                 required=False,
@@ -193,7 +193,7 @@ THOLOS_TOOLS = [
                 name="date_to",
                 type=ToolParameterType.STRING,
                 description=(
-                    "Optional inclusive upper timestamp bound for chunk created_at "
+                    "Optional inclusive upper date bound for source_date "
                     "(ISO date or datetime, e.g. '2026-02-24')."
                 ),
                 required=False,

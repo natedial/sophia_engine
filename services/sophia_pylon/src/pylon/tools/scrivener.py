@@ -58,7 +58,7 @@ SCRIVENER_TOOLS = [
     ),
     ToolDefinition(
         name="search_series",
-        description="Search for economic data series by keyword. Use this to find relevant series before fetching data.",
+        description="Search for economic data series by keyword. Use this to find candidate series ids before fetching data. Do not treat search results alone as final evidence; after picking a candidate, call get_series_info to verify title, source, frequency, and units.",
         parameters=[
             ToolParameter(
                 name="query",
@@ -94,7 +94,7 @@ SCRIVENER_TOOLS = [
     ),
     ToolDefinition(
         name="get_observations",
-        description="Get historical time series data for a series. Returns date-value pairs.",
+        description="Get historical time series data for a series. Returns date-value pairs. Use get_series_info first to verify the measure and units before citing observations.",
         parameters=[
             ToolParameter(
                 name="series_id",
@@ -127,6 +127,94 @@ SCRIVENER_TOOLS = [
                 description="Number of periods back to compare (default: 1)",
                 required=False,
                 default=1,
+            ),
+        ],
+    ),
+    ToolDefinition(
+        name="resolve_external_series",
+        description="Resolve candidate external series from an approved source before ingestion. Use when local search misses and you need source-side candidate ids.",
+        parameters=[
+            ToolParameter(
+                name="source",
+                type=ToolParameterType.STRING,
+                description="Approved source name (e.g., FRED, BLS)",
+                required=True,
+            ),
+            ToolParameter(
+                name="query",
+                type=ToolParameterType.STRING,
+                description="Free-text query for source-side series resolution",
+                required=False,
+            ),
+            ToolParameter(
+                name="external_id",
+                type=ToolParameterType.STRING,
+                description="Optional explicit external id to validate or pre-resolve",
+                required=False,
+            ),
+            ToolParameter(
+                name="max_candidates",
+                type=ToolParameterType.INTEGER,
+                description="Maximum candidates to return",
+                required=False,
+                default=5,
+            ),
+        ],
+    ),
+    ToolDefinition(
+        name="ingest_series",
+        description="Fetch an approved-source series into Scrivener on demand. Use after local search misses and a source/query or external id is known.",
+        parameters=[
+            ToolParameter(
+                name="source",
+                type=ToolParameterType.STRING,
+                description="Approved source name (e.g., FRED, BLS)",
+                required=True,
+            ),
+            ToolParameter(
+                name="query",
+                type=ToolParameterType.STRING,
+                description="Optional source-side search query used to select a candidate",
+                required=False,
+            ),
+            ToolParameter(
+                name="external_id",
+                type=ToolParameterType.STRING,
+                description="Optional explicit external id to ingest directly",
+                required=False,
+            ),
+            ToolParameter(
+                name="retention_target",
+                type=ToolParameterType.STRING,
+                description="Requested retention tier for the ingested result",
+                required=False,
+                default="staging",
+            ),
+            ToolParameter(
+                name="start_date",
+                type=ToolParameterType.STRING,
+                description="Optional observation start date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="end_date",
+                type=ToolParameterType.STRING,
+                description="Optional observation end date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="max_candidates",
+                type=ToolParameterType.INTEGER,
+                description="Maximum candidates to evaluate when query resolution is used",
+                required=False,
+                default=5,
+            ),
+            ToolParameter(
+                name="promote_if_valid",
+                type=ToolParameterType.BOOLEAN,
+                description="Whether to request immediate canonical promotion when validation succeeds",
+                required=False,
+                default=False,
             ),
         ],
     ),
@@ -274,6 +362,24 @@ class ScrivenerToolExecutor:
                     data = await self.client.get_series_change(
                         parameters["series_id"],
                         parameters.get("periods", 1),
+                    )
+                case "resolve_external_series":
+                    data = await self.client.resolve_external_series(
+                        source=parameters["source"],
+                        query=parameters.get("query"),
+                        external_id=parameters.get("external_id"),
+                        max_candidates=parameters.get("max_candidates", 5),
+                    )
+                case "ingest_series":
+                    data = await self.client.ingest_series(
+                        source=parameters["source"],
+                        query=parameters.get("query"),
+                        external_id=parameters.get("external_id"),
+                        retention_target=parameters.get("retention_target", "staging"),
+                        start_date=parameters.get("start_date"),
+                        end_date=parameters.get("end_date"),
+                        max_candidates=parameters.get("max_candidates", 5),
+                        promote_if_valid=parameters.get("promote_if_valid", False),
                     )
                 case "get_auctions":
                     data = await self.client.get_auctions(

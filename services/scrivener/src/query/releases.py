@@ -180,6 +180,7 @@ class ReleaseQuery:
 
             return [
                 {
+                    "id": r.id,
                     "fred_release_id": r.fred_release_id,
                     "name": r.name,
                     "link": r.link,

@@ -17,8 +17,10 @@ CORE_SERIES = {
     # Employment Situation (Current Employment Statistics - CES)
     "CES0000000001": "Total Nonfarm Payrolls (thousands)",
     "CES0500000001": "Total Private Payrolls (thousands)",
-    "CES0500000003": "Average Weekly Hours, Private",
-    "CES0500000011": "Average Hourly Earnings, Private",
+    "CES0500000003": "Average Hourly Earnings, Private",
+    "CES0500000011": "Average Weekly Earnings, Private",
+    "CES6562000003": "Average Hourly Earnings, Health Care and Social Assistance",
+    "CES6562000011": "Average Weekly Earnings, Health Care and Social Assistance",
 
     # Employment Situation (Current Population Survey - LNS)
     "LNS14000000": "Unemployment Rate",
@@ -75,10 +77,62 @@ CORE_SERIES = {
 # Series metadata for display names and categories
 SERIES_METADATA = {
     "CES0000000001": {"category": "employment", "frequency": "monthly"},
+    "CES0500000003": {"category": "employment", "frequency": "monthly"},
+    "CES0500000011": {"category": "employment", "frequency": "monthly"},
+    "CES6562000003": {"category": "employment", "frequency": "monthly"},
+    "CES6562000011": {"category": "employment", "frequency": "monthly"},
     "LNS14000000": {"category": "employment", "frequency": "monthly"},
     "CUSR0000SA0": {"category": "inflation", "frequency": "monthly"},
     "WPSFD4": {"category": "inflation", "frequency": "monthly"},
     "JTS000000000000000JOL": {"category": "labor", "frequency": "monthly"},
+}
+
+SECTOR_QUERY_PROFILES = {
+    "health_care_and_social_assistance": {
+        "aliases": (
+            "health care and social assistance",
+            "healthcare and social assistance",
+            "health care",
+            "healthcare",
+            "naics 62",
+        ),
+        "required_terms": ("health",),
+        "sector_candidates": (
+            {
+                "external_id": "CES6562000003",
+                "name": "Average Hourly Earnings, Health Care and Social Assistance",
+                "description": "Average Hourly Earnings, Health Care and Social Assistance",
+                "frequency": "monthly",
+                "units": "Dollars per hour",
+            },
+            {
+                "external_id": "CES6562000011",
+                "name": "Average Weekly Earnings, Health Care and Social Assistance",
+                "description": "Average Weekly Earnings, Health Care and Social Assistance",
+                "frequency": "monthly",
+                "units": "Dollars per week",
+            },
+        ),
+    },
+}
+
+MEASURE_QUERY_PROFILES = {
+    "ahe": {
+        "aliases": ("average hourly earnings", "ahe", "hourly earnings", "wage growth", "wages"),
+        "required_terms": ("hourly",),
+    },
+    "awe": {
+        "aliases": ("average weekly earnings", "weekly earnings"),
+        "required_terms": ("weekly",),
+    },
+    "job_openings": {
+        "aliases": ("job openings", "jolts openings", "openings"),
+        "required_terms": ("openings",),
+    },
+    "quits": {
+        "aliases": ("quits", "jolts quits"),
+        "required_terms": ("quits",),
+    },
 }
 
 
@@ -155,7 +209,10 @@ class BlsFetcher(BaseFetcher):
                         "name": catalog.get("series_title", CORE_SERIES.get(external_id, external_id)),
                         "description": catalog.get("series_title"),
                         "frequency": self._parse_frequency(catalog.get("survey_abbreviation")),
-                        "units": catalog.get("series_title"),  # BLS doesn't separate units well
+                        "units": self._infer_candidate_units(
+                            external_id,
+                            catalog.get("series_title", CORE_SERIES.get(external_id, external_id)),
+                        ),
                         "seasonal_adjustment": catalog.get("seasonality"),
                         "metadata": {
                             "bls_id": external_id,
@@ -173,8 +230,11 @@ class BlsFetcher(BaseFetcher):
             "name": CORE_SERIES.get(external_id, external_id),
             "description": CORE_SERIES.get(external_id),
             "frequency": SERIES_METADATA.get(external_id, {}).get("frequency", "monthly"),
-            "units": None,
-            "seasonal_adjustment": "SA" if "S" in external_id[4:6] else "NSA",
+            "units": self._infer_candidate_units(
+                external_id,
+                CORE_SERIES.get(external_id, external_id),
+            ),
+            "seasonal_adjustment": None,
             "metadata": {"bls_id": external_id},
         }
 
@@ -211,6 +271,116 @@ class BlsFetcher(BaseFetcher):
             return date(year, month, 1)
 
         logger.warning(f"Unknown period format: {period}")
+        return None
+
+    def search_series_candidates(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Resolve likely BLS series candidates from the maintained core mapping."""
+        normalized = query.lower().strip()
+        if not normalized:
+            return []
+
+        sector_profile = self._detect_sector_profile(normalized)
+        measure_profile = self._detect_measure_profile(normalized)
+        explicit_candidates = self._sector_measure_candidates(
+            sector_profile=sector_profile,
+            measure_profile=measure_profile,
+        )
+        if explicit_candidates:
+            return explicit_candidates[:limit]
+
+        if sector_profile is not None:
+            # Fail fast for sector-specific requests we cannot confidently map yet.
+            return []
+
+        scored: list[tuple[int, str, str]] = []
+        query_terms = [term for term in normalized.split() if term]
+        for external_id, name in CORE_SERIES.items():
+            haystack = f"{external_id} {name}".lower()
+            score = sum(1 for term in query_terms if term in haystack)
+            if score > 0:
+                scored.append((score, external_id, name))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        candidates: list[dict[str, Any]] = []
+        for _score, external_id, name in scored[:limit]:
+            metadata = SERIES_METADATA.get(external_id, {})
+            candidates.append(
+                {
+                    "external_id": external_id,
+                    "name": name,
+                    "description": name,
+                    "source": self.source_name,
+                    "frequency": metadata.get("frequency"),
+                    "units": self._infer_candidate_units(external_id, name),
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _detect_sector_profile(query: str) -> str | None:
+        for profile_name, profile in SECTOR_QUERY_PROFILES.items():
+            aliases = profile["aliases"]
+            if any(alias in query for alias in aliases):
+                return profile_name
+        return None
+
+    @staticmethod
+    def _detect_measure_profile(query: str) -> str | None:
+        for profile_name, profile in MEASURE_QUERY_PROFILES.items():
+            aliases = profile["aliases"]
+            if any(alias in query for alias in aliases):
+                return profile_name
+        return None
+
+    def _sector_measure_candidates(
+        self,
+        *,
+        sector_profile: str | None,
+        measure_profile: str | None,
+    ) -> list[dict[str, Any]]:
+        if sector_profile != "health_care_and_social_assistance":
+            return []
+        if measure_profile == "ahe":
+            return [
+                {
+                    **candidate,
+                    "source": self.source_name,
+                }
+                for candidate in SECTOR_QUERY_PROFILES[sector_profile]["sector_candidates"]
+                if candidate["external_id"].endswith("0003")
+            ]
+        if measure_profile == "awe":
+            return [
+                {
+                    **candidate,
+                    "source": self.source_name,
+                }
+                for candidate in SECTOR_QUERY_PROFILES[sector_profile]["sector_candidates"]
+                if candidate["external_id"].endswith("0011")
+            ]
+        return []
+
+    @staticmethod
+    def _infer_candidate_units(external_id: str, name: str) -> str | None:
+        normalized = name.lower()
+        if external_id.startswith("CES"):
+            if external_id.endswith("0003") or "average hourly earnings" in normalized:
+                return "Dollars per hour"
+            if external_id.endswith("0011") or "average weekly earnings" in normalized:
+                return "Dollars per week"
+            if "payroll" in normalized:
+                return "Thousands of persons"
+        if external_id.startswith("JTS"):
+            if external_id.endswith("JOR") or external_id.endswith("QUR") or "rate" in normalized:
+                return "Percent"
+            return "Thousands of jobs"
+        if external_id.startswith("LNS") and ("rate" in normalized or "ratio" in normalized):
+            return "Percent"
         return None
 
     def fetch_observations(

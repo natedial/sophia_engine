@@ -170,6 +170,18 @@ class Settings(BaseSettings):
             "Fields: channel, account_id, peer_id, agent_id, session_id."
         ),
     )
+    gateway_agents_json: str = Field(
+        default="",
+        description=(
+            "Optional JSON list of gateway agent profile overrides. "
+            "Fields: agent_id, label, description, prompt, tool_allowlist, "
+            "skills_enabled, subagents_enabled."
+        ),
+    )
+    gateway_artifact_store_path: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "gateway_runs.db",
+        description="Path to the SQLite store for persisted gateway runs and skill artifacts",
+    )
 
     # Memory Framework
     memory_enabled: bool = Field(
@@ -321,6 +333,34 @@ class Settings(BaseSettings):
     subagents_default_max_result_chars: int = Field(
         default=4000,
         description="Maximum worker summary length merged back to supervisor",
+    )
+    dev_worker_enabled: bool = Field(
+        default=False,
+        description="Enable Codex-backed delegated development tasks",
+    )
+    dev_worker_codex_command: str = Field(
+        default="codex",
+        description="Executable name or absolute path for Codex CLI",
+    )
+    dev_worker_model: str = Field(
+        default="",
+        description="Optional Codex model override for dev worker runs",
+    )
+    dev_worker_codex_sandbox: str = Field(
+        default="workspace-write",
+        description="Codex sandbox mode used for delegated development tasks",
+    )
+    dev_worker_workspace_root: Path = Field(
+        default_factory=get_project_root,
+        description="Workspace root handed to Codex for delegated development tasks",
+    )
+    dev_worker_output_dir: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "dev_worker",
+        description="Directory used for dev worker schema/output artifacts",
+    )
+    dev_worker_max_message_chars: int = Field(
+        default=12000,
+        description="Maximum dev worker final message characters retained by supervisor",
     )
 
     def build_write_policy(self) -> WritePolicy:

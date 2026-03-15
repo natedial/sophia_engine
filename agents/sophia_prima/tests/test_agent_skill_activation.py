@@ -9,7 +9,15 @@ from sophia.agent import AgentConfig, SophiaAgent
 from sophia.config import Settings
 from sophia.context import ConversationContext
 from sophia.events import EventType
-from sophia.llm.types import CompletionResponse, Message, Role, StopReason, TokenUsage, ToolSchema
+from sophia.llm.types import (
+    CompletionResponse,
+    Message,
+    Role,
+    StopReason,
+    TokenUsage,
+    ToolCall,
+    ToolSchema,
+)
 from sophia.memory import MemoryManager, MemoryManagerConfig
 from sophia.memory.store import InMemoryMemoryStore
 
@@ -113,6 +121,51 @@ class ToolRecordingProvider(DummyProvider):
         self.tools_seen.append([t.name for t in (tools or [])])
         return CompletionResponse(
             message=Message(role=Role.ASSISTANT, content="ok"),
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+class ToolLoopProvider(DummyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self.saw_tools_disabled = False
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools=None,
+        max_tokens: int = 4096,
+    ) -> CompletionResponse:
+        self.system_prompts.append(system)
+        self.calls += 1
+        if tools:
+            return CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"call-{self.calls}",
+                            name="search_series",
+                            input={"query": "health care wages"},
+                        )
+                    ],
+                ),
+                stop_reason=StopReason.TOOL_USE,
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            )
+
+        self.saw_tools_disabled = True
+        return CompletionResponse(
+            message=Message(
+                role=Role.ASSISTANT,
+                content="I could not find a sector-specific match in the fetched tool results.",
+            ),
             stop_reason=StopReason.END_TURN,
             usage=TokenUsage(input_tokens=1, output_tokens=1),
         )
@@ -664,6 +717,44 @@ async def test_agent_refuses_uncited_research_synthesis_without_tool_grounding(
     )
 
     assert "couldn't produce citation-grounded output" in final.content
+
+
+@pytest.mark.asyncio
+async def test_agent_forces_final_synthesis_after_tool_only_loop(tmp_path: Path) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = ToolLoopProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(["search_series"]),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False, max_tool_iterations=2),
+    )
+    context = ConversationContext(session_id="test-session-tool-loop")
+
+    final = await agent.chat(
+        "Find a health care wage series and summarize it.",
+        context,
+    )
+
+    assert provider.saw_tools_disabled is True
+    assert "sector-specific match" in final.content
 
 
 @pytest.mark.asyncio

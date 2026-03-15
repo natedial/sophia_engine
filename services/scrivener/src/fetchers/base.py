@@ -72,7 +72,13 @@ class BaseFetcher(ABC):
         """
         pass
 
-    def ensure_series(self, external_id: str) -> int:
+    def ensure_series(
+        self,
+        external_id: str,
+        *,
+        info: dict[str, Any] | None = None,
+        refresh: bool = False,
+    ) -> int:
         """Ensure a series exists in the database, creating if needed."""
         with get_session() as session:
             series = (
@@ -80,8 +86,9 @@ class BaseFetcher(ABC):
                 .filter_by(source_id=self.source_id, external_id=external_id)
                 .first()
             )
-            if series is None:
+            if info is None:
                 info = self.fetch_series_info(external_id)
+            if series is None:
                 series = Series(
                     source_id=self.source_id,
                     external_id=external_id,
@@ -95,6 +102,13 @@ class BaseFetcher(ABC):
                 session.add(series)
                 session.flush()
                 logger.info(f"Created series: {external_id} (id={series.id})")
+            elif refresh:
+                series.name = info.get("name", series.name)
+                series.description = info.get("description")
+                series.frequency = info.get("frequency")
+                series.units = info.get("units")
+                series.seasonal_adjustment = info.get("seasonal_adjustment")
+                series.metadata_ = info.get("metadata")
             return series.id
 
     def upsert_observations(
@@ -157,8 +171,13 @@ class BaseFetcher(ABC):
         started_at = datetime.utcnow()
 
         try:
-            series_id = self.ensure_series(external_id)
+            info = self.fetch_series_info(external_id)
             observations = self.fetch_observations(external_id, start_date, end_date)
+            series_id = self.ensure_series(
+                external_id,
+                info=info,
+                refresh=True,
+            )
             records_inserted = self.upsert_observations(series_id, observations)
 
             result = {
@@ -182,15 +201,17 @@ class BaseFetcher(ABC):
 
         completed_at = datetime.utcnow()
 
-        # Log the fetch operation
-        self._log_fetch(
-            started_at=started_at,
-            completed_at=completed_at,
-            status=result["status"],
-            records_fetched=result.get("records_fetched"),
-            records_inserted=result.get("records_inserted"),
-            error_message=result.get("error"),
-        )
+        try:
+            self._log_fetch(
+                started_at=started_at,
+                completed_at=completed_at,
+                status=result["status"],
+                records_fetched=result.get("records_fetched"),
+                records_inserted=result.get("records_inserted"),
+                error_message=result.get("error"),
+            )
+        except Exception as exc:
+            logger.warning("Failed to log fetch for %s:%s: %s", self.source_name, external_id, exc)
 
         return result
 

@@ -6,6 +6,13 @@ import type {
   CreateChartRequest,
   UpdateLayoutRequest,
 } from '../types/canvas'
+import type {
+  CatalystRadarRequest,
+  GatewayAgentDescriptor,
+  GatewayRunRecord,
+  RiskLensRequest,
+  TradeIdeasRequest,
+} from '../types/gateway'
 import { useAuthStore } from '../store/authStore'
 
 const api = axios.create({
@@ -78,6 +85,46 @@ export async function updateChart(
 
 export async function deleteChart(canvasId: string, chartId: string): Promise<void> {
   await api.delete(`/canvases/${canvasId}/charts/${chartId}`)
+}
+
+export async function listAgents(): Promise<GatewayAgentDescriptor[]> {
+  const response = await api.get<{ agents: GatewayAgentDescriptor[] }>('/v1/agents')
+  return response.data.agents
+}
+
+export async function getRun(runId: string): Promise<GatewayRunRecord> {
+  const response = await api.get<GatewayRunRecord>(`/v1/runs/${runId}`)
+  return response.data
+}
+
+export async function runCatalystRadar(
+  data: CatalystRadarRequest
+): Promise<Record<string, unknown>> {
+  const response = await api.post<Record<string, unknown>>(
+    '/v1/skills/catalyst-radar/run',
+    data
+  )
+  return response.data
+}
+
+export async function generateTradeIdeas(
+  data: TradeIdeasRequest
+): Promise<Record<string, unknown>> {
+  const response = await api.post<Record<string, unknown>>(
+    '/v1/skills/trade-ideas/generate',
+    data
+  )
+  return response.data
+}
+
+export async function analyzeRiskLens(
+  data: RiskLensRequest
+): Promise<Record<string, unknown>> {
+  const response = await api.post<Record<string, unknown>>(
+    '/v1/skills/risk-lens/analyze',
+    data
+  )
+  return response.data
 }
 
 export default api

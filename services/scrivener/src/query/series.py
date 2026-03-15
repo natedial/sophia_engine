@@ -10,6 +10,101 @@ from src.db import get_session
 from src.db.models import Series, Observation, Source
 
 
+def _infer_units(
+    *,
+    external_id: str,
+    name: str | None,
+    units: str | None,
+    source: str | None,
+) -> str | None:
+    if units and units.strip():
+        return units
+
+    series_name = (name or "").lower()
+    source_name = (source or "").upper()
+
+    if source_name == "BLS":
+        if external_id.startswith("CES"):
+            if external_id.endswith("0003") or "average hourly earnings" in series_name:
+                return "Dollars per hour"
+            if external_id.endswith("0011") or "average weekly earnings" in series_name:
+                return "Dollars per week"
+            if "average weekly hours" in series_name:
+                return "Hours"
+            if "payroll" in series_name or external_id.endswith("0001"):
+                return "Thousands of persons"
+        if external_id.startswith("LNS"):
+            if "rate" in series_name or "ratio" in series_name:
+                return "Percent"
+            if "level" in series_name or "labor force" in series_name or "employment" in series_name:
+                return "Thousands of persons"
+        if external_id.startswith("JTS"):
+            if external_id.endswith("JOR") or external_id.endswith("QUR") or "rate" in series_name:
+                return "Percent"
+            return "Thousands of jobs"
+        if external_id.startswith("CIU"):
+            return "Index"
+        if external_id.startswith("CU") or external_id.startswith("WP"):
+            return "Index"
+
+    if source_name == "FRED":
+        if "percent" in series_name or "rate" in series_name:
+            return "Percent"
+        if "index" in series_name:
+            return "Index"
+
+    return None
+
+
+def _resolve_series_row(
+    session,
+    *,
+    external_id: str,
+    source: str | None = None,
+) -> Series | None:
+    query = session.query(Series).filter(Series.external_id == external_id)
+    if source:
+        return query.join(Source).filter(Source.name == source.upper()).first()
+
+    rows = (
+        query.outerjoin(Source)
+        .order_by(func.lower(Source.name).asc().nullslast(), Series.id.asc())
+        .all()
+    )
+    if not rows:
+        return None
+
+    source_names = {
+        str(row.source.name).upper()
+        for row in rows
+        if row.source is not None and row.source.name
+    }
+    if len(source_names) > 1:
+        raise ValueError(
+            f"series '{external_id}' exists in multiple sources; pass source explicitly"
+        )
+    return rows[0]
+
+
+def _series_payload(series: Series) -> dict[str, Any]:
+    inferred_units = _infer_units(
+        external_id=series.external_id,
+        name=series.name,
+        units=series.units,
+        source=series.source.name if series.source else None,
+    )
+    return {
+        "id": series.id,
+        "external_id": series.external_id,
+        "name": series.name,
+        "description": series.description,
+        "frequency": series.frequency,
+        "units": inferred_units,
+        "source": series.source.name if series.source else None,
+        "last_updated": series.last_updated.isoformat() if series.last_updated else None,
+    }
+
+
 class SeriesQuery:
     """Query interface for time series data."""
 
@@ -25,26 +120,16 @@ class SeriesQuery:
             Series metadata dict or None if not found
         """
         with get_session() as session:
-            query = session.query(Series).filter(Series.external_id == external_id)
-
-            if source:
-                query = query.join(Source).filter(Source.name == source.upper())
-
-            series = query.first()
+            series = _resolve_series_row(
+                session,
+                external_id=external_id,
+                source=source,
+            )
 
             if not series:
                 return None
 
-            return {
-                "id": series.id,
-                "external_id": series.external_id,
-                "name": series.name,
-                "description": series.description,
-                "frequency": series.frequency,
-                "units": series.units,
-                "source": series.source.name if series.source else None,
-                "last_updated": series.last_updated.isoformat() if series.last_updated else None,
-            }
+            return _series_payload(series)
 
     @staticmethod
     def get_latest(external_id: str, source: str | None = None) -> dict | None:
@@ -58,12 +143,11 @@ class SeriesQuery:
             Dict with date and value, or None
         """
         with get_session() as session:
-            query = session.query(Series).filter(Series.external_id == external_id)
-
-            if source:
-                query = query.join(Source).filter(Source.name == source.upper())
-
-            series = query.first()
+            series = _resolve_series_row(
+                session,
+                external_id=external_id,
+                source=source,
+            )
             if not series:
                 return None
 
@@ -80,7 +164,7 @@ class SeriesQuery:
             return {
                 "series_id": external_id,
                 "date": obs.date.isoformat(),
-                "value": float(obs.value) if obs.value else None,
+                "value": float(obs.value) if obs.value is not None else None,
             }
 
     @staticmethod
@@ -107,12 +191,11 @@ class SeriesQuery:
         start_date = start_date or (end_date - timedelta(days=365))
 
         with get_session() as session:
-            query = session.query(Series).filter(Series.external_id == external_id)
-
-            if source:
-                query = query.join(Source).filter(Source.name == source.upper())
-
-            series = query.first()
+            series = _resolve_series_row(
+                session,
+                external_id=external_id,
+                source=source,
+            )
             if not series:
                 return []
 
@@ -136,13 +219,16 @@ class SeriesQuery:
             return [
                 {
                     "date": obs.date.isoformat(),
-                    "value": float(obs.value) if obs.value else None,
+                    "value": float(obs.value) if obs.value is not None else None,
                 }
                 for obs in observations
             ]
 
     @staticmethod
-    def get_multiple_latest(external_ids: list[str]) -> dict[str, dict | None]:
+    def get_multiple_latest(
+        external_ids: list[str],
+        source: str | None = None,
+    ) -> dict[str, dict | None]:
         """Get latest values for multiple series.
 
         Args:
@@ -153,7 +239,7 @@ class SeriesQuery:
         """
         results = {}
         for external_id in external_ids:
-            results[external_id] = SeriesQuery.get_latest(external_id)
+            results[external_id] = SeriesQuery.get_latest(external_id, source=source)
         return results
 
     @staticmethod
@@ -190,8 +276,15 @@ class SeriesQuery:
                 {
                     "external_id": s.external_id,
                     "name": s.name,
+                    "description": s.description,
                     "source": s.source.name if s.source else None,
                     "frequency": s.frequency,
+                    "units": _infer_units(
+                        external_id=s.external_id,
+                        name=s.name,
+                        units=s.units,
+                        source=s.source.name if s.source else None,
+                    ),
                 }
                 for s in results
             ]
@@ -230,6 +323,7 @@ class SeriesQuery:
         external_id: str,
         periods: int = 1,
         pct: bool = True,
+        source: str | None = None,
     ) -> dict | None:
         """Calculate change from N periods ago.
 
@@ -242,7 +336,11 @@ class SeriesQuery:
             Dict with current, previous, and change values
         """
         with get_session() as session:
-            series = session.query(Series).filter(Series.external_id == external_id).first()
+            series = _resolve_series_row(
+                session,
+                external_id=external_id,
+                source=source,
+            )
             if not series:
                 return None
 
@@ -268,8 +366,13 @@ class SeriesQuery:
 
             if pct and prev_val != 0:
                 change = ((curr_val - prev_val) / prev_val) * 100
+                change_type = "percent"
+            elif pct:
+                change = None
+                change_type = "percent_undefined_zero_base"
             else:
                 change = curr_val - prev_val
+                change_type = "absolute"
 
             return {
                 "series_id": external_id,
@@ -277,6 +380,6 @@ class SeriesQuery:
                 "current_value": curr_val,
                 "previous_date": previous.date.isoformat(),
                 "previous_value": prev_val,
-                "change": round(change, 4),
-                "change_type": "percent" if pct else "absolute",
+                "change": round(change, 4) if change is not None else None,
+                "change_type": change_type,
             }
