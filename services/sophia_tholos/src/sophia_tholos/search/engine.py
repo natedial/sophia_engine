@@ -188,7 +188,8 @@ class HybridSearchEngine:
             final_scores.append((chunk_id, lexical, semantic, hybrid))
 
         final_scores.sort(key=lambda row: row[3], reverse=True)
-        selection_pool = final_scores[:limit]
+        rerank_depth = min(len(final_scores), max(limit * 4, limit))
+        selection_pool = final_scores[:rerank_depth]
         if scope.max_per_source:
             pool_size = min(len(final_scores), max(limit * 6, limit))
             selection_pool = final_scores[:pool_size]
@@ -219,10 +220,10 @@ class HybridSearchEngine:
                     hybrid_score=hybrid,
                 )
             )
-            if len(results) >= limit:
+            if len(results) >= rerank_depth:
                 break
 
-        return results
+        return _rerank_search_results(query, results)[:limit]
 
     @property
     def chunk_count(self) -> int:
@@ -629,6 +630,85 @@ def _best_query_phrase(query: str) -> str | None:
         return None
     longest = max(runs, key=len)
     return " ".join(longest)
+
+
+def _rerank_search_results(query: str, results: list[SearchResult]) -> list[SearchResult]:
+    if len(results) <= 1:
+        return results
+
+    tokens = _extract_query_tokens(query, drop_stopwords=True)
+    if not tokens:
+        tokens = _extract_query_tokens(query, drop_stopwords=False)
+    phrase = _best_query_phrase(query)
+
+    return sorted(
+        results,
+        key=lambda result: (
+            _rerank_score(result=result, tokens=tokens, phrase=phrase),
+            result.hybrid_score,
+            result.lexical_score,
+            result.semantic_score,
+        ),
+        reverse=True,
+    )
+
+
+def _rerank_score(
+    *,
+    result: SearchResult,
+    tokens: list[str],
+    phrase: str | None,
+) -> float:
+    text = result.text.lower()
+    source_path = (result.source_path or "").lower()
+    coverage = _query_coverage(tokens, text, source_path)
+    phrase_bonus = 1.0 if phrase and phrase in text else 0.0
+    ordered_bonus = _ordered_token_bonus(tokens, text)
+    early_bonus = _early_phrase_bonus(tokens, text)
+    return (
+        (0.60 * result.hybrid_score)
+        + (0.18 * coverage)
+        + (0.12 * phrase_bonus)
+        + (0.06 * ordered_bonus)
+        + (0.04 * early_bonus)
+    )
+
+
+def _query_coverage(tokens: list[str], text: str, source_path: str) -> float:
+    if not tokens:
+        return 0.0
+    matches = 0
+    for token in tokens:
+        if token in text or token in source_path:
+            matches += 1
+    return matches / len(tokens)
+
+
+def _ordered_token_bonus(tokens: list[str], text: str) -> float:
+    if len(tokens) < 2:
+        return 0.0
+    cursor = 0
+    matched = 0
+    for token in tokens:
+        idx = text.find(token, cursor)
+        if idx < 0:
+            continue
+        matched += 1
+        cursor = idx + len(token)
+    return matched / len(tokens)
+
+
+def _early_phrase_bonus(tokens: list[str], text: str) -> float:
+    if not tokens:
+        return 0.0
+    earliest = None
+    for token in tokens:
+        idx = text.find(token)
+        if idx >= 0 and (earliest is None or idx < earliest):
+            earliest = idx
+    if earliest is None:
+        return 0.0
+    return max(0.0, 1.0 - min(earliest, 400) / 400.0)
 
 
 def _normalize_string_sequence(values: list[str] | tuple[str, ...] | None) -> set[str]:
