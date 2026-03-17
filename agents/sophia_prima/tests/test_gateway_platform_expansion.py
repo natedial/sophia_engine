@@ -535,7 +535,7 @@ def test_subagent_planner_adds_quant_and_citation_workers() -> None:
             "chart_worker": SubagentProfile(name="chart_worker", instructions=""),
             "citation_auditor": SubagentProfile(name="citation_auditor", instructions=""),
             "memory_curator": SubagentProfile(name="memory_curator", instructions=""),
-            "dev_worker": SubagentProfile(name="dev_worker", instructions=""),
+            "coding_worker": SubagentProfile(name="coding_worker", instructions=""),
         },
         max_parallel_workers=2,
     )
@@ -554,7 +554,7 @@ def test_subagent_planner_adds_quant_and_citation_workers() -> None:
     assert {task.profile_name for task in tasks} == {"quant_worker", "citation_auditor"}
 
 
-def test_subagent_planner_adds_dev_worker_for_missing_compute_or_scheduler() -> None:
+def test_subagent_planner_adds_coding_worker_for_missing_compute_or_scheduler() -> None:
     orchestrator = SubagentOrchestrator(
         profiles={
             "research_worker": SubagentProfile(name="research_worker", instructions=""),
@@ -562,7 +562,7 @@ def test_subagent_planner_adds_dev_worker_for_missing_compute_or_scheduler() -> 
             "chart_worker": SubagentProfile(name="chart_worker", instructions=""),
             "citation_auditor": SubagentProfile(name="citation_auditor", instructions=""),
             "memory_curator": SubagentProfile(name="memory_curator", instructions=""),
-            "dev_worker": SubagentProfile(name="dev_worker", instructions=""),
+            "coding_worker": SubagentProfile(name="coding_worker", instructions=""),
         },
         max_parallel_workers=2,
     )
@@ -578,8 +578,8 @@ def test_subagent_planner_adds_dev_worker_for_missing_compute_or_scheduler() -> 
         canvas_id=None,
     )
 
-    assert {task.profile_name for task in scheduler_tasks} == {"dev_worker"}
-    assert {task.profile_name for task in compute_gap_tasks} == {"dev_worker"}
+    assert {task.profile_name for task in scheduler_tasks} == {"coding_worker"}
+    assert {task.profile_name for task in compute_gap_tasks} == {"coding_worker"}
 
 
 @pytest.mark.asyncio

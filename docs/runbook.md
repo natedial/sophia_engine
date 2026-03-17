@@ -80,10 +80,16 @@ Gateway configuration:
 - `PERSONALITY_PATH` and `SOUL_PATH` control the agent prompt components loaded by gateway.
 - Set `TELEGRAM_BOT_TOKEN` (single bot) or `TELEGRAM_ACCOUNTS_JSON` (multi-bot).
 - Optional deterministic bindings via `GATEWAY_BINDINGS_JSON`.
-- Optional Codex-backed delegated coding: set `DEV_WORKER_ENABLED=true` and point
-  `DEV_WORKER_WORKSPACE_ROOT` at the repo/worktree you want the worker to edit.
-- If `dev_worker` is enabled, widen `AGENT_FS_READ_ALLOWLIST` and
+- Optional delegated coding: set `CODING_WORKER_ENABLED=true` and point
+  `CODING_WORKER_WORKSPACE_ROOT` at the repo/worktree you want the worker to edit.
+- Select `CODING_WORKER_BACKEND=codex` or `CODING_WORKER_BACKEND=claude_code`.
+- If `coding_worker` is enabled, widen `AGENT_FS_READ_ALLOWLIST` and
   `AGENT_FS_WRITE_ALLOWLIST` to include that workspace root, or the worker will be denied by policy.
+- Legacy `DEV_WORKER_*` env names still map to the Codex backend.
+- Optional lossless debugging history: set `HISTORY_ENABLED=true` and point
+  `HISTORY_STORE_PATH` at a writable SQLite file.
+- If history is enabled, widen `AGENT_FS_READ_ALLOWLIST` and
+  `AGENT_FS_WRITE_ALLOWLIST` to include that history path.
 
 ## Deployment Options (AWS)
 

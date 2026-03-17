@@ -1,9 +1,9 @@
 """Configuration management for Sophia."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sophia.security.filesystem import ReadPolicy, WritePolicy, parse_allowlist
@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # LLM Configuration
@@ -308,6 +309,20 @@ class Settings(BaseSettings):
         default=40,
         description="Maximum number of episodic records compacted in one pass",
     )
+    history_enabled: bool = Field(
+        default=False,
+        description="Enable append-only lossless history for debugging and reflection",
+    )
+    history_store_path: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "history.db",
+        description="Path to SQLite store for append-only debugging history",
+    )
+    history_tool_result_max_chars: int = Field(
+        default=50000,
+        description=(
+            "Maximum stored tool-result characters per history event; 0 keeps full result text"
+        ),
+    )
 
     # Subagent Orchestration (thin-slice)
     subagents_enabled: bool = Field(
@@ -334,34 +349,134 @@ class Settings(BaseSettings):
         default=4000,
         description="Maximum worker summary length merged back to supervisor",
     )
-    dev_worker_enabled: bool = Field(
+    coding_worker_enabled: bool = Field(
         default=False,
-        description="Enable Codex-backed delegated development tasks",
+        validation_alias=AliasChoices("CODING_WORKER_ENABLED", "DEV_WORKER_ENABLED"),
+        description="Enable delegated coding tasks",
     )
-    dev_worker_codex_command: str = Field(
+    coding_worker_backend: str = Field(
         default="codex",
+        validation_alias=AliasChoices("CODING_WORKER_BACKEND"),
+        description="Delegated coding backend: codex or claude_code",
+    )
+    codex_command: str = Field(
+        default="codex",
+        validation_alias=AliasChoices("CODEX_COMMAND", "DEV_WORKER_CODEX_COMMAND"),
         description="Executable name or absolute path for Codex CLI",
     )
-    dev_worker_model: str = Field(
+    codex_model: str = Field(
         default="",
+        validation_alias=AliasChoices("CODEX_MODEL", "DEV_WORKER_MODEL"),
         description="Optional Codex model override for dev worker runs",
     )
-    dev_worker_codex_sandbox: str = Field(
+    codex_sandbox: str = Field(
         default="workspace-write",
+        validation_alias=AliasChoices("CODEX_SANDBOX", "DEV_WORKER_CODEX_SANDBOX"),
         description="Codex sandbox mode used for delegated development tasks",
     )
-    dev_worker_workspace_root: Path = Field(
+    claude_code_command: str = Field(
+        default="claude",
+        validation_alias=AliasChoices("CLAUDE_CODE_COMMAND"),
+        description="Executable name or absolute path for Claude Code CLI",
+    )
+    claude_code_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("CLAUDE_CODE_MODEL"),
+        description="Optional Claude Code model override for delegated coding runs",
+    )
+    claude_code_max_turns: int = Field(
+        default=8,
+        validation_alias=AliasChoices("CLAUDE_CODE_MAX_TURNS"),
+        description="Maximum Claude Code turns for a delegated coding run",
+    )
+    claude_code_permission_mode: str = Field(
+        default="acceptEdits",
+        validation_alias=AliasChoices("CLAUDE_CODE_PERMISSION_MODE"),
+        description="Claude Code permission mode used for delegated coding tasks",
+    )
+    claude_code_allowed_tools: str = Field(
+        default="Bash,Edit,Glob,Grep,LS,MultiEdit,Read,Write",
+        validation_alias=AliasChoices("CLAUDE_CODE_ALLOWED_TOOLS"),
+        description="Comma-separated Claude Code tool allowlist for delegated coding tasks",
+    )
+    coding_worker_workspace_root: Path = Field(
         default_factory=get_project_root,
+        validation_alias=AliasChoices("CODING_WORKER_WORKSPACE_ROOT", "DEV_WORKER_WORKSPACE_ROOT"),
         description="Workspace root handed to Codex for delegated development tasks",
     )
-    dev_worker_output_dir: Path = Field(
-        default_factory=lambda: get_project_root() / ".sophia" / "dev_worker",
-        description="Directory used for dev worker schema/output artifacts",
+    coding_worker_output_dir: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "coding_worker",
+        validation_alias=AliasChoices("CODING_WORKER_OUTPUT_DIR", "DEV_WORKER_OUTPUT_DIR"),
+        description="Directory used for coding worker schema/output artifacts",
     )
-    dev_worker_max_message_chars: int = Field(
+    coding_worker_max_message_chars: int = Field(
         default=12000,
-        description="Maximum dev worker final message characters retained by supervisor",
+        validation_alias=AliasChoices("CODING_WORKER_MAX_MESSAGE_CHARS", "DEV_WORKER_MAX_MESSAGE_CHARS"),
+        description="Maximum coding worker final message characters retained by supervisor",
     )
+    coding_runtime_mode: str = Field(
+        default="inline",
+        validation_alias=AliasChoices("CODING_RUNTIME_MODE"),
+        description="Coding runtime execution mode: inline or forge_service",
+    )
+    forge_base_url: str = Field(
+        default="http://localhost:8090",
+        validation_alias=AliasChoices("FORGE_BASE_URL"),
+        description="Base URL for the future Sophia Forge runtime service",
+    )
+    forge_request_timeout_sec: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("FORGE_REQUEST_TIMEOUT_SEC"),
+        description="HTTP timeout used by the future Sophia Forge client",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_legacy_dev_worker_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        remap = {
+            "dev_worker_enabled": "coding_worker_enabled",
+            "dev_worker_codex_command": "codex_command",
+            "dev_worker_model": "codex_model",
+            "dev_worker_codex_sandbox": "codex_sandbox",
+            "dev_worker_workspace_root": "coding_worker_workspace_root",
+            "dev_worker_output_dir": "coding_worker_output_dir",
+            "dev_worker_max_message_chars": "coding_worker_max_message_chars",
+        }
+        normalized = dict(data)
+        for legacy_key, new_key in remap.items():
+            if new_key not in normalized and legacy_key in normalized:
+                normalized[new_key] = normalized[legacy_key]
+        return normalized
+
+    @property
+    def dev_worker_enabled(self) -> bool:
+        return self.coding_worker_enabled
+
+    @property
+    def dev_worker_codex_command(self) -> str:
+        return self.codex_command
+
+    @property
+    def dev_worker_model(self) -> str:
+        return self.codex_model
+
+    @property
+    def dev_worker_codex_sandbox(self) -> str:
+        return self.codex_sandbox
+
+    @property
+    def dev_worker_workspace_root(self) -> Path:
+        return self.coding_worker_workspace_root
+
+    @property
+    def dev_worker_output_dir(self) -> Path:
+        return self.coding_worker_output_dir
+
+    @property
+    def dev_worker_max_message_chars(self) -> int:
+        return self.coding_worker_max_message_chars
 
     def build_write_policy(self) -> WritePolicy:
         """Build filesystem write policy from settings."""
