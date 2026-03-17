@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from sophia_tholos.search.engine import HybridSearchEngine
+from sophia_tholos.search.engine import HybridSearchEngine, SearchResult, _rerank_search_results
 
 
 def _build_test_db(db_path: Path) -> None:
@@ -132,3 +132,42 @@ def test_search_falls_back_to_created_at_when_source_date_missing(tmp_path: Path
 
     result_ids = [result.chunk_id for result in results]
     assert "chunk-fallback-created-at" in result_ids
+
+
+def test_reranker_promotes_phrase_and_query_coverage_matches() -> None:
+    results = [
+        SearchResult(
+            chunk_id="broad-match",
+            run_id="run-1",
+            source_path="macro/general.pdf",
+            page_number=1,
+            chunk_index=0,
+            text="Tariffs could have broad macro fallout with uncertain timing.",
+            keywords=[],
+            lexical_score=0.72,
+            semantic_score=0.78,
+            hybrid_score=0.75,
+        ),
+        SearchResult(
+            chunk_id="precise-match",
+            run_id="run-1",
+            source_path="macro/supreme-court.pdf",
+            page_number=2,
+            chunk_index=0,
+            text=(
+                "Reports since last Friday on Supreme Court tariff fallout suggest "
+                "import costs may ease faster than expected."
+            ),
+            keywords=[],
+            lexical_score=0.69,
+            semantic_score=0.76,
+            hybrid_score=0.73,
+        ),
+    ]
+
+    reranked = _rerank_search_results(
+        "supreme court tariff fallout last friday",
+        results,
+    )
+
+    assert reranked[0].chunk_id == "precise-match"
