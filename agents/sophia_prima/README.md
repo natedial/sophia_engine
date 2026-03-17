@@ -6,7 +6,8 @@ It now includes:
 - Interactive CLI (`sophia`)
 - Surface gateway daemon (`sophia-gateway`) with deterministic routing
 - Telegram channel adapter support via gateway-owned polling
-- Optional Codex-backed `dev_worker` subagent for delegated repo changes
+- Optional `coding_worker` subagent for delegated repo changes via Codex or Claude Code
+- Optional append-only lossless history for debugging and reflection
 
 ## Run Gateway
 
@@ -37,15 +38,25 @@ LLM provider:
 - `AGENT_FS_WRITE_ALLOWLIST` (comma-separated writable roots, default `.sophia`)
 - `AGENT_FS_ENFORCE_READ_POLICY` (`true` default, deny-by-default read guard)
 - `AGENT_FS_READ_ALLOWLIST` (comma-separated readable roots, default `config,skills,.sophia`)
-- `DEV_WORKER_ENABLED` (`false` default)
-- `DEV_WORKER_CODEX_COMMAND` (`codex` default)
-- `DEV_WORKER_MODEL` (optional Codex model override)
-- `DEV_WORKER_CODEX_SANDBOX` (`workspace-write` default)
-- `DEV_WORKER_WORKSPACE_ROOT` (repo/worktree root the dev worker may edit)
-- `DEV_WORKER_OUTPUT_DIR` (default `.sophia/dev_worker`)
+- `CODING_WORKER_ENABLED` (`false` default)
+- `CODING_WORKER_BACKEND` (`codex` default; `claude_code` optional)
+- `CODING_WORKER_WORKSPACE_ROOT` (repo/worktree root the worker may edit)
+- `CODING_WORKER_OUTPUT_DIR` (default `.sophia/coding_worker`)
+- `CODEX_COMMAND` (`codex` default)
+- `CODEX_MODEL` (optional Codex model override)
+- `CODEX_SANDBOX` (`workspace-write` default)
+- `CLAUDE_CODE_COMMAND` (`claude` default)
+- `CLAUDE_CODE_MODEL` (optional Claude Code model override)
+- `HISTORY_ENABLED` (`false` default)
+- `HISTORY_STORE_PATH` (default `.sophia/history.db`)
+- `HISTORY_TOOL_RESULT_MAX_CHARS` (`50000` default; `0` keeps full tool results)
 
-When enabling `dev_worker`, widen `AGENT_FS_READ_ALLOWLIST` and `AGENT_FS_WRITE_ALLOWLIST`
-to include the repo/worktree root you want Codex to inspect and modify.
+Legacy `DEV_WORKER_*` env names remain supported for compatibility.
+
+When enabling `coding_worker`, widen `AGENT_FS_READ_ALLOWLIST` and `AGENT_FS_WRITE_ALLOWLIST`
+to include the repo/worktree root you want the delegated coding backend to inspect and modify.
+When enabling lossless history, widen `AGENT_FS_READ_ALLOWLIST` and `AGENT_FS_WRITE_ALLOWLIST`
+to include `HISTORY_STORE_PATH`.
 
 Telegram:
 - `TELEGRAM_BOT_TOKEN` (single account fallback)

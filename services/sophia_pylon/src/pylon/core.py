@@ -1,6 +1,7 @@
 """Pylon - Main gateway interface for backend services."""
 
 import asyncio
+import importlib
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -90,6 +91,54 @@ class PreflightResult:
         return "\n".join(parts)
 
 
+@dataclass(frozen=True)
+class _ExecutorSpec:
+    service_name: str
+    executor_attr: str
+    module_name: str
+    class_name: str
+    dependency_attrs: tuple[str, ...]
+
+
+_EXECUTOR_SPECS: tuple[_ExecutorSpec, ...] = (
+    _ExecutorSpec(
+        service_name="scrivener",
+        executor_attr="_scrivener_executor",
+        module_name="pylon.tools.scrivener",
+        class_name="ScrivenerToolExecutor",
+        dependency_attrs=("_scrivener_client",),
+    ),
+    _ExecutorSpec(
+        service_name="arithmos",
+        executor_attr="_arithmos_executor",
+        module_name="pylon.tools.arithmos",
+        class_name="ArithmosToolExecutor",
+        dependency_attrs=("_arithmos_client",),
+    ),
+    _ExecutorSpec(
+        service_name="canvas",
+        executor_attr="_canvas_executor",
+        module_name="pylon.tools.canvas",
+        class_name="CanvasToolExecutor",
+        dependency_attrs=("_canvas_client", "_scrivener_client"),
+    ),
+    _ExecutorSpec(
+        service_name="tholos",
+        executor_attr="_tholos_executor",
+        module_name="pylon.tools.tholos",
+        class_name="TholosToolExecutor",
+        dependency_attrs=("_tholos_client",),
+    ),
+    _ExecutorSpec(
+        service_name="fed_tracker",
+        executor_attr="_fed_tracker_executor",
+        module_name="pylon.tools.fed_tracker",
+        class_name="FedTrackerToolExecutor",
+        dependency_attrs=("_fed_tracker_client",),
+    ),
+)
+
+
 class Pylon:
     """
     Gateway layer for backend service integration.
@@ -115,12 +164,8 @@ class Pylon:
         self._tholos_client = TholosClient(base_url=self.config.tholos_url)
         self._fed_tracker_client = FedTrackerClient(base_url=self.config.fed_tracker_url)
 
-        # Initialize tool executors
-        self._scrivener_executor = ScrivenerToolExecutor(self._scrivener_client)
-        self._arithmos_executor = ArithmosToolExecutor(self._arithmos_client)
-        self._canvas_executor = CanvasToolExecutor(self._canvas_client, self._scrivener_client)
-        self._tholos_executor = TholosToolExecutor(self._tholos_client)
-        self._fed_tracker_executor = FedTrackerToolExecutor(self._fed_tracker_client)
+        self._service_executors: dict[str, Any] = {}
+        self._build_tool_executors()
 
         # Build tool routing table: tool_name -> (executor, service_name)
         self._tool_executors: dict[str, tuple[Any, str]] = {}
@@ -134,42 +179,39 @@ class Pylon:
             for service_name in self._service_tools
         }
 
+    def _build_tool_executors(self, *, reload_modules: bool = False) -> None:
+        """Build executor instances from service specs."""
+        self._service_executors = {}
+        for spec in _EXECUTOR_SPECS:
+            module = importlib.import_module(spec.module_name)
+            if reload_modules:
+                module = importlib.reload(module)
+            executor_cls = getattr(module, spec.class_name)
+            deps = [getattr(self, attr) for attr in spec.dependency_attrs]
+            executor = executor_cls(*deps)
+            setattr(self, spec.executor_attr, executor)
+            self._service_executors[spec.service_name] = executor
+
     def _register_tools(self) -> None:
         """Register all tools from all services."""
-        # Register Scrivener tools
-        scrivener_tools = []
-        for tool in self._scrivener_executor.get_tools():
-            self._tool_executors[tool.name] = (self._scrivener_executor, "scrivener")
-            scrivener_tools.append(tool.name)
-        self._service_tools["scrivener"] = scrivener_tools
+        self._tool_executors = {}
+        self._service_tools = {}
+        for service_name, executor in self._service_executors.items():
+            tool_names: list[str] = []
+            for tool in executor.get_tools():
+                self._tool_executors[tool.name] = (executor, service_name)
+                tool_names.append(tool.name)
+            self._service_tools[service_name] = tool_names
 
-        # Register Arithmos tools
-        arithmos_tools = []
-        for tool in self._arithmos_executor.get_tools():
-            self._tool_executors[tool.name] = (self._arithmos_executor, "arithmos")
-            arithmos_tools.append(tool.name)
-        self._service_tools["arithmos"] = arithmos_tools
-
-        # Register Canvas tools
-        canvas_tools = []
-        for tool in self._canvas_executor.get_tools():
-            self._tool_executors[tool.name] = (self._canvas_executor, "canvas")
-            canvas_tools.append(tool.name)
-        self._service_tools["canvas"] = canvas_tools
-
-        # Register Tholos tools
-        tholos_tools = []
-        for tool in self._tholos_executor.get_tools():
-            self._tool_executors[tool.name] = (self._tholos_executor, "tholos")
-            tholos_tools.append(tool.name)
-        self._service_tools["tholos"] = tholos_tools
-
-        # Register Fed Tracker tools
-        fed_tracker_tools = []
-        for tool in self._fed_tracker_executor.get_tools():
-            self._tool_executors[tool.name] = (self._fed_tracker_executor, "fed_tracker")
-            fed_tracker_tools.append(tool.name)
-        self._service_tools["fed_tracker"] = fed_tracker_tools
+    def refresh_tools(self, *, reload_modules: bool = True) -> list[str]:
+        """Rebuild tool executors and refresh the live tool registry."""
+        self._build_tool_executors(reload_modules=reload_modules)
+        self._register_tools()
+        self._service_semaphores = {
+            service_name: asyncio.Semaphore(max(1, self.config.max_concurrency_per_service))
+            for service_name in self._service_tools
+        }
+        return sorted(self._tool_executors.keys())
 
     async def close(self) -> None:
         """Close all client connections."""
@@ -277,47 +319,13 @@ class Pylon:
             List of tool definitions
         """
         tools = []
-
-        # Scrivener tools
-        for tool in self._scrivener_executor.get_tools():
-            if only_healthy:
-                status = self._service_status.get("scrivener")
-                if status and not status.healthy:
-                    continue
-            tools.append(tool)
-
-        # Arithmos tools
-        for tool in self._arithmos_executor.get_tools():
-            if only_healthy:
-                status = self._service_status.get("arithmos")
-                if status and not status.healthy:
-                    continue
-            tools.append(tool)
-
-        # Canvas tools
-        for tool in self._canvas_executor.get_tools():
-            if only_healthy:
-                status = self._service_status.get("canvas")
-                if status and not status.healthy:
-                    continue
-            tools.append(tool)
-
-        # Tholos tools
-        for tool in self._tholos_executor.get_tools():
-            if only_healthy:
-                status = self._service_status.get("tholos")
-                if status and not status.healthy:
-                    continue
-            tools.append(tool)
-
-        # Fed Tracker tools
-        for tool in self._fed_tracker_executor.get_tools():
-            if only_healthy:
-                status = self._service_status.get("fed_tracker")
-                if status and not status.healthy:
-                    continue
-            tools.append(tool)
-
+        for service_name, executor in self._service_executors.items():
+            for tool in executor.get_tools():
+                if only_healthy:
+                    status = self._service_status.get(service_name)
+                    if status and not status.healthy:
+                        continue
+                tools.append(tool)
         return tools
 
     def get_tools_as_anthropic_schema(self, only_healthy: bool = False) -> list[dict[str, Any]]:

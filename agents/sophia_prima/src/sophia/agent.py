@@ -13,7 +13,6 @@ from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 from sophia.agent_profiles import AgentProfile
 from sophia.config import Settings, get_settings
 from sophia.context import ConversationContext, apply_transforms, summarize_long_tool_results
-from sophia.dev_worker import CodexDevWorker
 from sophia.episto_adapter import EpistoPlannerAdapter
 from sophia.events import (
     AgentEvent,
@@ -32,6 +31,7 @@ from sophia.events import (
     turn_end,
     turn_start,
 )
+from sophia.history import LosslessHistoryManager
 from sophia.llm.base import ContentDelta, ModelProvider, StreamComplete
 from sophia.llm.types import (
     CompletionResponse,
@@ -43,9 +43,17 @@ from sophia.llm.types import (
 )
 from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_store
 from sophia.personality.loader import Personality, load_personality
+from sophia.forge_client import ForgeClient
 from sophia.skills.models import SkillMatch
 from sophia.skills.registry import SkillRegistry
 from sophia.subagents import SubagentOrchestrator, SubagentProfile, SubagentResult, SubagentTask
+from sophia_forge_protocol.run_models import (
+    CapabilityAdded,
+    CapabilityAdoption,
+    CapabilityAdoptionReport,
+    RunRequest,
+)
+from sophia_forge_protocol.verification_models import VerificationPolicy
 
 # Type aliases for steering / follow-up callbacks
 SteeringCallback = Callable[[], list[Message] | None]
@@ -119,6 +127,7 @@ class SophiaAgent:
         )
         self.read_policy = self.settings.build_read_policy()
         self.write_policy = self.settings.build_write_policy()
+        self.history: LosslessHistoryManager | None = None
         self.seed_lessons = self._load_lessons()
         self.pylon = pylon or Pylon()
         self.preflight_result = preflight_result
@@ -183,6 +192,19 @@ class SophiaAgent:
                     compaction_batch_size=self.settings.memory_compaction_batch_size,
                 ),
                 seed_lessons=self.seed_lessons,
+            )
+        if self.settings.history_enabled:
+            self.read_policy.ensure_allowed(
+                self.settings.history_store_path,
+                purpose="history_store_path",
+            )
+            self.write_policy.ensure_allowed(
+                self.settings.history_store_path,
+                purpose="history_store_path",
+            )
+            self.history = LosslessHistoryManager.from_sqlite(
+                db_path=self.settings.history_store_path,
+                tool_result_max_chars=self.settings.history_tool_result_max_chars,
             )
         self.get_steering_messages = get_steering_messages
         self.get_follow_up_messages = get_follow_up_messages
@@ -297,10 +319,10 @@ class SophiaAgent:
                 token_budget_chars=default_budget,
                 max_result_chars=default_result_chars,
             ),
-            "dev_worker": SubagentProfile(
-                name="dev_worker",
+            "coding_worker": SubagentProfile(
+                name="coding_worker",
                 instructions=(
-                    "You are a delegated development worker. Inspect the repo, make the "
+                    "You are a delegated coding worker. Inspect the repo, make the "
                     "smallest durable code or config change needed, verify it where practical, "
                     "and report the implementation outcome back to the supervisor."
                 ),
@@ -433,6 +455,9 @@ class SophiaAgent:
                     "6) These tools analyze textual/sentiment patterns only — do not use them "
                     "for market pricing inference."
                 )
+            handoff_guidance = self._tool_handoff_guidance(context, active_tools)
+            if handoff_guidance:
+                dynamic_context["Tool handoff guidance"] = handoff_guidance
 
         if self.preflight_result:
             service_status = self.preflight_result.for_system_prompt()
@@ -585,6 +610,165 @@ class SophiaAgent:
             )
             for td in tool_defs
         ]
+
+    @staticmethod
+    def _remember_capability_handoffs(
+        context: ConversationContext,
+        capabilities: tuple[CapabilityAdded, ...],
+        adoption_report: CapabilityAdoptionReport,
+    ) -> None:
+        if not capabilities:
+            return
+        adoption_by_tool = {row.tool_name: row for row in adoption_report.capabilities}
+        handoff_store = context.metadata.setdefault("tool_handoffs", {})
+        if not isinstance(handoff_store, dict):
+            handoff_store = {}
+            context.metadata["tool_handoffs"] = handoff_store
+        for capability in capabilities:
+            adoption = adoption_by_tool.get(capability.tool_name)
+            if adoption is None or not adoption.adopted or not adoption.handoff_ready:
+                continue
+            handoff_store[capability.tool_name] = {
+                "tool_name": capability.tool_name,
+                "service_name": capability.service_name,
+                "registration_path": capability.registration_path,
+                "description": capability.description,
+                "when_to_use": capability.when_to_use,
+                "input_schema": adoption.resolved_input_schema or capability.input_schema,
+                "usage_example": capability.usage_example,
+            }
+
+    @staticmethod
+    def _tool_handoff_guidance(
+        context: ConversationContext | None,
+        active_tools: list[ToolSchema] | None,
+    ) -> str | None:
+        if context is None or not active_tools:
+            return None
+        handoff_store = context.metadata.get("tool_handoffs")
+        if not isinstance(handoff_store, dict) or not handoff_store:
+            return None
+        active_tool_names = {tool.name for tool in active_tools}
+        lines: list[str] = []
+        for tool_name, payload in handoff_store.items():
+            if tool_name not in active_tool_names or not isinstance(payload, dict):
+                continue
+            when_to_use = str(payload.get("when_to_use") or "").strip()
+            usage_example = payload.get("usage_example")
+            description = str(payload.get("description") or "").strip()
+            line_parts = [tool_name]
+            if when_to_use:
+                line_parts.append(f"use when: {when_to_use}")
+            elif description:
+                line_parts.append(f"purpose: {description}")
+            if isinstance(usage_example, dict) and usage_example:
+                line_parts.append(
+                    "example args: "
+                    + json.dumps(usage_example, sort_keys=True, separators=(",", ":"))
+                )
+            lines.append("- " + "; ".join(line_parts))
+        if not lines:
+            return None
+        return (
+            "Use these validated tool handoffs when they fit the request. "
+            "Prefer the example argument shape unless the user explicitly needs different inputs.\n"
+            + "\n".join(lines[:6])
+        )
+
+    @staticmethod
+    def _validate_usage_example(
+        usage_example: dict[str, Any],
+        input_schema: dict[str, Any],
+    ) -> str | None:
+        if not usage_example:
+            return "usage_example missing"
+        if input_schema.get("type") != "object":
+            return None
+        required = input_schema.get("required") or []
+        missing = [name for name in required if name not in usage_example]
+        if missing:
+            return "usage_example missing required fields: " + ", ".join(sorted(missing))
+        properties = input_schema.get("properties")
+        if input_schema.get("additionalProperties") is False and isinstance(properties, dict):
+            unknown = [name for name in usage_example if name not in properties]
+            if unknown:
+                return "usage_example includes unknown fields: " + ", ".join(sorted(unknown))
+        return None
+
+    def _verify_capability_adoption(
+        self,
+        capabilities: tuple[CapabilityAdded, ...],
+    ) -> CapabilityAdoptionReport:
+        if not capabilities:
+            return CapabilityAdoptionReport(refreshed=True)
+        try:
+            self.pylon.refresh_tools()
+            visible_schemas = {schema.name: schema for schema in self._get_tool_schemas()}
+            visible_tool_names = tuple(sorted(visible_schemas))
+            adoption_rows: list[CapabilityAdoption] = []
+            for capability in capabilities:
+                visible_schema = visible_schemas.get(capability.tool_name)
+                adopted = visible_schema is not None
+                resolved_input_schema = (
+                    visible_schema.input_schema if visible_schema is not None else {}
+                )
+                usage_example_valid = False
+                schema_matches: bool | None = None
+                handoff_ready = False
+                if not adopted:
+                    reason = "tool not visible in Sophia Prima tool schemas after refresh"
+                else:
+                    handoff_issues: list[str] = []
+                    if not capability.when_to_use.strip():
+                        handoff_issues.append("when_to_use missing")
+                    if not capability.input_schema:
+                        handoff_issues.append("input_schema missing from capability handoff")
+                    else:
+                        schema_matches = capability.input_schema == resolved_input_schema
+                        if not schema_matches:
+                            handoff_issues.append(
+                                "claimed input_schema does not match live tool schema"
+                            )
+                    usage_example_error = self._validate_usage_example(
+                        capability.usage_example,
+                        resolved_input_schema,
+                    )
+                    usage_example_valid = usage_example_error is None
+                    if usage_example_error is not None:
+                        handoff_issues.append(usage_example_error)
+                    handoff_ready = not handoff_issues
+                    reason = "; ".join(handoff_issues)
+                adoption_rows.append(
+                    CapabilityAdoption(
+                        tool_name=capability.tool_name,
+                        service_name=capability.service_name,
+                        adopted=adopted,
+                        handoff_ready=handoff_ready,
+                        usage_example_valid=usage_example_valid,
+                        schema_matches=schema_matches,
+                        resolved_input_schema=resolved_input_schema,
+                        reason=reason,
+                    )
+                )
+            return CapabilityAdoptionReport(
+                refreshed=True,
+                visible_tool_names=visible_tool_names,
+                capabilities=tuple(adoption_rows),
+            )
+        except Exception as exc:
+            return CapabilityAdoptionReport(
+                refreshed=False,
+                capabilities=tuple(
+                    CapabilityAdoption(
+                        tool_name=capability.tool_name,
+                        service_name=capability.service_name,
+                        adopted=False,
+                        reason=f"refresh failed: {exc}",
+                    )
+                    for capability in capabilities
+                ),
+                error=str(exc),
+            )
 
     @staticmethod
     def _should_enforce_tools(user_message: str, tools: list[ToolSchema]) -> bool:
@@ -1092,8 +1276,8 @@ class SophiaAgent:
         parent_run_id: str,
     ) -> SubagentResult:
         sub_run_id = f"{parent_run_id}:{task.task_id}"
-        if profile.name == "dev_worker":
-            return await self._run_dev_worker_task(
+        if profile.name in {"coding_worker", "dev_worker"}:
+            return await self._run_coding_worker_task(
                 task=task,
                 profile=profile,
                 parent_run_id=parent_run_id,
@@ -1189,7 +1373,7 @@ class SophiaAgent:
             token_chars_used=chars_used,
         )
 
-    async def _run_dev_worker_task(
+    async def _run_coding_worker_task(
         self,
         *,
         task: SubagentTask,
@@ -1197,16 +1381,40 @@ class SophiaAgent:
         parent_run_id: str,
     ) -> SubagentResult:
         sub_run_id = f"{parent_run_id}:{task.task_id}"
-        runner = CodexDevWorker(
+        client = ForgeClient(
             settings=self.settings,
             read_policy=self.read_policy,
             write_policy=self.write_policy,
         )
-        execution = await runner.run(
-            supervisor_task=task.prompt,
-            task_id=sub_run_id.replace(":", "_"),
-            timeout_sec=max(0.1, profile.timeout_sec),
+        execution = await client.run(
+            RunRequest(
+                run_id=sub_run_id,
+                client_name="sophia_prima",
+                task=task.prompt,
+                workspace_root=str(self.settings.coding_worker_workspace_root),
+                writable_roots=tuple(
+                    str(path.resolve(strict=False)) for path in self.write_policy.allowed_roots
+                ),
+                readable_roots=tuple(
+                    str(path.resolve(strict=False)) for path in self.read_policy.allowed_roots
+                ),
+                backend=self.settings.coding_worker_backend.strip().lower() or "codex",
+                timeout_sec=max(0.1, profile.timeout_sec),
+                verification_policy=VerificationPolicy(mode="auto"),
+                metadata={
+                    "agent_id": self.profile.agent_id,
+                    "parent_run_id": parent_run_id,
+                    "task_id": task.task_id,
+                },
+            )
         )
+        adoption_report = self._verify_capability_adoption(execution.capabilities_added)
+        if execution.capabilities_added:
+            client.persist_capability_adoption(
+                run_id=sub_run_id,
+                report=adoption_report,
+                mode=self.settings.coding_runtime_mode.strip().lower() or "inline",
+            )
         summary_parts: list[str] = []
         if execution.summary:
             summary_parts.append(execution.summary.strip())
@@ -1222,15 +1430,42 @@ class SophiaAgent:
             summary_parts.append(
                 "Follow-ups: " + "; ".join(execution.follow_ups[:4])
             )
+        if execution.capabilities_added:
+            summary_parts.append(
+                "Capabilities added: "
+                + ", ".join(cap.tool_name for cap in execution.capabilities_added[:4])
+            )
+            adopted = [row.tool_name for row in adoption_report.capabilities if row.adopted]
+            pending = [row.tool_name for row in adoption_report.capabilities if not row.adopted]
+            handoff_ready = [row.tool_name for row in adoption_report.capabilities if row.handoff_ready]
+            handoff_pending = [
+                row.tool_name for row in adoption_report.capabilities if row.adopted and not row.handoff_ready
+            ]
+            if adopted:
+                summary_parts.append("Capabilities adopted: " + ", ".join(adopted[:4]))
+            if pending:
+                summary_parts.append("Capabilities pending adoption: " + ", ".join(pending[:4]))
+            if handoff_ready:
+                summary_parts.append("Capability handoffs ready: " + ", ".join(handoff_ready[:4]))
+            if handoff_pending:
+                summary_parts.append(
+                    "Capability handoffs incomplete: " + ", ".join(handoff_pending[:4])
+                )
         summary = " ".join(part for part in summary_parts if part).strip()
         return SubagentResult(
             task_id=task.task_id,
             profile_name=profile.name,
             run_id=sub_run_id,
-            success=execution.success,
+            success=bool(execution.success),
             content=summary[: profile.max_result_chars],
             error=execution.error,
             timed_out=execution.status == "timed_out",
+            metadata={
+                "capabilities_added": [
+                    cap.model_dump(mode="json") for cap in execution.capabilities_added
+                ],
+                "capability_adoption_report": adoption_report.model_dump(mode="json"),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -1311,6 +1546,21 @@ class SophiaAgent:
                         task_id=result.task_id,
                     )
             if results:
+                for result in results:
+                    capability_payloads = result.metadata.get("capabilities_added", [])
+                    report_payload = result.metadata.get("capability_adoption_report")
+                    if not capability_payloads or not isinstance(report_payload, dict):
+                        continue
+                    self._remember_capability_handoffs(
+                        context,
+                        tuple(
+                            CapabilityAdded.model_validate(payload)
+                            for payload in capability_payloads
+                            if isinstance(payload, dict)
+                        ),
+                        CapabilityAdoptionReport.model_validate(report_payload),
+                    )
+                available_tools = self._get_tool_schemas()
                 subagent_context = self._build_subagent_context(results)
 
         turn = 0
@@ -1326,6 +1576,15 @@ class SophiaAgent:
             )
 
             active_user_message = self._latest_user_text(context) or message
+            if self.history is not None:
+                self.history.record_turn_input(
+                    session_id=context.session_id,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                    turn=turn,
+                    user_message=active_user_message,
+                )
             active_skill = self.skills.match(active_user_message)
             research_plan_context = None
             plan_context = await self.episto.plan(active_user_message)
@@ -1405,6 +1664,15 @@ class SophiaAgent:
                         parent_run_id=parent_run_id,
                         task_id=task_id,
                     )
+                    if self.history is not None:
+                        self.history.record_tool_start(
+                            session_id=context.session_id,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                            turn=turn,
+                            tool_call=prefetch_call,
+                        )
                     prefetch_result = await self._execute_tool(prefetch_call, allowed_tool_names)
                     prefetch_content = prefetch_result.to_content()
                     used_tools_this_turn = True
@@ -1447,6 +1715,17 @@ class SophiaAgent:
                         parent_run_id=parent_run_id,
                         task_id=task_id,
                     )
+                    if self.history is not None:
+                        self.history.record_tool_end(
+                            session_id=context.session_id,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                            turn=turn,
+                            tool_call=prefetch_call,
+                            result=prefetch_content,
+                            is_error=not prefetch_result.success,
+                        )
                     if prefetch_result.success and self._search_result_count(prefetch_content) > 0:
                         successful_prefetches += 1
                         if successful_prefetches >= 2:
@@ -1604,6 +1883,15 @@ class SophiaAgent:
                         parent_run_id=parent_run_id,
                         task_id=task_id,
                     )
+                    if self.history is not None:
+                        self.history.record_tool_start(
+                            session_id=context.session_id,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                            turn=turn,
+                            tool_call=tc,
+                        )
 
                     result = await self._execute_tool(tc, allowed_tool_names)
                     content = result.to_content()
@@ -1624,6 +1912,17 @@ class SophiaAgent:
                         parent_run_id=parent_run_id,
                         task_id=task_id,
                     )
+                    if self.history is not None:
+                        self.history.record_tool_end(
+                            session_id=context.session_id,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                            turn=turn,
+                            tool_call=tc,
+                            result=content,
+                            is_error=is_error,
+                        )
 
                     tool_results.append(
                         ToolResultMessage(
@@ -1693,6 +1992,16 @@ class SophiaAgent:
                     user_message=active_user_message,
                     assistant_message=last_message.content,
                 )
+                if self.history is not None:
+                    self.history.record_turn_output(
+                        session_id=context.session_id,
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                        turn=turn,
+                        assistant_message=last_message.content,
+                        used_tools=used_tools_this_turn,
+                    )
 
             # Check follow-up messages → continue outer loop or break
             if self.get_follow_up_messages:

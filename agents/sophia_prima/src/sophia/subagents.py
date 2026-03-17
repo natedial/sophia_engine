@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from sophia.llm.types import ToolSchema
@@ -43,6 +43,7 @@ class SubagentResult:
     error: str | None = None
     timed_out: bool = False
     token_chars_used: int = 0
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 RunWorker = Callable[[SubagentTask, SubagentProfile, str], Awaitable[SubagentResult]]
@@ -148,20 +149,20 @@ class SubagentOrchestrator:
             for name in tool_names
         )
         tasks: list[SubagentTask] = []
-        should_delegate_dev = False
-        dev_reasons: list[str] = []
+        should_delegate_coding = False
+        coding_reasons: list[str] = []
         if wants_research and not has_data_tools:
-            should_delegate_dev = True
-            dev_reasons.append("data sourcing/retrieval capability is missing")
+            should_delegate_coding = True
+            coding_reasons.append("data sourcing/retrieval capability is missing")
         if wants_quant and not has_compute_tools:
-            should_delegate_dev = True
-            dev_reasons.append("deterministic compute capability is missing")
+            should_delegate_coding = True
+            coding_reasons.append("deterministic compute capability is missing")
         if wants_scheduler:
-            should_delegate_dev = True
-            dev_reasons.append("scheduler/task automation capability is requested")
+            should_delegate_coding = True
+            coding_reasons.append("scheduler/task automation capability is requested")
         if wants_data_pipeline and wants_engineering_action:
-            should_delegate_dev = True
-            dev_reasons.append("data pipeline/integration work is requested")
+            should_delegate_coding = True
+            coding_reasons.append("data pipeline/integration work is requested")
         if wants_research and has_data_tools:
             tasks.append(
                 SubagentTask(
@@ -173,12 +174,14 @@ class SubagentOrchestrator:
                     ),
                 )
             )
-        if should_delegate_dev:
-            reasons_text = "; ".join(dev_reasons) if dev_reasons else "engineering work is requested"
+        if should_delegate_coding:
+            reasons_text = (
+                "; ".join(coding_reasons) if coding_reasons else "engineering work is requested"
+            )
             tasks.append(
                 SubagentTask(
-                    task_id="dev",
-                    profile_name="dev_worker",
+                    task_id="coding",
+                    profile_name="coding_worker",
                     prompt=(
                         "Inspect the repository and implement or scaffold the missing capability "
                         "needed for this request.\n"
