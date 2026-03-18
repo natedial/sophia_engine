@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from ..adapters import AdapterRegistry
-from ..clients import ScrivenerClient
+from ..clients import ScrivenerClient, SentryClient
 from ..config import settings
 from .store import OikonomiaStore
 from .types import (
@@ -42,12 +42,17 @@ class OikonomiaRuntime:
         *,
         adapters: AdapterRegistry | None = None,
         scrivener: ScrivenerClient | None = None,
+        sentry: SentryClient | None = None,
     ) -> None:
         self.store = store or OikonomiaStore()
         self.adapters = adapters or AdapterRegistry()
         self.scrivener = scrivener or ScrivenerClient(
             base_url=settings.scrivener_url,
             timeout_sec=settings.request_timeout_sec,
+        )
+        self.sentry = sentry or SentryClient(
+            base_url=settings.sentry_url,
+            timeout_sec=min(settings.request_timeout_sec, 10.0),
         )
 
     def register_model(self, definition: ModelDefinition) -> ModelDefinition:
@@ -290,6 +295,7 @@ class OikonomiaRuntime:
             raise ValueError(f"Unknown model: {run.model_id}")
         if definition.state not in {ModelState.CHAMPION, ModelState.ACTIVE}:
             raise ValueError("Only champion models can publish projections")
+        prior_publication = self.store.get_latest_publication(run.model_id)
 
         publication = PublishedProjection(
             id=f"pub-{uuid4().hex[:12]}",
@@ -306,7 +312,13 @@ class OikonomiaRuntime:
 
         updated_run = run.model_copy(update={"status": RunStatus.PUBLISHED})
         self.store.save_run(updated_run)
-        return self.store.save_publication(publication)
+        saved = self.store.save_publication(publication)
+        self._notify_sentry_of_publication(
+            definition=definition,
+            publication=saved,
+            prior_publication=prior_publication,
+        )
+        return saved
 
     def stats(self) -> dict[str, int]:
         raw = self.store.stats()
@@ -316,6 +328,32 @@ class OikonomiaRuntime:
             "reviews": int(raw["reviews"]),
             "publications": int(raw["publications"]),
         }
+
+    def _notify_sentry_of_publication(
+        self,
+        *,
+        definition: ModelDefinition,
+        publication: PublishedProjection,
+        prior_publication: PublishedProjection | None,
+    ) -> None:
+        """Best-effort publication notification into Sophia Sentry."""
+        if not definition.production_slot:
+            return
+        try:
+            self.sentry.notify_publication(
+                {
+                    "model_id": publication.model_id,
+                    "production_slot": definition.production_slot,
+                    "as_of": publication.as_of.isoformat(),
+                    "published_at": publication.published_at.isoformat(),
+                    "current_summary": publication.summary,
+                    "prior_summary": prior_publication.summary if prior_publication else {},
+                    "insights": publication.insights,
+                }
+            )
+        except Exception:
+            # Sentry is intentionally best-effort at this stage; publication remains authoritative.
+            return
 
     def _is_plannable(
         self,

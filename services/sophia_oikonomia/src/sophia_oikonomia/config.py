@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     timezone: str = "America/New_York"
     db_path: str = ".sophia/oikonomia/oikonomia.db"
     scrivener_url: str = "http://localhost:8000"
+    sentry_url: str = "http://localhost:8007"
     request_timeout_sec: float = 30.0
     market_models_root: str = "/Users/ncdial/devwork/market_models"
     default_observation_lookback_days: int = 3650
