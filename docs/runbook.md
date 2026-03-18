@@ -11,6 +11,7 @@ source .venv/bin/activate
 cd services/scrivener && pip install -e .
 cd ../sophia_arithmos && pip install -e .
 cd ../sophia_kampe && pip install -e .
+cd ../sophia_oikonomia && pip install -e .
 cd ../sophia_pylon && pip install -e .
 cd ../../agents/sophia_prima && pip install -e .
 ```
@@ -33,6 +34,12 @@ python -m sophia_arithmos.main
 source .venv/bin/activate
 cd services/sophia_kampe
 python -m sophia_kampe.main
+```
+
+```bash
+source .venv/bin/activate
+cd services/sophia_oikonomia
+python -m sophia_oikonomia
 ```
 
 ```bash
@@ -64,6 +71,7 @@ Service URLs:
 - `http://localhost:8000` scrivener
 - `http://localhost:8001` sophia_arithmos
 - `http://localhost:8002` sophia_kampe
+- `http://localhost:8006` sophia_oikonomia
 - `http://localhost:8003` sophia_canvas
 - `http://localhost:13000` sophia_dashboard
 - `http://localhost:18080` sophia_gateway
