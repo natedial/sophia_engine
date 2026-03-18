@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .adapters import AdapterRegistry, BistroAdapter
 from .api import build_router
-from .clients import ScrivenerClient
+from .clients import ScrivenerClient, SentryClient
 from .config import settings
 from .core.runtime import OikonomiaRuntime
 from .core.store import OikonomiaStore
@@ -19,6 +19,10 @@ store = OikonomiaStore(Path(settings.db_path))
 scrivener = ScrivenerClient(
     base_url=settings.scrivener_url,
     timeout_sec=settings.request_timeout_sec,
+)
+sentry = SentryClient(
+    base_url=settings.sentry_url,
+    timeout_sec=min(settings.request_timeout_sec, 10.0),
 )
 adapters = AdapterRegistry()
 adapters.register(
@@ -29,7 +33,7 @@ adapters.register(
         default_lookback_days=settings.default_observation_lookback_days,
     ),
 )
-runtime = OikonomiaRuntime(store=store, adapters=adapters, scrivener=scrivener)
+runtime = OikonomiaRuntime(store=store, adapters=adapters, scrivener=scrivener, sentry=sentry)
 
 
 @asynccontextmanager
@@ -37,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
     yield
     scrivener.close()
+    sentry.close()
 
 
 app = FastAPI(

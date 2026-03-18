@@ -12,6 +12,7 @@ cd services/scrivener && pip install -e .
 cd ../sophia_arithmos && pip install -e .
 cd ../sophia_kampe && pip install -e .
 cd ../sophia_oikonomia && pip install -e .
+cd ../sophia_sentry && pip install -e .
 cd ../sophia_pylon && pip install -e .
 cd ../../agents/sophia_prima && pip install -e .
 ```
@@ -44,6 +45,12 @@ python -m sophia_oikonomia
 
 ```bash
 source .venv/bin/activate
+cd services/sophia_sentry
+python -m sophia_sentry
+```
+
+```bash
+source .venv/bin/activate
 cd services/sophia_pylon
 # No standalone server; consumed by sophia_prima
 ```
@@ -72,6 +79,7 @@ Service URLs:
 - `http://localhost:8001` sophia_arithmos
 - `http://localhost:8002` sophia_kampe
 - `http://localhost:8006` sophia_oikonomia
+- `http://localhost:8007` sophia_sentry
 - `http://localhost:8003` sophia_canvas
 - `http://localhost:13000` sophia_dashboard
 - `http://localhost:18080` sophia_gateway
@@ -104,7 +112,7 @@ Gateway configuration:
 Recommendation: For AWS choose the smallest viable path now and evolve as load grows.
 
 Option A: Single EC2 + systemd (fastest to ship)
-- Run each service as a systemd unit (scrivener, sophia_arithmos, sophia_kampe, sophia_prima).
+- Run each service as a systemd unit (scrivener, sophia_arithmos, sophia_kampe, sophia_oikonomia, sophia_sentry, sophia_prima).
 - Put Nginx in front if you need a single public entrypoint.
 - Use CloudWatch Agent for logs/metrics.
 
