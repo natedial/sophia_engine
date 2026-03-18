@@ -5,9 +5,15 @@ from sophia_forge_protocol.event_models import RunEvent
 from sophia_forge_protocol.run_models import (
     CapabilityAdded,
     ExecutionPolicy,
+    FailureClassCount,
+    CapabilityHandoff,
+    CapabilityHandoffUpdate,
+    RetentionSummary,
+    RunMetricsSummary,
     RunRequest,
     RunResult,
     StructuredRunOutput,
+    TaskTypeMetrics,
     run_output_schema,
 )
 from sophia_forge_protocol.verification_models import VerificationPolicy, VerificationResult
@@ -116,6 +122,33 @@ def test_run_request_syncs_execution_policy_roots_back_to_top_level() -> None:
     assert request.writable_roots == ("/tmp/write",)
 
 
+def test_execution_policy_supports_environment_and_secret_controls() -> None:
+    policy = ExecutionPolicy(
+        environment_strategy="ephemeral",
+        environment_cleanup_policy="cleanup_on_success",
+        secret_env_vars=("OPENAI_API_KEY",),
+    )
+
+    assert policy.environment_strategy == "ephemeral"
+    assert policy.environment_cleanup_policy == "cleanup_on_success"
+    assert policy.secret_env_vars == ("OPENAI_API_KEY",)
+
+
+def test_capability_handoff_update_serializes_entries() -> None:
+    update = CapabilityHandoffUpdate(
+        entries=(
+            CapabilityHandoff(
+                tool_name="get_market_ohlcv",
+                service_name="scrivener",
+                registration_path="services/sophia_pylon/src/pylon/core.py",
+                usage_example={"symbol": "ZN"},
+            ),
+        )
+    )
+
+    assert update.entries[0].tool_name == "get_market_ohlcv"
+
+
 def test_run_result_keeps_capabilities_added() -> None:
     result = RunResult(
         run_id="forge_run_001",
@@ -189,3 +222,33 @@ def test_verification_result_serializes_structured_outcome() -> None:
     )
 
     assert result.status == "passed"
+
+
+def test_run_metrics_summary_serializes_operational_counts() -> None:
+    summary = RunMetricsSummary(
+        total_runs=3,
+        completed_runs=2,
+        failed_runs=1,
+        success_rate=2 / 3,
+        retry_rate=1 / 3,
+        runs_with_verification=1,
+        verification_pass_rate=1.0,
+        common_failure_classes=(FailureClassCount(failure_class="backend_launch_failed", count=1),),
+        task_types=(TaskTypeMetrics(task_type="capability", total_runs=3, completed_runs=2),),
+    )
+
+    assert summary.common_failure_classes[0].failure_class == "backend_launch_failed"
+    assert summary.task_types[0].task_type == "capability"
+
+
+def test_retention_summary_serializes_cleanup_state() -> None:
+    summary = RetentionSummary(
+        dry_run=True,
+        workspaces={"category": "workspaces", "eligible_count": 1, "eligible_paths": ("/tmp/w1",)},
+        environments={"category": "environments"},
+        run_artifacts={"category": "run_artifacts"},
+        eval_artifacts={"category": "eval_artifacts"},
+    )
+
+    assert summary.workspaces.eligible_count == 1
+    assert summary.workspaces.eligible_paths == ("/tmp/w1",)

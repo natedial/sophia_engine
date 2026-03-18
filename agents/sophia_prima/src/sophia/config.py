@@ -415,9 +415,14 @@ class Settings(BaseSettings):
         description="Maximum coding worker final message characters retained by supervisor",
     )
     coding_runtime_mode: str = Field(
-        default="inline",
+        default="forge_service",
         validation_alias=AliasChoices("CODING_RUNTIME_MODE"),
         description="Coding runtime execution mode: inline or forge_service",
+    )
+    coding_runtime_fallback_inline: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CODING_RUNTIME_FALLBACK_INLINE"),
+        description="Fall back to inline coding worker execution when forge service is unreachable",
     )
     forge_base_url: str = Field(
         default="http://localhost:8090",

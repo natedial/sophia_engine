@@ -5,6 +5,7 @@ from sophia.agent import SophiaAgent
 from sophia.context import ConversationContext
 from sophia.llm.types import ToolSchema
 from sophia.personality.loader import Personality
+from sophia_forge_protocol.run_models import CapabilityHandoff
 from sophia_forge_protocol.run_models import CapabilityAdded, CapabilityAdoption, CapabilityAdoptionReport
 
 
@@ -218,3 +219,34 @@ def test_build_system_prompt_includes_tool_handoff_guidance() -> None:
     assert "Tool handoff guidance" in prompt
     assert "get_market_ohlcv" in prompt
     assert '{"symbol":"ZN"}' in prompt
+
+
+def test_hydrate_capability_handoffs_merges_durable_registry(monkeypatch) -> None:
+    agent = object.__new__(SophiaAgent)
+    agent.settings = object()
+    agent.read_policy = object()
+    agent.write_policy = object()
+    context = ConversationContext(session_id="session-1")
+
+    class FakeForgeClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def load_capability_handoffs(self):
+            return (
+                CapabilityHandoff(
+                    tool_name="get_market_ohlcv",
+                    service_name="scrivener",
+                    registration_path="services/sophia_pylon/src/pylon/core.py",
+                    when_to_use="Use for OHLCV requests.",
+                    usage_example={"symbol": "ZN"},
+                ),
+            )
+
+    monkeypatch.setattr("sophia.agent.ForgeClient", FakeForgeClient)
+
+    import asyncio
+
+    asyncio.run(agent._hydrate_capability_handoffs(context))
+
+    assert context.metadata["tool_handoffs"]["get_market_ohlcv"]["usage_example"] == {"symbol": "ZN"}

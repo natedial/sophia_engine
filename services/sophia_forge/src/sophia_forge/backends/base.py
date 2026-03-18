@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -31,7 +31,7 @@ class BaseForgeBackend(ABC):
         self.process_factory = process_factory or asyncio.create_subprocess_exec
 
     @abstractmethod
-    async def run(self, request: RunRequest) -> RunResult:
+    async def run(self, request: RunRequest, *, env: Mapping[str, str] | None = None) -> RunResult:
         """Execute one coding run."""
 
     def _resolve_binary(self, configured_command: str) -> str | None:
@@ -40,17 +40,15 @@ class BaseForgeBackend(ABC):
             return None
         return shutil.which(command)
 
-    def _prepare_workspace(self, request: RunRequest) -> tuple[Path, Path, tuple[Path, ...]]:
+    def _prepare_paths(
+        self,
+        request: RunRequest,
+    ) -> tuple[Path, Path, tuple[Path, ...]]:
         workspace_root = Path(request.workspace_root).expanduser().resolve(strict=False)
-        workspace_root.mkdir(parents=True, exist_ok=True)
-
         writable_roots = tuple(
             Path(path).expanduser().resolve(strict=False)
             for path in (request.execution_policy.writable_roots or request.writable_roots)
-        )
-        if not writable_roots:
-            writable_roots = (workspace_root,)
-
+        ) or (workspace_root,)
         output_dir = self.settings.output_dir / _sanitize_run_id(request.run_id or "forge_run") / "backend"
         output_dir.mkdir(parents=True, exist_ok=True)
         add_dirs = self._build_add_dirs(workspace_root, writable_roots)

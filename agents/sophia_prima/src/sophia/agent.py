@@ -620,23 +620,40 @@ class SophiaAgent:
         if not capabilities:
             return
         adoption_by_tool = {row.tool_name: row for row in adoption_report.capabilities}
-        handoff_store = context.metadata.setdefault("tool_handoffs", {})
-        if not isinstance(handoff_store, dict):
-            handoff_store = {}
-            context.metadata["tool_handoffs"] = handoff_store
+        payloads: list[dict[str, Any]] = []
         for capability in capabilities:
             adoption = adoption_by_tool.get(capability.tool_name)
             if adoption is None or not adoption.adopted or not adoption.handoff_ready:
                 continue
-            handoff_store[capability.tool_name] = {
-                "tool_name": capability.tool_name,
-                "service_name": capability.service_name,
-                "registration_path": capability.registration_path,
-                "description": capability.description,
-                "when_to_use": capability.when_to_use,
-                "input_schema": adoption.resolved_input_schema or capability.input_schema,
-                "usage_example": capability.usage_example,
-            }
+            payloads.append(
+                {
+                    "tool_name": capability.tool_name,
+                    "service_name": capability.service_name,
+                    "registration_path": capability.registration_path,
+                    "description": capability.description,
+                    "when_to_use": capability.when_to_use,
+                    "input_schema": adoption.resolved_input_schema or capability.input_schema,
+                    "usage_example": capability.usage_example,
+                }
+            )
+        SophiaAgent._merge_tool_handoffs(context, payloads)
+
+    @staticmethod
+    def _merge_tool_handoffs(
+        context: ConversationContext,
+        payloads: list[dict[str, Any]],
+    ) -> None:
+        if not payloads:
+            return
+        handoff_store = context.metadata.setdefault("tool_handoffs", {})
+        if not isinstance(handoff_store, dict):
+            handoff_store = {}
+            context.metadata["tool_handoffs"] = handoff_store
+        for payload in payloads:
+            tool_name = str(payload.get("tool_name") or "").strip()
+            if not tool_name:
+                continue
+            handoff_store[tool_name] = payload
 
     @staticmethod
     def _tool_handoff_guidance(
@@ -673,6 +690,21 @@ class SophiaAgent:
             "Use these validated tool handoffs when they fit the request. "
             "Prefer the example argument shape unless the user explicitly needs different inputs.\n"
             + "\n".join(lines[:6])
+        )
+
+    async def _hydrate_capability_handoffs(self, context: ConversationContext) -> None:
+        existing = context.metadata.get("tool_handoffs")
+        if isinstance(existing, dict) and existing:
+            return
+        client = ForgeClient(
+            settings=self.settings,
+            read_policy=self.read_policy,
+            write_policy=self.write_policy,
+        )
+        entries = await client.load_capability_handoffs()
+        self._merge_tool_handoffs(
+            context,
+            [entry.model_dump(mode="json") for entry in entries],
         )
 
     @staticmethod
@@ -1405,6 +1437,7 @@ class SophiaAgent:
                     "agent_id": self.profile.agent_id,
                     "parent_run_id": parent_run_id,
                     "task_id": task.task_id,
+                    "task_type": "capability",
                 },
             )
         )
@@ -1414,6 +1447,11 @@ class SophiaAgent:
                 run_id=sub_run_id,
                 report=adoption_report,
                 mode=self.settings.coding_runtime_mode.strip().lower() or "inline",
+            )
+            await client.persist_capability_handoffs(
+                run_id=sub_run_id,
+                capabilities=execution.capabilities_added,
+                adoption_report=adoption_report,
             )
         summary_parts: list[str] = []
         if execution.summary:
@@ -1496,6 +1534,7 @@ class SophiaAgent:
         )
 
         context.add_user_message(message)
+        await self._hydrate_capability_handoffs(context)
         available_tools = self._get_tool_schemas()
         subagent_context: str | None = None
         if self._should_delegate_subagents(message, available_tools):

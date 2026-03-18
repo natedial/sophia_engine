@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 
 from sophia_forge.config import ForgeSettings
@@ -27,42 +27,54 @@ class VerificationRunner:
         self.settings = settings
         self.process_factory = process_factory or asyncio.create_subprocess_shell
 
-    async def run(self, request: RunRequest, result: RunResult) -> tuple[VerificationResult, ...]:
+    async def run(
+        self,
+        request: RunRequest,
+        result: RunResult,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[VerificationResult, ...]:
         if result.status != "completed":
             return ()
         policy = request.verification_policy
         if policy.mode == "none":
             return ()
-        steps = (
-            policy.steps
-            if policy.mode == "explicit"
-            else self._infer_auto_steps(request=request, result=result)
-        )
+        if policy.mode == "explicit":
+            steps = policy.steps
+        else:
+            steps = self._infer_auto_steps(request=request, result=result)
         if not steps:
+            task_type = _task_type(request)
+            skip_reason = "No safe verification command inferred"
+            if task_type in {"docs", "documentation"}:
+                skip_reason = "Verification recipe skipped for documentation-only task"
             return (
                 VerificationResult(
-                    name="auto_verification",
+                    name="auto_verification" if task_type not in {"docs", "documentation"} else "docs_noop",
                     status="skipped",
                     command="",
                     required=False,
-                    details="No safe verification command inferred",
+                    details=skip_reason,
                 ),
             )
         outcomes: list[VerificationResult] = []
         for step in steps:
-            outcomes.append(await self._run_step(request, step))
+            outcomes.append(await self._run_step(request, step, env=env))
         return tuple(outcomes)
 
     async def _run_step(
         self,
         request: RunRequest,
         step: VerificationStep,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> VerificationResult:
         workspace_root = Path(request.workspace_root).expanduser().resolve(strict=False)
         try:
             process = await self.process_factory(
                 step.command,
                 cwd=str(workspace_root),
+                env=None if env is None else dict(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -106,6 +118,10 @@ class VerificationRunner:
         request: RunRequest,
         result: RunResult,
     ) -> tuple[VerificationStep, ...]:
+        task_type = _task_type(request)
+        if task_type in {"docs", "documentation"}:
+            return ()
+
         workspace_root = Path(request.workspace_root).expanduser().resolve(strict=False)
         pytest_bin = workspace_root / ".venv" / "bin" / "pytest"
         pytest_cmd = str(pytest_bin) if pytest_bin.exists() else "pytest"
@@ -122,9 +138,8 @@ class VerificationRunner:
                 )
             if candidate.suffix != ".py":
                 continue
-            candidates = (
-                candidate.parent / "tests" / f"test_{candidate.stem}.py",
-                workspace_root / "tests" / f"test_{candidate.stem}.py",
+            candidates = tuple(
+                _candidate_test_paths(candidate=candidate, workspace_root=workspace_root)
             )
             for test_path in candidates:
                 resolved = test_path if test_path.is_absolute() else workspace_root / test_path
@@ -150,3 +165,35 @@ def summarize_verification(results: tuple[VerificationResult, ...]) -> tuple[str
         else:
             lines.append(f"{result.status}: {result.name}")
     return tuple(lines)
+
+
+def _candidate_test_paths(*, candidate: Path, workspace_root: Path) -> tuple[Path, ...]:
+    candidate = candidate if candidate.is_absolute() else workspace_root / candidate
+    options: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        options.append(path)
+
+    _add(candidate.parent / "tests" / f"test_{candidate.stem}.py")
+    _add(workspace_root / "tests" / f"test_{candidate.stem}.py")
+
+    parents = list(candidate.parents)
+    for idx, parent in enumerate(parents):
+        if parent == workspace_root:
+            break
+        if parent.name == "src" and idx > 0:
+            _add(parent.parent / "tests" / f"test_{candidate.stem}.py")
+        _add(parent / "tests" / f"test_{candidate.stem}.py")
+    return tuple(options)
+
+
+def _task_type(request: RunRequest) -> str:
+    raw = request.metadata.get("task_type")
+    if raw is None:
+        return ""
+    return str(raw).strip().lower()

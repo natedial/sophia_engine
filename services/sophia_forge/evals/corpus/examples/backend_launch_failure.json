@@ -1,0 +1,49 @@
+{
+  "case_id": "backend_launch_failure",
+  "name": "Backend Launch Failure Classifies Cleanly",
+  "description": "A failing backend launch should map to the normalized backend_launch_failed class.",
+  "tags": [
+    "failure",
+    "classification"
+  ],
+  "request": {
+    "run_id": "eval-backend-launch-failure",
+    "client_name": "sophia_prima",
+    "task": "Attempt a broken coding run.",
+    "workspace_root": "/workspace",
+    "writable_roots": [
+      "/workspace"
+    ],
+    "readable_roots": [
+      "/workspace"
+    ],
+    "backend": "codex",
+    "timeout_sec": 30.0,
+    "execution_policy": {
+      "readable_roots": [
+        "/workspace"
+      ],
+      "writable_roots": [
+        "/workspace"
+      ],
+      "allowed_capabilities": [
+        "shell"
+      ],
+      "allowed_command_prefixes": [],
+      "backend_allowed_tools": [],
+      "network_access": "inherit"
+    },
+    "verification_policy": {
+      "mode": "none",
+      "steps": []
+    },
+    "metadata": {
+      "task_type": "capability",
+      "source": "eval_corpus"
+    }
+  },
+  "expectation": {
+    "status": "failed",
+    "failure_class": "backend_launch_failed"
+  }
+}

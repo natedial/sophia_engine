@@ -1,0 +1,64 @@
+{
+  "case_id": "capability_success",
+  "name": "Capability Task Completes",
+  "description": "A representative capability-building task should complete and pass required verification.",
+  "tags": [
+    "capability",
+    "smoke"
+  ],
+  "request": {
+    "run_id": "eval-capability-success",
+    "client_name": "sophia_prima",
+    "task": "Implement a missing capability hook.",
+    "workspace_root": "/workspace",
+    "writable_roots": [
+      "/workspace"
+    ],
+    "readable_roots": [
+      "/workspace"
+    ],
+    "backend": "codex",
+    "timeout_sec": 30.0,
+    "execution_policy": {
+      "readable_roots": [
+        "/workspace"
+      ],
+      "writable_roots": [
+        "/workspace"
+      ],
+      "allowed_capabilities": [
+        "shell",
+        "read",
+        "write",
+        "edit",
+        "grep",
+        "glob",
+        "test"
+      ],
+      "allowed_command_prefixes": [],
+      "backend_allowed_tools": [],
+      "network_access": "inherit"
+    },
+    "verification_policy": {
+      "mode": "explicit",
+      "steps": [
+        {
+          "name": "smoke_check",
+          "command": "printf ok",
+          "required": true
+        }
+      ]
+    },
+    "metadata": {
+      "task_type": "capability",
+      "source": "eval_corpus"
+    }
+  },
+  "expectation": {
+    "status": "completed",
+    "required_verification_passed": true,
+    "changed_files_subset": [
+      "services/foo/tool.py"
+    ]
+  }
+}

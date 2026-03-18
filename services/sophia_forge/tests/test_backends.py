@@ -108,3 +108,48 @@ def test_claude_backend_parses_structured_stdout(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     assert result.changed_files == ("services/foo/pipeline.py",)
+
+
+def test_codex_backend_receives_prepared_environment(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    codex_bin = tmp_path / "bin" / "codex"
+    codex_bin.parent.mkdir(parents=True, exist_ok=True)
+    codex_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    codex_bin.chmod(0o755)
+    captured_env: dict[str, str] = {}
+
+    async def _fake_process_factory(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        output_idx = args.index("-o") + 1
+        Path(args[output_idx]).write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "summary": "Implemented the pipeline hook.",
+                    "changed_files": [],
+                    "verification": [],
+                    "follow_ups": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    backend = CodexBackend(
+        settings=ForgeSettings(
+            output_dir=tmp_path / "forge_runs",
+            codex_command=str(codex_bin),
+        ),
+        process_factory=_fake_process_factory,
+    )
+
+    result = asyncio.run(
+        backend.run(
+            _build_request(tmp_path, backend="codex"),
+            env={"PATH": "/tmp/bin", "OPENAI_API_KEY": "secret"},
+        )
+    )
+
+    assert result.status == "completed"
+    assert captured_env["OPENAI_API_KEY"] == "secret"

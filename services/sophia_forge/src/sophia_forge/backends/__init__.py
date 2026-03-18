@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Awaitable, Callable
 
 from sophia_forge.backends.claude_code import ClaudeCodeBackend
@@ -10,7 +11,7 @@ from sophia_forge.config import ForgeSettings
 from sophia_forge_protocol.run_models import RunRequest, RunResult
 
 
-ForgeExecutor = Callable[[RunRequest], Awaitable[RunResult]]
+ForgeExecutor = Callable[[RunRequest, Mapping[str, str] | None], Awaitable[RunResult]]
 
 
 def build_backend_executor(*, settings: ForgeSettings, process_factory=None) -> ForgeExecutor:
@@ -19,11 +20,11 @@ def build_backend_executor(*, settings: ForgeSettings, process_factory=None) -> 
     codex = CodexBackend(settings=settings, process_factory=process_factory)
     claude = ClaudeCodeBackend(settings=settings, process_factory=process_factory)
 
-    async def _execute(request: RunRequest) -> RunResult:
+    async def _execute(request: RunRequest, env: Mapping[str, str] | None = None) -> RunResult:
         if request.backend == "codex":
-            return await codex.run(request)
+            return await codex.run(request, env=env)
         if request.backend == "claude_code":
-            return await claude.run(request)
+            return await claude.run(request, env=env)
         return RunResult(
             run_id=request.run_id,
             status="failed",
