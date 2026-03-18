@@ -193,6 +193,8 @@ async def setup_pylon(settings) -> tuple[Pylon, PreflightResult]:
         canvas_url=settings.canvas_base_url,
         tholos_url=settings.tholos_base_url,
         fed_tracker_url=settings.fed_tracker_url,
+        brave_base_url=settings.brave_base_url,
+        brave_api_key=settings.brave_api_key,
     )
     pylon = Pylon(config)
 

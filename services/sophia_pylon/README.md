@@ -22,8 +22,8 @@ Gateway layer for backend service integration. Pylon routes queries from consume
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Backend Services                         │
-│   Scrivener    │   Arithmos    │   Kampe     │   Future    │
-│  (data:8000)   │ (compute:8001)│ (models:TBD)│    (TBD)    │
+│ Scrivener │ Arithmos │ Tholos │ Oikonomia │ Brave Search │
+│ data:8000 │ compute  │ research│ models     │ live web     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,7 +44,8 @@ from pylon import Pylon, PylonConfig
 # Initialize
 config = PylonConfig(
     scrivener_url="http://localhost:8000",
-    arithmos_url="http://localhost:8001"
+    arithmos_url="http://localhost:8001",
+    brave_api_key="your-brave-api-key",
 )
 pylon = Pylon(config)
 
@@ -81,6 +82,9 @@ results = await pylon.arithmos.compute(
     computations=[{"type": "mean"}, {"type": "std_dev"}],
     output="summary"
 )
+
+# Access Brave directly
+web = await pylon.brave.search_web(query="latest CPI release", count=5)
 ```
 
 ## Adding a New Service
@@ -242,6 +246,15 @@ print(result.to_content())
 - **Regression**: linear_regression, multi_regression, rolling_regression
 - **Transformations**: percent_change, difference, log_transform, cumulative, normalize, moving_average
 
+### Brave (Live Web)
+
+| Tool | Description |
+|------|-------------|
+| `search_web` | Search the live web with Brave and return ranked URLs plus snippets |
+| `get_web_context` | Retrieve Brave LLM Context with source-backed extracted content for grounding |
+
+Brave is the current live-web layer in Pylon. It provides search and grounded content retrieval, not full browser automation.
+
 ## Configuration
 
 ```python
@@ -250,6 +263,7 @@ from pylon.core import PylonConfig
 config = PylonConfig(
     scrivener_url="http://localhost:8000",
     arithmos_url="http://localhost:8001",
+    brave_api_key="your-brave-api-key",
     # kampe_url="http://localhost:8002",  # Future
 )
 ```
@@ -264,11 +278,13 @@ sophia_pylon/
 │   ├── clients/
 │   │   ├── __init__.py
 │   │   ├── base.py          # BaseClient ABC
+│   │   ├── brave.py         # Brave Search API client
 │   │   ├── scrivener.py     # Scrivener HTTP client (data)
 │   │   └── arithmos.py      # Arithmos HTTP client (computation)
 │   └── tools/
 │       ├── __init__.py
 │       ├── base.py          # ToolDefinition, ToolResult, ErrorType
+│       ├── brave.py         # Brave web retrieval tools
 │       ├── scrivener.py     # Scrivener tool definitions
 │       └── arithmos.py      # Arithmos tool definitions
 ├── pyproject.toml

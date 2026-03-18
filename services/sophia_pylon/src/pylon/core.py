@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pylon.clients.arithmos import ArithmosClient
+from pylon.clients.brave import BraveClient
 from pylon.clients.canvas import CanvasClient
 from pylon.clients.fed_tracker import FedTrackerClient
 from pylon.clients.oikonomia import OikonomiaClient
@@ -14,6 +15,7 @@ from pylon.clients.scrivener import ScrivenerClient
 from pylon.clients.tholos import TholosClient
 from pylon.tools.arithmos import ArithmosToolExecutor
 from pylon.tools.base import ErrorType, ToolDefinition, ToolResult
+from pylon.tools.brave import BraveToolExecutor
 from pylon.tools.canvas import CanvasToolExecutor
 from pylon.tools.fed_tracker import FedTrackerToolExecutor
 from pylon.tools.oikonomia import OikonomiaToolExecutor
@@ -31,6 +33,8 @@ class PylonConfig:
     tholos_url: str = "http://localhost:8004"
     fed_tracker_url: str = "http://127.0.0.1:8005"
     oikonomia_url: str = "http://localhost:8006"
+    brave_base_url: str = "https://api.search.brave.com"
+    brave_api_key: str = ""
     max_concurrency_per_service: int = 8
     tool_timeout_sec: float = 30.0
 
@@ -105,6 +109,13 @@ class _ExecutorSpec:
 
 _EXECUTOR_SPECS: tuple[_ExecutorSpec, ...] = (
     _ExecutorSpec(
+        service_name="brave",
+        executor_attr="_brave_executor",
+        module_name="pylon.tools.brave",
+        class_name="BraveToolExecutor",
+        dependency_attrs=("_brave_client",),
+    ),
+    _ExecutorSpec(
         service_name="scrivener",
         executor_attr="_scrivener_executor",
         module_name="pylon.tools.scrivener",
@@ -174,6 +185,10 @@ class Pylon:
         self._tholos_client = TholosClient(base_url=self.config.tholos_url)
         self._fed_tracker_client = FedTrackerClient(base_url=self.config.fed_tracker_url)
         self._oikonomia_client = OikonomiaClient(base_url=self.config.oikonomia_url)
+        self._brave_client = BraveClient(
+            base_url=self.config.brave_base_url,
+            api_key=self.config.brave_api_key,
+        )
 
         self._service_executors: dict[str, Any] = {}
         self._build_tool_executors()
@@ -232,6 +247,7 @@ class Pylon:
         await self._tholos_client.close()
         await self._fed_tracker_client.close()
         await self._oikonomia_client.close()
+        await self._brave_client.close()
 
     # -------------------------------------------------------------------------
     # Health Checks & Pre-flight
@@ -258,6 +274,8 @@ class Pylon:
                 healthy = await self._fed_tracker_client.health_check()
             elif name == "oikonomia":
                 healthy = await self._oikonomia_client.health_check()
+            elif name == "brave":
+                healthy = await self._brave_client.health_check()
             else:
                 healthy = False
 
@@ -436,3 +454,8 @@ class Pylon:
     def oikonomia(self) -> OikonomiaClient:
         """Direct access to Oikonomia client for non-LLM use cases."""
         return self._oikonomia_client
+
+    @property
+    def brave(self) -> BraveClient:
+        """Direct access to Brave client for non-LLM use cases."""
+        return self._brave_client
