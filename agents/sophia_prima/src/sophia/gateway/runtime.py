@@ -443,6 +443,8 @@ class GatewayRuntime:
             canvas_url=self.settings.canvas_base_url,
             tholos_url=self.settings.tholos_base_url,
             fed_tracker_url=self.settings.fed_tracker_url,
+            brave_base_url=self.settings.brave_base_url,
+            brave_api_key=self.settings.brave_api_key,
         )
         pylon = Pylon(config)
         # Prime health state before serving traffic.

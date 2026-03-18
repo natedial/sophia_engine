@@ -8,9 +8,15 @@ import httpx
 class BaseClient(ABC):
     """Base class for HTTP clients connecting to backend services."""
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._headers = headers or {}
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -19,6 +25,7 @@ class BaseClient(ABC):
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self.timeout,
+                headers=self._headers,
             )
         return self._client
 

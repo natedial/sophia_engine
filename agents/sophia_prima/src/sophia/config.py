@@ -132,6 +132,14 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8005",
         description="Base URL for Fed Textual Change Tracker service",
     )
+    brave_base_url: str = Field(
+        default="https://api.search.brave.com",
+        description="Base URL for Brave Search API",
+    )
+    brave_api_key: str = Field(
+        default="",
+        description="API key for Brave Search / LLM Context access",
+    )
     canvas_dashboard_url: str = Field(
         default="http://localhost:3000",
         description="Frontend dashboard URL shown to user at session start",
