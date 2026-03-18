@@ -30,3 +30,16 @@ class ForgeSettings(BaseModel):
     claude_code_allowed_tools: str = "Bash,Edit,Glob,Grep,LS,MultiEdit,Read,Write"
     max_message_chars: int = 12000
     verification_timeout_sec: float = 120.0
+    workspace_strategy_default: Literal["shared", "git_worktree"] = "shared"
+    workspace_cleanup_policy_default: Literal[
+        "keep", "cleanup_on_success", "cleanup_always"
+    ] = "keep"
+    environment_strategy_default: Literal["shared", "ephemeral"] = "shared"
+    environment_cleanup_policy_default: Literal[
+        "keep", "cleanup_on_success", "cleanup_always"
+    ] = "keep"
+    secret_env_allowlist: tuple[str, ...] = ()
+    workspace_retention_days: int = 7
+    environment_retention_days: int = 7
+    run_artifact_retention_days: int = 30
+    eval_artifact_retention_days: int = 30

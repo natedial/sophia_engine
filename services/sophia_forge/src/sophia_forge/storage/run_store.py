@@ -8,9 +8,18 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sophia_forge.evals.models import EvalRunSummary
 from sophia_forge_protocol.artifact_models import RunArtifact
 from sophia_forge_protocol.event_models import RunEvent
-from sophia_forge_protocol.run_models import RunRequest, RunResult
+from sophia_forge.core.outcomes import classify_failure
+from sophia_forge_protocol.run_models import (
+    CapabilityHandoff,
+    FailureClassCount,
+    RunMetricsSummary,
+    RunRequest,
+    RunResult,
+    TaskTypeMetrics,
+)
 from sophia_forge_protocol.verification_models import VerificationResult
 
 
@@ -39,6 +48,7 @@ class ForgeRunStore:
                     task_text TEXT NOT NULL,
                     backend TEXT NOT NULL,
                     workspace_root TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     error TEXT,
@@ -79,7 +89,29 @@ class ForgeRunStore:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS forge_eval_runs (
+                    eval_run_id TEXT PRIMARY KEY,
+                    corpus_name TEXT NOT NULL,
+                    backend_override TEXT,
+                    artifact_id TEXT NOT NULL,
+                    summary_path TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS forge_capability_handoffs (
+                    tool_name TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
+            )
+            _ensure_column(
+                conn,
+                table_name="forge_runs",
+                column_name="request_json",
+                column_sql="TEXT NOT NULL DEFAULT '{}'",
             )
 
     def create_run(self, request: RunRequest) -> RunResult:
@@ -89,10 +121,10 @@ class ForgeRunStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO forge_runs (
-                    run_id, client_name, status, task_text, backend, workspace_root, metadata_json,
+                    run_id, client_name, status, task_text, backend, workspace_root, request_json, metadata_json,
                     summary, error, changed_files_json, verification_json, follow_ups_json,
                     artifact_ids_json, created_at, updated_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -101,6 +133,7 @@ class ForgeRunStore:
                     request.task,
                     request.backend,
                     request.workspace_root,
+                    json.dumps(request.model_dump(mode="json"), sort_keys=True),
                     json.dumps(request.metadata, sort_keys=True),
                     "",
                     None,
@@ -114,6 +147,20 @@ class ForgeRunStore:
                 ),
             )
         return self.get_run(run_id)
+
+    def get_run_request(self, run_id: str) -> RunRequest:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT request_json
+                FROM forge_runs
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return RunRequest.model_validate(json.loads(row["request_json"]))
 
     def mark_running(self, run_id: str) -> RunResult:
         now = _utc_now()
@@ -318,6 +365,267 @@ class ForgeRunStore:
             for row in rows
         )
 
+    def summarize_metrics(self) -> RunMetricsSummary:
+        with self._connect() as conn:
+            run_rows = conn.execute(
+                """
+                SELECT run_id, status, error, metadata_json
+                FROM forge_runs
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            verification_rows = conn.execute(
+                """
+                SELECT run_id, status, required
+                FROM forge_verification_results
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+
+        total_runs = len(run_rows)
+        completed_runs = 0
+        failed_runs = 0
+        retry_runs = 0
+        failure_counts: dict[str, int] = {}
+        task_type_totals: dict[str, int] = {}
+        task_type_completed: dict[str, int] = {}
+
+        for row in run_rows:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            status = row["status"]
+            error = row["error"]
+            task_type = str(metadata.get("task_type") or "unspecified").strip() or "unspecified"
+            task_type_totals[task_type] = task_type_totals.get(task_type, 0) + 1
+            if status == "completed":
+                completed_runs += 1
+                task_type_completed[task_type] = task_type_completed.get(task_type, 0) + 1
+            elif status not in {"queued", "running"}:
+                failed_runs += 1
+                failure_class = classify_failure(status=status, error=error)
+                failure_counts[failure_class] = failure_counts.get(failure_class, 0) + 1
+
+            if metadata.get("retry_of_run_id") or int(metadata.get("attempt", 1) or 1) > 1:
+                retry_runs += 1
+
+        verification_by_run: dict[str, list[tuple[str, bool]]] = {}
+        for row in verification_rows:
+            verification_by_run.setdefault(row["run_id"], []).append(
+                (row["status"], bool(row["required"]))
+            )
+
+        runs_with_verification = len(verification_by_run)
+        verification_passed = 0
+        for run_id, results in verification_by_run.items():
+            required_failures = [
+                status for status, required in results if required and status != "passed"
+            ]
+            if not required_failures:
+                verification_passed += 1
+
+        task_types = tuple(
+            TaskTypeMetrics(
+                task_type=task_type,
+                total_runs=task_type_totals[task_type],
+                completed_runs=task_type_completed.get(task_type, 0),
+            )
+            for task_type in sorted(task_type_totals)
+        )
+        common_failure_classes = tuple(
+            FailureClassCount(failure_class=name, count=count)
+            for name, count in sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))
+        )
+        return RunMetricsSummary(
+            total_runs=total_runs,
+            completed_runs=completed_runs,
+            failed_runs=failed_runs,
+            success_rate=(completed_runs / total_runs) if total_runs else 0.0,
+            retry_rate=(retry_runs / total_runs) if total_runs else 0.0,
+            runs_with_verification=runs_with_verification,
+            verification_pass_rate=(
+                verification_passed / runs_with_verification if runs_with_verification else None
+            ),
+            common_failure_classes=common_failure_classes,
+            task_types=task_types,
+        )
+
+    def save_eval_run(self, summary: EvalRunSummary) -> EvalRunSummary:
+        if summary.eval_run_id is None or summary.artifact_id is None or summary.summary_path is None:
+            raise ValueError("EvalRunSummary must include eval_run_id, artifact_id, and summary_path")
+        created_at = summary.created_at or _utc_now()
+        persisted = summary.model_copy(update={"created_at": created_at})
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forge_eval_runs (
+                    eval_run_id, corpus_name, backend_override, artifact_id, summary_path, summary_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persisted.eval_run_id,
+                    persisted.corpus_name,
+                    persisted.backend_override,
+                    persisted.artifact_id,
+                    persisted.summary_path,
+                    json.dumps(persisted.model_dump(mode="json"), sort_keys=True),
+                    created_at,
+                ),
+            )
+        return persisted
+
+    def get_eval_run(self, eval_run_id: str) -> EvalRunSummary:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT summary_json
+                FROM forge_eval_runs
+                WHERE eval_run_id = ?
+                """,
+                (eval_run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(eval_run_id)
+        return EvalRunSummary.model_validate(json.loads(row["summary_json"]))
+
+    def list_eval_runs(self) -> tuple[EvalRunSummary, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT summary_json
+                FROM forge_eval_runs
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return tuple(EvalRunSummary.model_validate(json.loads(row["summary_json"])) for row in rows)
+
+    def upsert_capability_handoffs(
+        self,
+        entries: tuple[CapabilityHandoff, ...],
+    ) -> tuple[CapabilityHandoff, ...]:
+        if not entries:
+            return ()
+        now = _utc_now()
+        persisted: list[CapabilityHandoff] = []
+        with self._lock, self._connect() as conn:
+            for entry in entries:
+                record = entry.model_copy(update={"updated_at": entry.updated_at or now})
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO forge_capability_handoffs (
+                        tool_name, payload_json, updated_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        record.tool_name,
+                        json.dumps(record.model_dump(mode="json"), sort_keys=True),
+                        record.updated_at,
+                    ),
+                )
+                persisted.append(record)
+        return tuple(persisted)
+
+    def list_capability_handoffs(self) -> tuple[CapabilityHandoff, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM forge_capability_handoffs
+                ORDER BY tool_name ASC
+                """
+            ).fetchall()
+        return tuple(
+            CapabilityHandoff.model_validate(json.loads(row["payload_json"]))
+            for row in rows
+        )
+
+    def list_active_run_ids(self) -> tuple[str, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id
+                FROM forge_runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return tuple(row["run_id"] for row in rows)
+
+    def list_terminal_run_ids_before(self, cutoff: datetime) -> tuple[str, ...]:
+        cutoff_text = cutoff.isoformat().replace("+00:00", "Z")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id
+                FROM forge_runs
+                WHERE status NOT IN ('queued', 'running')
+                  AND COALESCE(completed_at, updated_at, created_at) < ?
+                ORDER BY COALESCE(completed_at, updated_at, created_at) ASC
+                """,
+                (cutoff_text,),
+            ).fetchall()
+        return tuple(row["run_id"] for row in rows)
+
+    def list_eval_run_ids_before(self, cutoff: datetime) -> tuple[str, ...]:
+        cutoff_text = cutoff.isoformat().replace("+00:00", "Z")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT eval_run_id
+                FROM forge_eval_runs
+                WHERE created_at < ?
+                ORDER BY created_at ASC
+                """,
+                (cutoff_text,),
+            ).fetchall()
+        return tuple(row["eval_run_id"] for row in rows)
+
+    def prune_run_artifacts(self, run_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM forge_run_artifacts WHERE run_id = ?", (run_id,))
+            conn.execute(
+                "UPDATE forge_runs SET artifact_ids_json = ?, updated_at = ? WHERE run_id = ?",
+                ("[]", _utc_now(), run_id),
+            )
+
+    def prune_eval_artifact(self, eval_run_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT summary_json
+                FROM forge_eval_runs
+                WHERE eval_run_id = ?
+                """,
+                (eval_run_id,),
+            ).fetchone()
+            if row is None:
+                return
+            summary_json = json.loads(row["summary_json"] or "{}")
+            summary_json["artifact_id"] = ""
+            summary_json["summary_path"] = ""
+            conn.execute(
+                """
+                UPDATE forge_eval_runs
+                SET artifact_id = ?, summary_path = ?, summary_json = ?
+                WHERE eval_run_id = ?
+                """,
+                ("", "", json.dumps(summary_json, sort_keys=True), eval_run_id),
+            )
+
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name in columns:
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")

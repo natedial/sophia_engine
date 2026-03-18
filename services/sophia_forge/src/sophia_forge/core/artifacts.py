@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sophia_forge.config import ForgeSettings
+from sophia_forge.evals.models import EvalRunSummary
 from sophia_forge_protocol.artifact_models import RunArtifact
 from sophia_forge_protocol.run_models import RunRequest, RunResult
 from sophia_forge_protocol.verification_models import VerificationResult
@@ -98,6 +99,30 @@ class ArtifactManager:
         self._write_artifact_index(run_id=run_id, artifacts=tuple(artifacts))
         return tuple(artifacts)
 
+    def persist_eval_summary(
+        self,
+        *,
+        eval_run_id: str,
+        summary: EvalRunSummary,
+    ) -> EvalRunSummary:
+        eval_dir = self._ensure_eval_dir(eval_run_id)
+        summary_path = eval_dir / "summary.json"
+        created_at = _utc_now()
+        artifact_id = f"{_sanitize_run_id(eval_run_id)}_eval_summary_001"
+        persisted = summary.model_copy(
+            update={
+                "eval_run_id": eval_run_id,
+                "artifact_id": artifact_id,
+                "summary_path": str(summary_path),
+                "created_at": created_at,
+            }
+        )
+        summary_path.write_text(
+            json.dumps(persisted.model_dump(mode="json"), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return persisted
+
     def _write_artifact(
         self,
         *,
@@ -110,7 +135,7 @@ class ArtifactManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         return RunArtifact(
-            artifact_id=f"{artifact_type}_{index:03d}",
+            artifact_id=f"{_sanitize_run_id(run_id)}_{artifact_type}_{index:03d}",
             run_id=run_id,
             artifact_type=artifact_type,
             content_type="application/json",
@@ -130,9 +155,26 @@ class ArtifactManager:
         return index_path
 
     def _ensure_run_dir(self, run_id: str) -> Path:
-        run_dir = self.settings.output_dir / _sanitize_run_id(run_id)
+        run_dir = self.run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
+
+    def _ensure_eval_dir(self, eval_run_id: str) -> Path:
+        eval_dir = self.eval_dir(eval_run_id)
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        return eval_dir
+
+    def run_dir(self, run_id: str) -> Path:
+        return self.settings.output_dir / _sanitize_run_id(run_id)
+
+    def eval_dir(self, eval_run_id: str) -> Path:
+        return self.settings.output_dir / "evals" / _sanitize_run_id(eval_run_id)
+
+    def workspaces_root(self) -> Path:
+        return self.settings.output_dir / "workspaces"
+
+    def environments_root(self) -> Path:
+        return self.settings.output_dir / "environments"
 
 
 def _sanitize_run_id(run_id: str) -> str:

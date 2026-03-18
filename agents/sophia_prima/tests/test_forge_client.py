@@ -14,6 +14,8 @@ from sophia_forge_protocol.run_models import (
     CapabilityAdded,
     CapabilityAdoption,
     CapabilityAdoptionReport,
+    CapabilityHandoff,
+    CapabilityHandoffUpdate,
     ExecutionPolicy,
     RunRequest,
     RunResult,
@@ -151,6 +153,32 @@ def test_forge_client_reports_service_request_failures(tmp_path: Path) -> None:
     assert result.status == "failed"
 
 
+def test_forge_client_falls_back_to_inline_when_service_is_unreachable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    settings = _build_settings(tmp_path, runtime_mode="forge_service")
+    client = ForgeClient(
+        settings=settings,
+        read_policy=settings.build_read_policy(),
+        write_policy=settings.build_write_policy(),
+    )
+
+    class FakeWorker:
+        async def run_request(self, request: RunRequest) -> RunResult:
+            return RunResult(
+                status="completed",
+                summary="Recovered through inline fallback.",
+            )
+
+    monkeypatch.setattr("sophia.forge_client.create_coding_worker", lambda **kwargs: FakeWorker())
+
+    result = asyncio.run(client.run(_build_request(tmp_path)))
+
+    assert result.success is True
+    assert result.summary == "Recovered through inline fallback."
+
+
 def test_forge_client_service_mode_polls_forge_api(tmp_path: Path) -> None:
     async def _fake_executor(request: RunRequest) -> RunResult:
         await asyncio.sleep(0)
@@ -250,3 +278,93 @@ def test_forge_client_persists_capability_adoption_report(tmp_path: Path) -> Non
     assert payload["report"]["capabilities"][0]["adopted"] is True
     artifacts = client.get_run_artifacts("parent:coding")
     assert any(artifact.artifact_type == "capability_adoption" for artifact in artifacts)
+
+
+def test_forge_client_persists_and_loads_capability_handoffs(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    client = ForgeClient(
+        settings=settings,
+        read_policy=settings.build_read_policy(),
+        write_policy=settings.build_write_policy(),
+    )
+
+    entries = asyncio.run(
+        client.persist_capability_handoffs(
+            run_id="parent:coding",
+            capabilities=(
+                CapabilityAdded(
+                    tool_name="get_market_ohlcv",
+                    service_name="scrivener",
+                    registration_path="services/sophia_pylon/src/pylon/core.py",
+                    when_to_use="Use for OHLCV requests.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"symbol": {"type": "string"}},
+                        "required": ["symbol"],
+                    },
+                    usage_example={"symbol": "ZN"},
+                ),
+            ),
+            adoption_report=CapabilityAdoptionReport(
+                refreshed=True,
+                capabilities=(
+                    CapabilityAdoption(
+                        tool_name="get_market_ohlcv",
+                        service_name="scrivener",
+                        adopted=True,
+                        handoff_ready=True,
+                        resolved_input_schema={
+                            "type": "object",
+                            "properties": {"symbol": {"type": "string"}},
+                            "required": ["symbol"],
+                        },
+                    ),
+                ),
+            ),
+        )
+    )
+
+    loaded = asyncio.run(client.load_capability_handoffs())
+
+    assert entries[0].tool_name == "get_market_ohlcv"
+    assert loaded[0].usage_example == {"symbol": "ZN"}
+
+
+def test_forge_client_loads_service_capability_handoffs(tmp_path: Path) -> None:
+    runtime = ForgeRuntime(
+        settings=ForgeSettings(
+            store_path=tmp_path / "forge_runs.db",
+            output_dir=tmp_path / "forge_runs",
+        )
+    )
+    runtime.upsert_capability_handoffs(
+        CapabilityHandoffUpdate(
+            entries=(
+                CapabilityHandoff(
+                    tool_name="get_market_ohlcv",
+                    service_name="scrivener",
+                    registration_path="services/sophia_pylon/src/pylon/core.py",
+                    usage_example={"symbol": "ZN"},
+                ),
+            )
+        )
+    )
+    app = create_app(runtime=runtime)
+    transport = httpx.ASGITransport(app=app)
+
+    def _http_client_factory():
+        return httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=5.0)
+
+    settings = _build_settings(tmp_path, runtime_mode="forge_service").model_copy(
+        update={"forge_base_url": "http://testserver", "forge_request_timeout_sec": 1.0}
+    )
+    client = ForgeClient(
+        settings=settings,
+        read_policy=settings.build_read_policy(),
+        write_policy=settings.build_write_policy(),
+        http_client_factory=_http_client_factory,
+    )
+
+    loaded = asyncio.run(client.load_capability_handoffs())
+
+    assert loaded[0].tool_name == "get_market_ohlcv"

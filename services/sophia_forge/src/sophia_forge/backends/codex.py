@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from sophia_forge.backends.base import BaseForgeBackend, output_schema
@@ -15,7 +16,7 @@ class CodexBackend(BaseForgeBackend):
 
     backend_name = "codex"
 
-    async def run(self, request: RunRequest) -> RunResult:
+    async def run(self, request: RunRequest, *, env: Mapping[str, str] | None = None) -> RunResult:
         resolved_bin = self._resolve_binary(self.settings.codex_command)
         if resolved_bin is None:
             return RunResult(
@@ -26,7 +27,7 @@ class CodexBackend(BaseForgeBackend):
             )
 
         task_id = (request.run_id or "forge_run").replace(":", "_")
-        workspace_root, output_dir, add_dirs = self._prepare_workspace(request)
+        workspace_root, output_dir, add_dirs = self._prepare_paths(request)
         schema_path = output_dir / f"{task_id}_schema.json"
         last_message_path = output_dir / f"{task_id}_last_message.json"
         schema_path.write_text(json.dumps(output_schema(), indent=2), encoding="utf-8")
@@ -47,6 +48,7 @@ class CodexBackend(BaseForgeBackend):
             process = await self.process_factory(
                 *command,
                 cwd=str(workspace_root),
+                env=None if env is None else dict(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

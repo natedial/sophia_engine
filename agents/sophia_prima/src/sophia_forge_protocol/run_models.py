@@ -35,6 +35,20 @@ ToolCapability = Literal[
     "git_read",
     "git_write",
 ]
+WorkspaceStrategy = Literal["inherit", "shared", "git_worktree"]
+WorkspaceCleanupPolicy = Literal[
+    "inherit",
+    "keep",
+    "cleanup_on_success",
+    "cleanup_always",
+]
+EnvironmentStrategy = Literal["inherit", "shared", "ephemeral"]
+EnvironmentCleanupPolicy = Literal[
+    "inherit",
+    "keep",
+    "cleanup_on_success",
+    "cleanup_always",
+]
 
 
 class CapabilityAdded(BaseModel):
@@ -101,6 +115,30 @@ class CapabilityAdoptionReport(BaseModel):
     error: str | None = None
 
 
+class CapabilityHandoff(BaseModel):
+    """Durable adopted tool handoff stored by forge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    service_name: str
+    registration_path: str
+    description: str = ""
+    when_to_use: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    usage_example: dict[str, Any] = Field(default_factory=dict)
+    source_run_id: str | None = None
+    updated_at: str | None = None
+
+
+class CapabilityHandoffUpdate(BaseModel):
+    """Batch update payload for durable forge capability handoffs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: tuple[CapabilityHandoff, ...] = Field(default_factory=tuple)
+
+
 class ExecutionPolicy(BaseModel):
     """Explicit execution/tool-access policy for one coding run."""
 
@@ -112,6 +150,11 @@ class ExecutionPolicy(BaseModel):
     allowed_command_prefixes: tuple[tuple[str, ...], ...] = Field(default_factory=tuple)
     backend_allowed_tools: tuple[str, ...] = Field(default_factory=tuple)
     network_access: Literal["inherit", "disabled", "enabled"] = "inherit"
+    workspace_strategy: WorkspaceStrategy = "inherit"
+    workspace_cleanup_policy: WorkspaceCleanupPolicy = "inherit"
+    environment_strategy: EnvironmentStrategy = "inherit"
+    environment_cleanup_policy: EnvironmentCleanupPolicy = "inherit"
+    secret_env_vars: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class RunRequest(BaseModel):
@@ -205,6 +248,65 @@ class RunResult(BaseModel):
             raw_message=raw_message,
             error=error,
         )
+
+
+class FailureClassCount(BaseModel):
+    """Aggregate count for one normalized forge failure class."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    failure_class: str
+    count: int
+
+
+class TaskTypeMetrics(BaseModel):
+    """High-level run counts grouped by task type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_type: str
+    total_runs: int
+    completed_runs: int
+
+
+class RunMetricsSummary(BaseModel):
+    """Operational summary for forge runs over the current store."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_runs: int = 0
+    completed_runs: int = 0
+    failed_runs: int = 0
+    success_rate: float = 0.0
+    retry_rate: float = 0.0
+    runs_with_verification: int = 0
+    verification_pass_rate: float | None = None
+    common_failure_classes: tuple[FailureClassCount, ...] = Field(default_factory=tuple)
+    task_types: tuple[TaskTypeMetrics, ...] = Field(default_factory=tuple)
+
+
+class RetentionBucket(BaseModel):
+    """Retention state for one forge runtime output category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    eligible_count: int = 0
+    deleted_count: int = 0
+    eligible_paths: tuple[str, ...] = Field(default_factory=tuple)
+    deleted_paths: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class RetentionSummary(BaseModel):
+    """Retention summary or cleanup result for forge-managed outputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool
+    workspaces: RetentionBucket
+    environments: RetentionBucket
+    run_artifacts: RetentionBucket
+    eval_artifacts: RetentionBucket
 
 
 def run_output_schema() -> dict[str, object]:

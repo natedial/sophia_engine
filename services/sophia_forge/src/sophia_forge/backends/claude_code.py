@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 
 from sophia_forge.backends.base import BaseForgeBackend, output_schema
 from sophia_forge_protocol.run_models import RunRequest, RunResult
@@ -14,7 +15,7 @@ class ClaudeCodeBackend(BaseForgeBackend):
 
     backend_name = "claude_code"
 
-    async def run(self, request: RunRequest) -> RunResult:
+    async def run(self, request: RunRequest, *, env: Mapping[str, str] | None = None) -> RunResult:
         resolved_bin = self._resolve_binary(self.settings.claude_code_command)
         if resolved_bin is None:
             return RunResult(
@@ -24,7 +25,7 @@ class ClaudeCodeBackend(BaseForgeBackend):
                 error=f"Claude Code CLI not found on PATH: {self.settings.claude_code_command}",
             )
 
-        workspace_root, _, add_dirs = self._prepare_workspace(request)
+        workspace_root, _, add_dirs = self._prepare_paths(request)
         prompt = self._build_prompt(request=request, workspace_root=workspace_root, add_dirs=add_dirs)
         command = self._build_command(
             claude_bin=resolved_bin,
@@ -37,6 +38,7 @@ class ClaudeCodeBackend(BaseForgeBackend):
             process = await self.process_factory(
                 *command,
                 cwd=str(workspace_root),
+                env=None if env is None else dict(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

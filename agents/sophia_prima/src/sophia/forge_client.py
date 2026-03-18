@@ -18,7 +18,10 @@ from sophia.security.filesystem import ReadPolicy, WritePolicy
 from sophia_forge_protocol.artifact_models import RunArtifact
 from sophia_forge_protocol.event_models import RunEvent
 from sophia_forge_protocol.run_models import (
+    CapabilityAdded,
     CapabilityAdoptionReport,
+    CapabilityHandoff,
+    CapabilityHandoffUpdate,
     ExecutionPolicy,
     RunRequest,
     RunResult,
@@ -74,35 +77,21 @@ class ForgeClient:
             register_artifact=mode != "forge_service",
         )
         if mode == "inline":
-            self._append_event(
-                run_id=run_id,
-                event_type="run_started",
-                payload={"mode": mode, "backend": normalized_request.backend},
-            )
-            self._append_event(
-                run_id=run_id,
-                event_type="backend_started",
-                payload={"backend": normalized_request.backend},
-            )
-            worker = create_coding_worker(
-                settings=self.settings,
-                read_policy=self.read_policy,
-                write_policy=self.write_policy,
-            )
-            result = await worker.run_request(normalized_request)
-            self._append_event(
-                run_id=run_id,
-                event_type="backend_finished",
-                payload={
-                    "backend": normalized_request.backend,
-                    "status": result.status,
-                    "success": bool(result.success),
-                },
-            )
-            finalized = self._finalize_run(normalized_request, result=result, mode=mode)
-            return finalized
+            return await self._run_inline_with_persistence(normalized_request)
         if mode == "forge_service":
             result = await self._run_via_service(normalized_request)
+            if self._should_fallback_inline(result):
+                self._append_event(
+                    run_id=run_id,
+                    event_type="run_failed",
+                    payload={
+                        "status": result.status,
+                        "mode": mode,
+                        "error": result.error,
+                        "fallback": "inline",
+                    },
+                )
+                return await self._run_inline_with_persistence(normalized_request)
             return self._finalize_run(normalized_request, result=result, mode=mode)
         result = RunResult(
             run_id=run_id,
@@ -112,6 +101,38 @@ class ForgeClient:
             error=f"Unsupported coding runtime mode: {self.settings.coding_runtime_mode}",
         )
         return self._finalize_run(normalized_request, result=result, mode=mode)
+
+    async def _run_inline_with_persistence(self, request: RunRequest) -> RunResult:
+        run_id = request.run_id or "forge_run"
+        mode = "inline"
+        self._persist_task_spec(request, mode=mode)
+        self._persist_run_request(request, mode=mode, register_artifact=True)
+        self._append_event(
+            run_id=run_id,
+            event_type="run_started",
+            payload={"mode": mode, "backend": request.backend},
+        )
+        self._append_event(
+            run_id=run_id,
+            event_type="backend_started",
+            payload={"backend": request.backend},
+        )
+        worker = create_coding_worker(
+            settings=self.settings,
+            read_policy=self.read_policy,
+            write_policy=self.write_policy,
+        )
+        result = await worker.run_request(request)
+        self._append_event(
+            run_id=run_id,
+            event_type="backend_finished",
+            payload={
+                "backend": request.backend,
+                "status": result.status,
+                "success": bool(result.success),
+            },
+        )
+        return self._finalize_run(request, result=result, mode=mode)
 
     def _normalize_request_policy(self, request: RunRequest) -> RunRequest:
         policy = request.execution_policy
@@ -257,6 +278,47 @@ class ForgeClient:
         )
         return report_path
 
+    async def persist_capability_handoffs(
+        self,
+        *,
+        run_id: str,
+        capabilities: tuple[CapabilityAdded, ...],
+        adoption_report: CapabilityAdoptionReport,
+    ) -> tuple[CapabilityHandoff, ...]:
+        entries = _build_handoff_entries(
+            run_id=run_id,
+            capabilities=capabilities,
+            adoption_report=adoption_report,
+        )
+        if not entries:
+            return ()
+        self._persist_local_capability_registry(entries)
+        mode = self.settings.coding_runtime_mode.strip().lower() or "inline"
+        if mode == "forge_service":
+            await self._upsert_service_capability_handoffs(entries)
+        return entries
+
+    async def load_capability_handoffs(self) -> tuple[CapabilityHandoff, ...]:
+        local_entries = self._load_local_capability_registry()
+        mode = self.settings.coding_runtime_mode.strip().lower() or "inline"
+        if mode != "forge_service":
+            return local_entries
+        try:
+            async with self._make_http_client() as client:
+                response = await client.get("/v1/capabilities")
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError:
+            return local_entries
+        entries = tuple(
+            CapabilityHandoff.model_validate(item)
+            for item in payload.get("entries", [])
+            if isinstance(item, dict)
+        )
+        if entries:
+            self._persist_local_capability_registry(entries)
+        return entries or local_entries
+
     def get_run_result(self, run_id: str) -> RunResult:
         run_dir = self._ensure_run_dir_for_id(run_id)
         payload = json.loads((run_dir / "run_result.json").read_text(encoding="utf-8"))
@@ -309,6 +371,16 @@ class ForgeClient:
             },
         )
         return finalized
+
+    def _should_fallback_inline(self, result: RunResult) -> bool:
+        if not self.settings.coding_runtime_fallback_inline:
+            return False
+        if result.status not in {"failed", "timed_out", "unavailable"}:
+            return False
+        error = (result.error or "").strip().lower()
+        return error.startswith("forge service request failed:") or error.startswith(
+            "forge service request timed out"
+        ) or error.startswith("forge service polling timed out")
 
     def _persist_task_spec(self, request: RunRequest, *, mode: str) -> Path:
         run_dir = self._ensure_run_dir(request)
@@ -484,6 +556,54 @@ class ForgeClient:
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
+    def _capability_registry_path(self) -> Path:
+        output_root = self.settings.coding_worker_output_dir.resolve(strict=False)
+        self.write_policy.ensure_allowed(output_root, purpose="coding_worker_output_dir")
+        output_root.mkdir(parents=True, exist_ok=True)
+        return output_root / "capability_registry.json"
+
+    def _persist_local_capability_registry(
+        self,
+        entries: tuple[CapabilityHandoff, ...],
+    ) -> Path:
+        path = self._capability_registry_path()
+        merged = {entry.tool_name: entry for entry in self._load_local_capability_registry()}
+        for entry in entries:
+            merged[entry.tool_name] = entry
+        payload = {
+            "entries": [
+                entry.model_dump(mode="json")
+                for entry in sorted(merged.values(), key=lambda item: item.tool_name)
+            ]
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return path
+
+    def _load_local_capability_registry(self) -> tuple[CapabilityHandoff, ...]:
+        path = self._capability_registry_path()
+        if not path.exists():
+            return ()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return tuple(
+            CapabilityHandoff.model_validate(item)
+            for item in payload.get("entries", [])
+            if isinstance(item, dict)
+        )
+
+    async def _upsert_service_capability_handoffs(
+        self,
+        entries: tuple[CapabilityHandoff, ...],
+    ) -> None:
+        try:
+            async with self._make_http_client() as client:
+                response = await client.post(
+                    "/v1/capabilities",
+                    json=CapabilityHandoffUpdate(entries=entries).model_dump(mode="json"),
+                )
+                response.raise_for_status()
+        except httpx.HTTPError:
+            return
+
 
 def _sanitize_run_id(run_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in run_id)
@@ -491,3 +611,31 @@ def _sanitize_run_id(run_id: str) -> str:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _build_handoff_entries(
+    *,
+    run_id: str,
+    capabilities: tuple[CapabilityAdded, ...],
+    adoption_report: CapabilityAdoptionReport,
+) -> tuple[CapabilityHandoff, ...]:
+    adoption_by_tool = {row.tool_name: row for row in adoption_report.capabilities}
+    entries: list[CapabilityHandoff] = []
+    for capability in capabilities:
+        adoption = adoption_by_tool.get(capability.tool_name)
+        if adoption is None or not adoption.adopted or not adoption.handoff_ready:
+            continue
+        entries.append(
+            CapabilityHandoff(
+                tool_name=capability.tool_name,
+                service_name=capability.service_name,
+                registration_path=capability.registration_path,
+                description=capability.description,
+                when_to_use=capability.when_to_use,
+                input_schema=adoption.resolved_input_schema or capability.input_schema,
+                usage_example=capability.usage_example,
+                source_run_id=run_id,
+                updated_at=_utc_now(),
+            )
+        )
+    return tuple(entries)
