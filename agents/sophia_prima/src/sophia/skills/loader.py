@@ -28,9 +28,7 @@ def discover_skill_files(skills_root: Path) -> list[Path]:
         resolved = path.resolve(strict=False)
         if _is_within(resolved, root):
             files.append(path)
-    return sorted(
-        files
-    )
+    return sorted(files)
 
 
 def load_skill(
@@ -38,8 +36,16 @@ def load_skill(
     *,
     max_body_chars: int,
     read_policy: ReadPolicy | None = None,
+    metadata_only: bool = False,
 ) -> SkillManifest:
-    """Load one SKILL.md file into a manifest."""
+    """Load one SKILL.md file into a manifest.
+
+    Args:
+        path: Path to the SKILL.md file.
+        max_body_chars: Maximum characters to load for the body.
+        read_policy: Optional read policy for security checks.
+        metadata_only: If True, only parse frontmatter, don't load body.
+    """
     if read_policy is not None:
         read_policy.ensure_allowed(path, purpose="skill_file")
     raw = path.read_text(encoding="utf-8")
@@ -48,14 +54,16 @@ def load_skill(
 
     name = (metadata.get("name") or path.parent.name).strip()
     description = (metadata.get("description") or "").strip()
-    allowed_tools = _parse_csv_list(
-        metadata.get("tool_allowlist") or metadata.get("allowed_tools")
-    )
+    allowed_tools = _parse_csv_list(metadata.get("tool_allowlist") or metadata.get("allowed_tools"))
     read_allowlist = _parse_csv_list(metadata.get("read_allowlist"))
     write_allowlist = _parse_csv_list(metadata.get("write_allowlist"))
-    body = body.strip()
-    if max_body_chars > 0 and len(body) > max_body_chars:
-        body = body[:max_body_chars] + "\n... [truncated]"
+
+    if metadata_only:
+        body = ""
+    else:
+        body = body.strip()
+        if max_body_chars > 0 and len(body) > max_body_chars:
+            body = body[:max_body_chars] + "\n... [truncated]"
 
     return SkillManifest(
         name=name,

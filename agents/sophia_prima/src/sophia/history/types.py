@@ -34,3 +34,25 @@ class HistoryEventRecord:
     task_id: str | None = None
     turn: int | None = None
     created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
+class SessionSearchResult:
+    """Grouped search results from a single past session."""
+
+    session_id: str
+    earliest: datetime
+    latest: datetime
+    excerpts: list[str]
+    match_count: int
+
+
+@dataclass(frozen=True)
+class SessionRecap:
+    """A session search result with optional summarization."""
+
+    session_id: str
+    earliest: datetime
+    latest: datetime
+    summary: str
+    match_count: int

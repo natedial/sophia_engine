@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from sophia.history.store import HistoryStore, SQLiteHistoryStore
-from sophia.history.types import HistoryEventRecord, HistoryEventType
+from sophia.history.types import (
+    HistoryEventRecord,
+    HistoryEventType,
+    SessionRecap,
+    SessionSearchResult,
+)
 from sophia.llm.types import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -156,6 +161,61 @@ class LosslessHistoryManager:
             limit=limit,
             newest_first=newest_first,
         )
+
+    def search_sessions(
+        self,
+        *,
+        query: str,
+        exclude_session_ids: set[str] | None = None,
+        max_sessions: int = 3,
+    ) -> list[SessionSearchResult]:
+        """Search past sessions via FTS5, return grouped excerpts."""
+        return self.store.search_sessions(
+            query=query,
+            exclude_session_ids=exclude_session_ids,
+            max_sessions=max_sessions,
+        )
+
+    async def search_sessions_summarized(
+        self,
+        *,
+        query: str,
+        exclude_session_ids: set[str] | None = None,
+        max_sessions: int = 3,
+        summarizer: Callable[[str, str], Awaitable[str]] | None = None,
+    ) -> list[SessionRecap]:
+        """Search + summarize matching past sessions."""
+        results = self.store.search_sessions(
+            query=query,
+            exclude_session_ids=exclude_session_ids,
+            max_sessions=max_sessions,
+        )
+
+        recaps: list[SessionRecap] = []
+        for result in results:
+            transcript = "\n---\n".join(result.excerpts)
+            if summarizer:
+                try:
+                    summary = await summarizer(query, transcript)
+                except Exception:
+                    logger.exception(
+                        "session_summarization_failed session_id=%s", result.session_id
+                    )
+                    summary = transcript
+            else:
+                summary = transcript
+
+            recaps.append(
+                SessionRecap(
+                    session_id=result.session_id,
+                    earliest=result.earliest,
+                    latest=result.latest,
+                    summary=summary,
+                    match_count=result.match_count,
+                )
+            )
+
+        return recaps
 
     def _append(self, record: HistoryEventRecord) -> None:
         try:

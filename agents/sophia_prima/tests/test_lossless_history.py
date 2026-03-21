@@ -7,7 +7,12 @@ import pytest
 from sophia.agent import AgentConfig, SophiaAgent
 from sophia.config import Settings
 from sophia.context import ConversationContext
-from sophia.history import HistoryEventType, LosslessHistoryManager, SQLiteHistoryStore
+from sophia.history import (
+    HistoryEventRecord,
+    HistoryEventType,
+    LosslessHistoryManager,
+    SQLiteHistoryStore,
+)
 from sophia.llm.types import (
     CompletionResponse,
     Message,
@@ -125,6 +130,38 @@ def test_lossless_history_store_persists_and_truncates_tool_results(tmp_path: Pa
     assert records[1].payload["result"] == "abcde"
     assert records[1].payload["result_truncated"] is True
     assert records[1].payload["original_result_chars"] == 26
+
+
+def test_search_sessions_applies_exclusions_before_hit_limit(tmp_path: Path) -> None:
+    store = SQLiteHistoryStore(tmp_path / "history.db")
+
+    for idx in range(5):
+        store.append(
+            HistoryEventRecord(
+                session_id="exclude-me",
+                event_type=HistoryEventType.TURN_INPUT,
+                payload={"user_message": f"inflation outlook repeated {idx}"},
+            )
+        )
+
+    store.append(
+        HistoryEventRecord(
+            session_id="keep-me",
+            event_type=HistoryEventType.TURN_INPUT,
+            payload={"user_message": "inflation outlook alternative session"},
+        )
+    )
+
+    results = store.search_sessions(
+        query="inflation outlook",
+        exclude_session_ids={"exclude-me"},
+        max_sessions=3,
+        max_hits=5,
+        max_results_per_session=5,
+    )
+
+    assert len(results) == 1
+    assert results[0].session_id == "keep-me"
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,7 @@ class MemoryStore(Protocol):
     def list_records(
         self,
         *,
-        session_id: str,
+        session_id: str | None = None,
         levels: set[MemoryLevel] | None = None,
         limit: int | None = None,
         newest_first: bool = True,
@@ -62,6 +62,15 @@ class MemoryStore(Protocol):
         max_batches: int,
     ) -> dict[str, int]:
         """Index pending embeddings asynchronously (if supported)."""
+
+    def search_by_substring(
+        self,
+        *,
+        substring: str,
+        session_id: str | None = None,
+        levels: set[MemoryLevel] | None = None,
+    ) -> list[MemoryRecord]:
+        """Search records by substring match (case-insensitive)."""
 
 
 def _tokenize(text: str) -> set[str]:
@@ -125,7 +134,7 @@ class InMemoryMemoryStore:
     def list_records(
         self,
         *,
-        session_id: str,
+        session_id: str | None = None,
         levels: set[MemoryLevel] | None = None,
         limit: int | None = None,
         newest_first: bool = True,
@@ -134,7 +143,7 @@ class InMemoryMemoryStore:
         for rec in self._records:
             if levels and rec.level not in levels:
                 continue
-            if rec.session_id is not None and rec.session_id != session_id:
+            if session_id is not None and rec.session_id is not None and rec.session_id != session_id:
                 continue
             out.append(rec)
 
@@ -163,6 +172,27 @@ class InMemoryMemoryStore:
             "backlog_before": 0,
             "backlog_after": 0,
         }
+
+    def search_by_substring(
+        self,
+        *,
+        substring: str,
+        session_id: str | None = None,
+        levels: set[MemoryLevel] | None = None,
+    ) -> list[MemoryRecord]:
+        """Search records by substring match (case-insensitive)."""
+        if not substring:
+            return []
+        lower_substring = substring.lower()
+        results = []
+        for rec in self._records:
+            if levels and rec.level not in levels:
+                continue
+            if session_id is not None and rec.session_id != session_id:
+                continue
+            if lower_substring in rec.content.lower():
+                results.append(rec)
+        return results
 
 
 class SQLiteMemoryStore:
@@ -300,13 +330,17 @@ class SQLiteMemoryStore:
     def list_records(
         self,
         *,
-        session_id: str,
+        session_id: str | None = None,
         levels: set[MemoryLevel] | None = None,
         limit: int | None = None,
         newest_first: bool = True,
     ) -> list[MemoryRecord]:
-        where = ["(session_id = ? OR session_id IS NULL)"]
-        params: list[object] = [session_id]
+        where: list[str] = []
+        params: list[object] = []
+
+        if session_id is not None:
+            where.append("(session_id = ? OR session_id IS NULL)")
+            params.append(session_id)
 
         if levels:
             level_values = [level.value for level in levels]
@@ -319,9 +353,16 @@ class SQLiteMemoryStore:
             "SELECT id, level, content, session_id, tags, salience, metadata, "
             "created_at, last_accessed_at, access_count "
             "FROM memory_records "
-            f"WHERE {' AND '.join(where)} "
-            f"ORDER BY created_at {order}"
+        f"ORDER BY created_at {order}"
         )
+        if where:
+            sql = (
+                "SELECT id, level, content, session_id, tags, salience, metadata, "
+                "created_at, last_accessed_at, access_count "
+                "FROM memory_records "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY created_at {order}"
+            )
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
@@ -476,6 +517,41 @@ class SQLiteMemoryStore:
         )
         return stats
 
+    def search_by_substring(
+        self,
+        *,
+        substring: str,
+        session_id: str | None = None,
+        levels: set[MemoryLevel] | None = None,
+    ) -> list[MemoryRecord]:
+        """Search records by substring match (case-insensitive)."""
+        if not substring:
+            return []
+
+        where = ["content LIKE ?"]
+        params: list[object] = [f"%{substring}%"]
+
+        if session_id is not None:
+            where.append("(session_id = ? OR session_id IS NULL)")
+            params.append(session_id)
+
+        if levels:
+            level_values = [level.value for level in levels]
+            placeholders = ", ".join("?" for _ in level_values)
+            where.append(f"level IN ({placeholders})")
+            params.extend(level_values)
+
+        sql = (
+            "SELECT id, level, content, session_id, tags, salience, metadata, "
+            "created_at, last_accessed_at, access_count "
+            "FROM memory_records "
+            f"WHERE {' AND '.join(where)}"
+        )
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     def _embed_query(self, query: str) -> dict[int, float]:
         if self._embedding_provider is None:
             return {}
@@ -556,17 +632,13 @@ class SQLiteMemoryStore:
                 "ON memory_records(embedding_status, level, created_at ASC)"
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_model "
-                "ON memory_embeddings(model)"
+                "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_model ON memory_embeddings(model)"
             )
             conn.commit()
 
     @staticmethod
     def _ensure_record_columns(conn: sqlite3.Connection) -> None:
-        columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(memory_records)").fetchall()
-        }
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_records)").fetchall()}
         if "embedding_status" not in columns:
             conn.execute(
                 "ALTER TABLE memory_records ADD COLUMN embedding_status TEXT "
@@ -636,9 +708,7 @@ class SQLiteMemoryStore:
     def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         created_at = datetime.fromisoformat(row["created_at"])
         last_accessed = (
-            datetime.fromisoformat(row["last_accessed_at"])
-            if row["last_accessed_at"]
-            else None
+            datetime.fromisoformat(row["last_accessed_at"]) if row["last_accessed_at"] else None
         )
         return MemoryRecord(
             id=row["id"],

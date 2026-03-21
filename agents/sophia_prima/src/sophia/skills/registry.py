@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from sophia.security.filesystem import ReadPolicy
@@ -40,7 +41,7 @@ class SkillRegistry:
         return self._skills
 
     def refresh(self) -> None:
-        """Reload skills from disk."""
+        """Reload skills from disk (metadata only for efficiency)."""
         if self.read_policy is not None:
             self.read_policy.ensure_allowed(self.skills_root, purpose="skills_root")
         manifests: list[SkillManifest] = []
@@ -51,6 +52,7 @@ class SkillRegistry:
                         skill_file,
                         max_body_chars=self.max_loaded_chars,
                         read_policy=self.read_policy,
+                        metadata_only=True,
                     )
                 )
             except Exception as exc:
@@ -59,12 +61,36 @@ class SkillRegistry:
         self._loaded = True
         logger.info("Loaded %s skill(s) from %s", len(self._skills), self.skills_root)
 
+    def get_skill_body(self, name: str) -> str:
+        """Load the full body for a named skill on demand."""
+        for skill in self.list_skills():
+            if skill.name == name:
+                if skill.body:
+                    return skill.body
+                loaded = load_skill(
+                    skill.path,
+                    max_body_chars=self.max_loaded_chars,
+                    read_policy=self.read_policy,
+                    metadata_only=False,
+                )
+                return loaded.body
+        return ""
+
     def match(self, user_message: str) -> SkillMatch | None:
         """Select at most one best-matching skill for the message."""
         if not self.enabled:
             return None
-        return select_best_skill(
+        skill_match = select_best_skill(
             user_message=user_message,
             skills=self.list_skills(),
             min_overlap=self.implicit_min_overlap,
         )
+        if skill_match is not None:
+            body = self.get_skill_body(skill_match.skill.name)
+            if body and skill_match.skill.body != body:
+                return SkillMatch(
+                    skill=replace(skill_match.skill, body=body),
+                    score=skill_match.score,
+                    reason=skill_match.reason,
+                )
+        return skill_match
