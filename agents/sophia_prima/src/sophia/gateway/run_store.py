@@ -44,8 +44,9 @@ class GatewayRunStore:
                 """
                 INSERT OR REPLACE INTO gateway_runs (
                     run_id, session_id, agent_id, channel, account_id, peer_id,
-                    user_id, message_text, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    user_id, message_text, status, created_at, updated_at, failure_stage,
+                    provider_name, tool_name, service_name, outbound_text_len
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -59,6 +60,11 @@ class GatewayRunStore:
                     "running",
                     now,
                     now,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 ),
             )
             conn.commit()
@@ -94,16 +100,70 @@ class GatewayRunStore:
         status: str,
         final_text: str | None = None,
         error: str | None = None,
+        failure_stage: str | None = None,
+        provider_name: str | None = None,
+        tool_name: str | None = None,
+        service_name: str | None = None,
     ) -> None:
+        now = utc_now_iso()
+        outbound_text_len = len(final_text) if final_text is not None else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE gateway_runs
+                SET status=?, final_text=?, error=?, completed_at=?, updated_at=?,
+                    failure_stage=?, provider_name=?, tool_name=?, service_name=?, outbound_text_len=?
+                WHERE run_id=?
+                """,
+                (
+                    status,
+                    final_text,
+                    error,
+                    now,
+                    now,
+                    failure_stage,
+                    provider_name,
+                    tool_name,
+                    service_name,
+                    outbound_text_len,
+                    run_id,
+                ),
+            )
+            conn.commit()
+
+    def update_run_diagnostics(
+        self,
+        *,
+        run_id: str,
+        failure_stage: str | None = None,
+        provider_name: str | None = None,
+        tool_name: str | None = None,
+        service_name: str | None = None,
+        outbound_text_len: int | None = None,
+    ) -> None:
+        """Update correlated diagnostic fields without completing the run."""
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE gateway_runs
-                SET status=?, final_text=?, error=?, completed_at=?, updated_at=?
+                SET updated_at=?,
+                    failure_stage=COALESCE(?, failure_stage),
+                    provider_name=COALESCE(?, provider_name),
+                    tool_name=COALESCE(?, tool_name),
+                    service_name=COALESCE(?, service_name),
+                    outbound_text_len=COALESCE(?, outbound_text_len)
                 WHERE run_id=?
                 """,
-                (status, final_text, error, now, now, run_id),
+                (
+                    now,
+                    failure_stage,
+                    provider_name,
+                    tool_name,
+                    service_name,
+                    outbound_text_len,
+                    run_id,
+                ),
             )
             conn.commit()
 
@@ -143,7 +203,8 @@ class GatewayRunStore:
             row = conn.execute(
                 """
                 SELECT run_id, session_id, agent_id, channel, account_id, peer_id, user_id,
-                       message_text, status, final_text, error, created_at, updated_at, completed_at
+                       message_text, status, final_text, error, created_at, updated_at, completed_at,
+                       failure_stage, provider_name, tool_name, service_name, outbound_text_len
                 FROM gateway_runs
                 WHERE run_id=?
                 """,
@@ -197,6 +258,11 @@ class GatewayRunStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "completed_at": row["completed_at"],
+            "failure_stage": row["failure_stage"],
+            "provider_name": row["provider_name"],
+            "tool_name": row["tool_name"],
+            "service_name": row["service_name"],
+            "outbound_text_len": row["outbound_text_len"],
             "events": [
                 {
                     "sequence": event_row["sequence"],
@@ -411,7 +477,12 @@ class GatewayRunStore:
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    completed_at TEXT
+                    completed_at TEXT,
+                    failure_stage TEXT,
+                    provider_name TEXT,
+                    tool_name TEXT,
+                    service_name TEXT,
+                    outbound_text_len INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS gateway_run_events (
@@ -465,6 +536,20 @@ class GatewayRunStore:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(gateway_runs)").fetchall()
+            }
+            if "failure_stage" not in columns:
+                conn.execute("ALTER TABLE gateway_runs ADD COLUMN failure_stage TEXT")
+            if "provider_name" not in columns:
+                conn.execute("ALTER TABLE gateway_runs ADD COLUMN provider_name TEXT")
+            if "tool_name" not in columns:
+                conn.execute("ALTER TABLE gateway_runs ADD COLUMN tool_name TEXT")
+            if "service_name" not in columns:
+                conn.execute("ALTER TABLE gateway_runs ADD COLUMN service_name TEXT")
+            if "outbound_text_len" not in columns:
+                conn.execute("ALTER TABLE gateway_runs ADD COLUMN outbound_text_len INTEGER")
             conn.commit()
 
 

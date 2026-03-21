@@ -157,6 +157,94 @@ class ExecutionPolicy(BaseModel):
     secret_env_vars: tuple[str, ...] = Field(default_factory=tuple)
 
 
+class RetryPolicy(BaseModel):
+    """Runtime-owned retry behavior for one coding run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["disabled", "transient_only"] = "disabled"
+    max_attempts: int = 1
+    initial_backoff_sec: float = 2.0
+    max_backoff_sec: float = 30.0
+
+
+class RunSession(BaseModel):
+    """Durable long-running session that can span multiple forge runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    client_name: str
+    task: str
+    status: Literal["active", "completed", "blocked", "failed", "cancelled"]
+    latest_run_id: str | None = None
+    latest_checkpoint_id: str | None = None
+    run_ids: tuple[str, ...] = Field(default_factory=tuple)
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSessionCreateRequest(BaseModel):
+    """Request to create a durable forge run session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_name: str
+    task: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ControlMessage(BaseModel):
+    """Durable session control message applied by forge at a safe boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    control_id: str
+    session_id: str
+    run_id: str | None = None
+    control_type: Literal["steer", "follow_up"]
+    status: Literal["queued", "applied", "rejected", "cancelled"] = "queued"
+    message: str
+    created_at: str
+    applied_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionControlRequest(BaseModel):
+    """Request to queue a control message for a forge session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    control_type: Literal["steer", "follow_up"]
+    message: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunCheckpoint(BaseModel):
+    """Durable checkpoint created from a completed session run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    checkpoint_id: str
+    session_id: str
+    run_id: str
+    summary_artifact_id: str
+    summary: str
+    created_at: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionResumeRequest(BaseModel):
+    """Request to resume a session from its latest or a chosen checkpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    checkpoint_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunRequest(BaseModel):
     """Normalized request submitted to a coding runtime."""
 
@@ -168,9 +256,12 @@ class RunRequest(BaseModel):
     workspace_root: str
     writable_roots: tuple[str, ...] = Field(default_factory=tuple)
     readable_roots: tuple[str, ...] = Field(default_factory=tuple)
+    session_id: str | None = None
+    long_running_mode: bool = False
     backend: Literal["codex", "claude_code"]
     timeout_sec: float
     execution_policy: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     verification_policy: VerificationPolicy = Field(default_factory=VerificationPolicy)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

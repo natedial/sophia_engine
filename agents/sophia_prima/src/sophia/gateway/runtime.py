@@ -175,6 +175,14 @@ class GatewayRuntime:
             user_id=message.user_id,
             message_text=text,
         )
+        logger.info(
+            "gateway run started: run_id=%s channel=%s agent_id=%s session_id=%s text_len=%s",
+            run_id,
+            message.channel,
+            decision.agent_id,
+            decision.session_id,
+            len(text),
+        )
 
         if self._startup_error:
             fallback = (
@@ -190,7 +198,12 @@ class GatewayRuntime:
                 peer_id=message.peer_id,
                 run_id=run_id,
             )
-            run_store.finish_run(run_id=run_id, status="completed", final_text=outbound.text)
+            run_store.finish_run(
+                run_id=run_id,
+                status="completed",
+                final_text=outbound.text,
+                failure_stage="startup_guard",
+            )
             yield outbound
             return
 
@@ -200,6 +213,7 @@ class GatewayRuntime:
                 run_id=run_id,
                 status="failed",
                 error=f"no agent registered for id '{decision.agent_id}'",
+                failure_stage="agent_resolution",
             )
             raise RuntimeError(f"no agent registered for id '{decision.agent_id}'")
 
@@ -207,6 +221,11 @@ class GatewayRuntime:
         sequence = 0
         async with session.lock:
             try:
+                logger.info(
+                    "gateway agent execution starting: run_id=%s agent_id=%s",
+                    run_id,
+                    decision.agent_id,
+                )
                 agent_run = getattr(agent, "run", None)
                 if callable(agent_run):
                     async for event in agent_run(text, session.context, run_id=run_id):
@@ -224,6 +243,11 @@ class GatewayRuntime:
             except RuntimeError as exc:
                 if _is_provider_capacity_error(exc):
                     logger.warning("Provider capacity/limit error: %s", exc)
+                    run_store.update_run_diagnostics(
+                        run_id=run_id,
+                        failure_stage="provider_completion",
+                        provider_name=self.settings.llm_provider,
+                    )
                     retry_text = (
                         "I hit a temporary model capacity limit while processing that. "
                         "Please retry in a few seconds."
@@ -241,15 +265,44 @@ class GatewayRuntime:
                         run_id=run_id,
                         status="completed",
                         final_text=retry_text,
+                        failure_stage="provider_completion",
+                        provider_name=self.settings.llm_provider,
                     )
                     yield outbound
                     return
-                run_store.finish_run(run_id=run_id, status="failed", error=str(exc))
+                logger.exception(
+                    "gateway runtime error: run_id=%s stage=agent_runtime error=%s",
+                    run_id,
+                    exc,
+                )
+                run_store.finish_run(
+                    run_id=run_id,
+                    status="failed",
+                    error=str(exc),
+                    failure_stage="agent_runtime",
+                    provider_name=self.settings.llm_provider,
+                )
                 raise
             except Exception as exc:
-                run_store.finish_run(run_id=run_id, status="failed", error=str(exc))
+                logger.exception(
+                    "gateway execution failed: run_id=%s stage=agent_execution error=%s",
+                    run_id,
+                    exc,
+                )
+                run_store.finish_run(
+                    run_id=run_id,
+                    status="failed",
+                    error=str(exc),
+                    failure_stage="agent_execution",
+                    provider_name=self.settings.llm_provider,
+                )
                 raise
 
+        run_store.update_run_diagnostics(
+            run_id=run_id,
+            outbound_text_len=len(last_assistant_text.strip() or "(empty response)"),
+            provider_name=self.settings.llm_provider,
+        )
         outbound = OutboundMessage(
             text=last_assistant_text.strip() or "(empty response)",
             session_id=decision.session_id,
@@ -263,6 +316,13 @@ class GatewayRuntime:
             run_id=run_id,
             status="completed",
             final_text=outbound.text,
+            provider_name=self.settings.llm_provider,
+        )
+        logger.info(
+            "gateway run completed: run_id=%s agent_id=%s outbound_len=%s",
+            run_id,
+            decision.agent_id,
+            len(outbound.text),
         )
         yield outbound
 

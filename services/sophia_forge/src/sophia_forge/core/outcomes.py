@@ -32,6 +32,31 @@ def classify_failure(*, status: str, error: str | None) -> str:
     return "failed"
 
 
+def is_retryable_failure(*, status: str, error: str | None) -> bool:
+    """Return whether a runtime failure looks transient enough to retry."""
+
+    detail = (error or "").lower()
+    if status == "timed_out":
+        return True
+    if status in {"cancelled", "permission_denied", "invalid_output", "disabled"}:
+        return False
+    transient_markers = (
+        "launch failed",
+        "rate limit",
+        "rate-limit",
+        "overloaded",
+        "temporarily unavailable",
+        "service unavailable",
+        "try again",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "transport error",
+        "timed out",
+    )
+    return any(marker in detail for marker in transient_markers)
+
+
 def required_verification_passed(
     results: tuple[VerificationResult, ...],
 ) -> bool | None:

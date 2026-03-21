@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 
 from sophia_forge.config import ForgeSettings
@@ -28,10 +29,16 @@ from sophia_forge_protocol.event_models import RunEvent
 from sophia_forge_protocol.run_models import (
     CapabilityHandoff,
     CapabilityHandoffUpdate,
+    ControlMessage,
+    RunCheckpoint,
     RetentionSummary,
     RunMetricsSummary,
     RunRequest,
     RunResult,
+    RunSession,
+    RunSessionCreateRequest,
+    SessionResumeRequest,
+    SessionControlRequest,
 )
 from sophia_forge_protocol.verification_models import VerificationResult
 
@@ -68,8 +75,36 @@ class ForgeRuntime:
 
     async def submit_run(self, request: RunRequest) -> RunResult:
         run_id = request.run_id or f"forge_{uuid.uuid4().hex[:12]}"
-        normalized = request.model_copy(update={"run_id": run_id})
+        session_id = request.session_id
+        if session_id is None and request.long_running_mode:
+            session_id = f"session_{uuid.uuid4().hex[:12]}"
+        if session_id is not None and not self.run_store.session_exists(session_id):
+            self.run_store.create_session(
+                session_id=session_id,
+                client_name=request.client_name,
+                task=request.task,
+                metadata=request.metadata,
+            )
+        queued_controls: tuple[ControlMessage, ...] = ()
+        effective_task = request.task
+        metadata = dict(request.metadata)
+        if session_id is not None:
+            queued_controls = self.run_store.list_control_messages(session_id, status="queued")
+            if queued_controls:
+                effective_task = _apply_control_messages(request.task, queued_controls)
+                metadata["applied_control_ids"] = [control.control_id for control in queued_controls]
+                metadata["applied_control_types"] = [control.control_type for control in queued_controls]
+        normalized = request.model_copy(
+            update={
+                "run_id": run_id,
+                "session_id": session_id,
+                "task": effective_task,
+                "metadata": metadata,
+            }
+        )
         snapshot = self.run_store.create_run(normalized)
+        if session_id is not None:
+            self.run_store.bind_run_to_session(session_id=session_id, run_id=run_id)
         self.run_store.append_event(
             RunEvent(
                 run_id=run_id,
@@ -79,7 +114,137 @@ class ForgeRuntime:
                 payload={"backend": normalized.backend, "client_name": normalized.client_name},
             )
         )
+        if session_id is not None:
+            self.run_store.append_event(
+                RunEvent(
+                    run_id=run_id,
+                    sequence=2,
+                    event_type="session_bound",
+                    timestamp=_utc_now(),
+                    payload={"session_id": session_id},
+                )
+            )
+        if queued_controls:
+            applied_controls = self.run_store.mark_control_messages_applied(
+                control_ids=tuple(control.control_id for control in queued_controls),
+                run_id=run_id,
+            )
+            next_sequence = len(self.run_store.list_events(run_id)) + 1
+            for control in applied_controls:
+                self.run_store.append_event(
+                    RunEvent(
+                        run_id=run_id,
+                        sequence=next_sequence,
+                        event_type="control_message_applied",
+                        timestamp=_utc_now(),
+                        payload={
+                            "control_id": control.control_id,
+                            "control_type": control.control_type,
+                            "session_id": control.session_id,
+                        },
+                    )
+                )
+                next_sequence += 1
         await self.scheduler.enqueue(normalized)
+        return snapshot
+
+    def create_session(self, request: RunSessionCreateRequest) -> RunSession:
+        session_id = f"session_{uuid.uuid4().hex[:12]}"
+        return self.run_store.create_session(
+            session_id=session_id,
+            client_name=request.client_name,
+            task=request.task,
+            metadata=request.metadata,
+        )
+
+    def get_session(self, session_id: str) -> RunSession:
+        return self.run_store.get_session(session_id)
+
+    def list_session_runs(self, session_id: str) -> tuple[RunResult, ...]:
+        return self.run_store.list_session_runs(session_id)
+
+    def queue_session_control(
+        self,
+        session_id: str,
+        request: SessionControlRequest,
+    ) -> ControlMessage:
+        session = self.run_store.get_session(session_id)
+        control = self.run_store.create_control_message(
+            control_id=f"control_{uuid.uuid4().hex[:12]}",
+            session_id=session_id,
+            run_id=session.latest_run_id,
+            control_type=request.control_type,
+            message=request.message,
+            metadata=request.metadata,
+        )
+        if session.latest_run_id is not None:
+            self.run_store.append_event(
+                RunEvent(
+                    run_id=session.latest_run_id,
+                    sequence=len(self.run_store.list_events(session.latest_run_id)) + 1,
+                    event_type="control_message_queued",
+                    timestamp=_utc_now(),
+                    payload={
+                        "control_id": control.control_id,
+                        "control_type": control.control_type,
+                        "session_id": session_id,
+                    },
+                )
+            )
+        return control
+
+    def list_session_controls(self, session_id: str) -> tuple[ControlMessage, ...]:
+        self.run_store.get_session(session_id)
+        return self.run_store.list_control_messages(session_id)
+
+    def list_session_checkpoints(self, session_id: str) -> tuple[RunCheckpoint, ...]:
+        self.run_store.get_session(session_id)
+        return self.run_store.list_checkpoints(session_id)
+
+    async def resume_session(
+        self,
+        session_id: str,
+        request: SessionResumeRequest,
+    ) -> RunResult:
+        session = self.run_store.get_session(session_id)
+        checkpoints = self.run_store.list_checkpoints(session_id)
+        if not checkpoints:
+            raise KeyError(session_id)
+        if request.checkpoint_id is None:
+            checkpoint = checkpoints[-1]
+        else:
+            checkpoint = self.run_store.get_checkpoint(request.checkpoint_id)
+            if checkpoint.session_id != session_id:
+                raise KeyError(request.checkpoint_id)
+        source_request = self.run_store.get_run_request(checkpoint.run_id)
+        metadata = dict(source_request.metadata)
+        metadata.update(request.metadata)
+        metadata["resumed_from_checkpoint_id"] = checkpoint.checkpoint_id
+        metadata["resumed_from_run_id"] = checkpoint.run_id
+        resumed_request = source_request.model_copy(
+            update={
+                "run_id": None,
+                "session_id": session_id,
+                "long_running_mode": True,
+                "task": _apply_resume_checkpoint(session.task, checkpoint),
+                "metadata": metadata,
+            }
+        )
+        snapshot = await self.submit_run(resumed_request)
+        run_id = snapshot.run_id or "forge_run"
+        self.run_store.append_event(
+            RunEvent(
+                run_id=run_id,
+                sequence=len(self.run_store.list_events(run_id)) + 1,
+                event_type="session_resumed",
+                timestamp=_utc_now(),
+                payload={
+                    "session_id": session_id,
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "source_run_id": checkpoint.run_id,
+                },
+            )
+        )
         return snapshot
 
     def get_run(self, run_id: str) -> RunResult:
@@ -88,8 +253,8 @@ class ForgeRuntime:
     def get_run_request(self, run_id: str) -> RunRequest:
         return self.run_store.get_run_request(run_id)
 
-    def get_events(self, run_id: str) -> tuple[RunEvent, ...]:
-        return self.run_store.list_events(run_id)
+    def get_events(self, run_id: str, *, after_sequence: int | None = None) -> tuple[RunEvent, ...]:
+        return self.run_store.list_events(run_id, after_sequence=after_sequence)
 
     def get_artifacts(self, run_id: str) -> tuple[RunArtifact, ...]:
         return self.run_store.list_artifacts(run_id)
@@ -198,3 +363,21 @@ def _utc_now() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _apply_control_messages(task: str, controls: Iterable[ControlMessage]) -> str:
+    lines = [task.rstrip(), "", "Session controls:"]
+    for control in controls:
+        label = "Steer" if control.control_type == "steer" else "Follow-up"
+        lines.append(f"- [{label} {control.control_id}] {control.message.strip()}")
+    return "\n".join(lines).strip()
+
+
+def _apply_resume_checkpoint(task: str, checkpoint: RunCheckpoint) -> str:
+    return (
+        f"{task.rstrip()}\n\n"
+        "Resume from checkpoint:\n"
+        f"- Checkpoint id: {checkpoint.checkpoint_id}\n"
+        f"- Source run id: {checkpoint.run_id}\n"
+        f"- Summary: {checkpoint.summary.strip()}"
+    ).strip()
