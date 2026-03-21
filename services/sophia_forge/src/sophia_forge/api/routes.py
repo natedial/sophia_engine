@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from sophia_forge.core.runtime import ForgeRuntime
 from sophia_forge.evals import EvalCaseExportRequest, EvalCaseReviewRequest, EvalReplayRequest
-from sophia_forge_protocol.run_models import CapabilityHandoffUpdate, RunRequest
+from sophia_forge_protocol.run_models import (
+    CapabilityHandoffUpdate,
+    RunRequest,
+    RunSessionCreateRequest,
+    SessionResumeRequest,
+    SessionControlRequest,
+)
 
 
 def build_router(runtime: ForgeRuntime) -> APIRouter:
@@ -17,6 +26,64 @@ def build_router(runtime: ForgeRuntime) -> APIRouter:
     @router.post("/runs")
     async def create_run(request: RunRequest):
         return (await runtime.submit_run(request)).model_dump(mode="json")
+
+    @router.post("/sessions")
+    async def create_session(request: RunSessionCreateRequest):
+        return runtime.create_session(request).model_dump(mode="json")
+
+    @router.get("/sessions/{session_id}")
+    async def get_session(session_id: str):
+        try:
+            return runtime.get_session(session_id).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+
+    @router.get("/sessions/{session_id}/runs")
+    async def get_session_runs(session_id: str):
+        try:
+            runtime.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return {
+            "session_id": session_id,
+            "runs": [run.model_dump(mode="json") for run in runtime.list_session_runs(session_id)],
+        }
+
+    @router.post("/sessions/{session_id}/control")
+    async def queue_session_control(session_id: str, request: SessionControlRequest):
+        try:
+            return runtime.queue_session_control(session_id, request).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+
+    @router.get("/sessions/{session_id}/controls")
+    async def get_session_controls(session_id: str):
+        try:
+            controls = runtime.list_session_controls(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return {
+            "session_id": session_id,
+            "controls": [control.model_dump(mode="json") for control in controls],
+        }
+
+    @router.get("/sessions/{session_id}/checkpoints")
+    async def get_session_checkpoints(session_id: str):
+        try:
+            checkpoints = runtime.list_session_checkpoints(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return {
+            "session_id": session_id,
+            "checkpoints": [checkpoint.model_dump(mode="json") for checkpoint in checkpoints],
+        }
+
+    @router.post("/sessions/{session_id}/resume")
+    async def resume_session(session_id: str, request: SessionResumeRequest):
+        try:
+            return (await runtime.resume_session(session_id, request)).model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session or checkpoint not found") from exc
 
     @router.get("/runs/{run_id}")
     async def get_run(run_id: str):
@@ -33,15 +100,62 @@ def build_router(runtime: ForgeRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail="run not found") from exc
 
     @router.get("/runs/{run_id}/events")
-    async def get_run_events(run_id: str):
+    async def get_run_events(run_id: str, after_sequence: int | None = None):
         try:
             runtime.get_run(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         return {
             "run_id": run_id,
-            "events": [event.model_dump(mode="json") for event in runtime.get_events(run_id)],
+            "events": [
+                event.model_dump(mode="json")
+                for event in runtime.get_events(run_id, after_sequence=after_sequence)
+            ],
         }
+
+    @router.get("/runs/{run_id}/events/stream")
+    async def stream_run_events(
+        run_id: str,
+        request: Request,
+        after_sequence: int | None = None,
+    ):
+        try:
+            runtime.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+
+        async def _event_stream():
+            cursor = after_sequence
+            terminal_seen = False
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = runtime.get_events(run_id, after_sequence=cursor)
+                if events:
+                    for event in events:
+                        cursor = event.sequence
+                        payload = event.model_dump(mode="json")
+                        yield _encode_sse_event(
+                            event_name=event.event_type,
+                            event_id=str(event.sequence),
+                            data=payload,
+                        )
+                    terminal_seen = events[-1].event_type in {
+                        "run_completed",
+                        "run_blocked",
+                        "run_failed",
+                        "run_cancelled",
+                    }
+                    if terminal_seen:
+                        return
+                else:
+                    latest = runtime.get_run(run_id)
+                    if latest.status not in {"queued", "running"}:
+                        return
+                    yield ": keep-alive\n\n"
+                    await asyncio.sleep(0.05)
+
+        return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
     @router.get("/runs/{run_id}/artifacts")
     async def get_run_artifacts(run_id: str):
@@ -166,3 +280,7 @@ def build_router(runtime: ForgeRuntime) -> APIRouter:
         return (await runtime.cancel_run(run_id)).model_dump(mode="json")
 
     return router
+
+
+def _encode_sse_event(*, event_name: str, event_id: str, data: dict[str, object]) -> str:
+    return f"id: {event_id}\nevent: {event_name}\ndata: {json.dumps(data, sort_keys=True)}\n\n"

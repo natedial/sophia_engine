@@ -123,6 +123,29 @@ class ArtifactManager:
         )
         return persisted
 
+    def persist_checkpoint_summary(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        checkpoint_id: str,
+        payload: dict[str, object],
+    ) -> RunArtifact:
+        run_dir = self._ensure_run_dir(run_id)
+        checkpoint_dir = run_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = checkpoint_dir / f"{_sanitize_run_id(checkpoint_id)}.json"
+        return self._write_artifact(
+            run_id=run_id,
+            artifact_type="checkpoint_summary",
+            path=path,
+            payload={"session_id": session_id, "checkpoint_id": checkpoint_id, **payload},
+            index=900,
+        )
+
+    def write_artifact_index(self, *, run_id: str, artifacts: tuple[RunArtifact, ...]) -> None:
+        self._write_artifact_index(run_id=run_id, artifacts=artifacts)
+
     def _write_artifact(
         self,
         *,

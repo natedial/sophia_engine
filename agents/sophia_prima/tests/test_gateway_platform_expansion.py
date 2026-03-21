@@ -236,6 +236,31 @@ def test_create_acquisition_job_infers_defaults_from_run_record(tmp_path) -> Non
     assert len(record["acquisition_jobs"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_stream_inbound_persists_diagnostic_fields(tmp_path) -> None:
+    settings = Settings(
+        gateway_artifact_store_path=tmp_path / "gateway_runs.db",
+        llm_provider="openai",
+    )
+    runtime = GatewayRuntime(settings=settings)
+    runtime._agents[runtime.settings.gateway_default_agent_id] = StreamingFakeAgent()
+
+    outbound = await runtime.handle_inbound(
+        InboundMessage(
+            channel="telegram",
+            account_id="default",
+            peer_id="diag-chat",
+            text="hello diagnostics",
+        )
+    )
+
+    record = runtime.get_run_record(outbound.run_id)
+    assert record is not None
+    assert record["status"] == "completed"
+    assert record["provider_name"] == "openai"
+    assert record["outbound_text_len"] == len("streamed reply")
+
+
 def test_create_acquisition_job_endpoint_round_trip(tmp_path, monkeypatch) -> None:
     settings = Settings(
         gateway_artifact_store_path=tmp_path / "gateway_runs.db",

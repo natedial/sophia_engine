@@ -13,6 +13,7 @@ ArtifactType = Literal[
     "prompt_package",
     "backend_output",
     "changed_files",
+    "checkpoint_summary",
     "verification_log",
     "summary",
     "run_result",

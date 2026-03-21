@@ -14,6 +14,7 @@ from sophia.gateway.models import InboundMessage
 from sophia.gateway.runtime import GatewayRuntime
 
 logger = logging.getLogger("sophia.gateway.telegram")
+_TELEGRAM_MESSAGE_LIMIT = 4000
 
 
 @dataclass(frozen=True)
@@ -117,11 +118,39 @@ class TelegramChannelAdapter:
 
         try:
             outbound = await self.runtime.handle_inbound(inbound)
-            await update.effective_message.reply_text(outbound.text)
         except Exception:
             logger.exception("telegram message handling failed")
             await update.effective_message.reply_text(
                 "I hit an internal error while processing that message."
+            )
+            return
+
+        try:
+            logger.info(
+                "telegram outbound delivery starting: account_id=%s peer_id=%s run_id=%s text_len=%s",
+                self.account.account_id,
+                inbound.peer_id,
+                outbound.run_id,
+                len(outbound.text or ""),
+            )
+            for chunk in _chunk_telegram_text(outbound.text):
+                await update.effective_message.reply_text(chunk)
+            logger.info(
+                "telegram outbound delivery completed: account_id=%s peer_id=%s run_id=%s chunks=%s",
+                self.account.account_id,
+                inbound.peer_id,
+                outbound.run_id,
+                len(_chunk_telegram_text(outbound.text)),
+            )
+        except Exception:
+            logger.exception(
+                "telegram outbound delivery failed: run_id=%s text_len=%s",
+                outbound.run_id,
+                len(outbound.text or ""),
+            )
+            await update.effective_message.reply_text(
+                "I finished processing that, but Telegram failed to deliver the full response. "
+                "Please retry or use the web gateway for longer outputs."
             )
 
 
@@ -153,3 +182,34 @@ def load_telegram_accounts(
         return [TelegramAccountConfig(account_id="default", bot_token=token_fallback)]
 
     return []
+
+
+def _chunk_telegram_text(text: str, *, max_chars: int = _TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Split long Telegram responses into message-safe chunks."""
+    normalized = (text or "").strip()
+    if not normalized:
+        return ["(empty response)"]
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    chunks: list[str] = []
+    remaining = normalized
+    while len(remaining) > max_chars:
+        candidate = remaining[:max_chars]
+        split_at = max(
+            candidate.rfind("\n\n"),
+            candidate.rfind("\n"),
+            candidate.rfind(". "),
+            candidate.rfind(" "),
+        )
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip()
+        if not chunk:
+            chunk = remaining[:max_chars].strip()
+            split_at = len(chunk)
+        chunks.append(chunk)
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks

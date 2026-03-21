@@ -14,10 +14,13 @@ from sophia_forge_protocol.event_models import RunEvent
 from sophia_forge.core.outcomes import classify_failure
 from sophia_forge_protocol.run_models import (
     CapabilityHandoff,
+    ControlMessage,
     FailureClassCount,
+    RunCheckpoint,
     RunMetricsSummary,
     RunRequest,
     RunResult,
+    RunSession,
     TaskTypeMetrics,
 )
 from sophia_forge_protocol.verification_models import VerificationResult
@@ -90,6 +93,49 @@ class ForgeRunStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS forge_run_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    client_name TEXT NOT NULL,
+                    task_text TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    latest_run_id TEXT,
+                    latest_checkpoint_id TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS forge_run_session_runs (
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (session_id, run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS forge_control_messages (
+                    control_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    control_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS forge_checkpoints (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    summary_artifact_id TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS forge_eval_runs (
                     eval_run_id TEXT PRIMARY KEY,
                     corpus_name TEXT NOT NULL,
@@ -112,6 +158,12 @@ class ForgeRunStore:
                 table_name="forge_runs",
                 column_name="request_json",
                 column_sql="TEXT NOT NULL DEFAULT '{}'",
+            )
+            _ensure_column(
+                conn,
+                table_name="forge_run_sessions",
+                column_name="latest_checkpoint_id",
+                column_sql="TEXT",
             )
 
     def create_run(self, request: RunRequest) -> RunResult:
@@ -148,6 +200,333 @@ class ForgeRunStore:
             )
         return self.get_run(run_id)
 
+    def create_session(
+        self,
+        *,
+        session_id: str,
+        client_name: str,
+        task: str,
+        metadata: dict[str, object] | None = None,
+    ) -> RunSession:
+        now = _utc_now()
+        payload = metadata or {}
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forge_run_sessions (
+                    session_id, client_name, task_text, status, latest_run_id, latest_checkpoint_id,
+                    metadata_json, created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    client_name,
+                    task,
+                    "active",
+                    None,
+                    None,
+                    json.dumps(payload, sort_keys=True),
+                    now,
+                    now,
+                    None,
+                ),
+            )
+        return self.get_session(session_id)
+
+    def session_exists(self, session_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM forge_run_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_session(self, session_id: str) -> RunSession:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT session_id, client_name, task_text, status, latest_run_id, metadata_json,
+                       latest_checkpoint_id, created_at, updated_at, completed_at
+                FROM forge_run_sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            run_rows = conn.execute(
+                """
+                SELECT run_id
+                FROM forge_run_session_runs
+                WHERE session_id = ?
+                ORDER BY ordinal ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        if row is None:
+            raise KeyError(session_id)
+        return RunSession(
+            session_id=row["session_id"],
+            client_name=row["client_name"],
+            task=row["task_text"],
+            status=row["status"],
+            latest_run_id=row["latest_run_id"],
+            latest_checkpoint_id=row["latest_checkpoint_id"],
+            run_ids=tuple(run_row["run_id"] for run_row in run_rows),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    def bind_run_to_session(self, *, session_id: str, run_id: str) -> None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(ordinal), 0) AS max_ordinal
+                FROM forge_run_session_runs
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            ordinal = int(row["max_ordinal"] or 0) + 1 if row is not None else 1
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forge_run_session_runs (
+                    session_id, run_id, ordinal, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (session_id, run_id, ordinal, now),
+            )
+            conn.execute(
+                """
+                UPDATE forge_run_sessions
+                SET status = ?, latest_run_id = ?, updated_at = ?, completed_at = ?
+                WHERE session_id = ?
+                """,
+                ("active", run_id, now, None, session_id),
+            )
+
+    def list_session_runs(self, session_id: str) -> tuple[RunResult, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.run_id
+                FROM forge_run_session_runs s
+                JOIN forge_runs r ON r.run_id = s.run_id
+                WHERE s.session_id = ?
+                ORDER BY s.ordinal ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(self.get_run(row["run_id"]) for row in rows)
+
+    def create_control_message(
+        self,
+        *,
+        control_id: str,
+        session_id: str,
+        run_id: str | None,
+        control_type: str,
+        message: str,
+        metadata: dict[str, object] | None = None,
+    ) -> ControlMessage:
+        now = _utc_now()
+        payload = metadata or {}
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO forge_control_messages (
+                    control_id, session_id, run_id, control_type, status, message,
+                    metadata_json, created_at, applied_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    control_id,
+                    session_id,
+                    run_id,
+                    control_type,
+                    "queued",
+                    message,
+                    json.dumps(payload, sort_keys=True),
+                    now,
+                    None,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE forge_run_sessions
+                SET status = ?, updated_at = ?, completed_at = ?
+                WHERE session_id = ?
+                """,
+                ("active", now, None, session_id),
+            )
+        return self.get_control_message(control_id)
+
+    def get_control_message(self, control_id: str) -> ControlMessage:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT control_id, session_id, run_id, control_type, status, message,
+                       metadata_json, created_at, applied_at
+                FROM forge_control_messages
+                WHERE control_id = ?
+                """,
+                (control_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(control_id)
+        return ControlMessage(
+            control_id=row["control_id"],
+            session_id=row["session_id"],
+            run_id=row["run_id"],
+            control_type=row["control_type"],
+            status=row["status"],
+            message=row["message"],
+            created_at=row["created_at"],
+            applied_at=row["applied_at"],
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    def list_control_messages(
+        self,
+        session_id: str,
+        *,
+        status: str | None = None,
+    ) -> tuple[ControlMessage, ...]:
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT control_id
+                    FROM forge_control_messages
+                    WHERE session_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT control_id
+                    FROM forge_control_messages
+                    WHERE session_id = ? AND status = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (session_id, status),
+                ).fetchall()
+        return tuple(self.get_control_message(row["control_id"]) for row in rows)
+
+    def mark_control_messages_applied(
+        self,
+        *,
+        control_ids: tuple[str, ...],
+        run_id: str,
+    ) -> tuple[ControlMessage, ...]:
+        if not control_ids:
+            return ()
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            for control_id in control_ids:
+                conn.execute(
+                    """
+                    UPDATE forge_control_messages
+                    SET status = ?, run_id = ?, applied_at = ?
+                    WHERE control_id = ?
+                    """,
+                    ("applied", run_id, now, control_id),
+                )
+        return tuple(self.get_control_message(control_id) for control_id in control_ids)
+
+    def create_checkpoint(
+        self,
+        *,
+        checkpoint_id: str,
+        session_id: str,
+        run_id: str,
+        summary_artifact_id: str,
+        summary: str,
+        metadata: dict[str, object] | None = None,
+    ) -> RunCheckpoint:
+        now = _utc_now()
+        payload = metadata or {}
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forge_checkpoints (
+                    checkpoint_id, session_id, run_id, summary_artifact_id,
+                    summary_text, metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint_id,
+                    session_id,
+                    run_id,
+                    summary_artifact_id,
+                    summary,
+                    json.dumps(payload, sort_keys=True),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE forge_run_sessions
+                SET latest_checkpoint_id = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (checkpoint_id, now, session_id),
+            )
+        return self.get_checkpoint(checkpoint_id)
+
+    def get_checkpoint(self, checkpoint_id: str) -> RunCheckpoint:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT checkpoint_id, session_id, run_id, summary_artifact_id,
+                       summary_text, metadata_json, created_at
+                FROM forge_checkpoints
+                WHERE checkpoint_id = ?
+                """,
+                (checkpoint_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(checkpoint_id)
+        return RunCheckpoint(
+            checkpoint_id=row["checkpoint_id"],
+            session_id=row["session_id"],
+            run_id=row["run_id"],
+            summary_artifact_id=row["summary_artifact_id"],
+            summary=row["summary_text"],
+            created_at=row["created_at"],
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    def list_checkpoints(self, session_id: str) -> tuple[RunCheckpoint, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT checkpoint_id
+                FROM forge_checkpoints
+                WHERE session_id = ?
+                ORDER BY created_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(self.get_checkpoint(row["checkpoint_id"]) for row in rows)
+
+    def update_session_from_run(self, *, session_id: str, run_id: str, run_status: str) -> None:
+        now = _utc_now()
+        session_status = "active" if run_status in {"queued", "running"} else run_status
+        completed_at = None if session_status == "active" else now
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE forge_run_sessions
+                SET status = ?, latest_run_id = ?, updated_at = ?, completed_at = ?
+                WHERE session_id = ?
+                """,
+                (session_status, run_id, now, completed_at, session_id),
+            )
+
     def get_run_request(self, run_id: str) -> RunRequest:
         with self._connect() as conn:
             row = conn.execute(
@@ -170,6 +549,30 @@ class ForgeRunStore:
                 ("running", now, run_id),
             )
         return self.get_run(run_id)
+
+    def update_run_metadata(self, run_id: str, updates: dict[str, object]) -> None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT metadata_json
+                FROM forge_runs
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            metadata = json.loads(row["metadata_json"] or "{}")
+            metadata.update(updates)
+            conn.execute(
+                """
+                UPDATE forge_runs
+                SET metadata_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (json.dumps(metadata, sort_keys=True), now, run_id),
+            )
 
     def finish_run(self, result: RunResult) -> RunResult:
         now = _utc_now()
@@ -251,17 +654,28 @@ class ForgeRunStore:
             )
         return event
 
-    def list_events(self, run_id: str) -> tuple[RunEvent, ...]:
+    def list_events(self, run_id: str, *, after_sequence: int | None = None) -> tuple[RunEvent, ...]:
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT run_id, sequence, event_type, payload_json, created_at
-                FROM forge_run_events
-                WHERE run_id = ?
-                ORDER BY sequence ASC
-                """,
-                (run_id,),
-            ).fetchall()
+            if after_sequence is None:
+                rows = conn.execute(
+                    """
+                    SELECT run_id, sequence, event_type, payload_json, created_at
+                    FROM forge_run_events
+                    WHERE run_id = ?
+                    ORDER BY sequence ASC
+                    """,
+                    (run_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT run_id, sequence, event_type, payload_json, created_at
+                    FROM forge_run_events
+                    WHERE run_id = ? AND sequence > ?
+                    ORDER BY sequence ASC
+                    """,
+                    (run_id, after_sequence),
+                ).fetchall()
         return tuple(
             RunEvent(
                 run_id=row["run_id"],

@@ -8,10 +8,17 @@ from sophia_forge_protocol.run_models import (
     FailureClassCount,
     CapabilityHandoff,
     CapabilityHandoffUpdate,
+    ControlMessage,
+    RunCheckpoint,
     RetentionSummary,
     RunMetricsSummary,
     RunRequest,
     RunResult,
+    RunSession,
+    RunSessionCreateRequest,
+    SessionResumeRequest,
+    SessionControlRequest,
+    RetryPolicy,
     StructuredRunOutput,
     TaskTypeMetrics,
     run_output_schema,
@@ -90,6 +97,80 @@ def test_run_request_uses_verification_policy_defaults() -> None:
         verification_policy=VerificationPolicy(),
     )
     assert request.verification_policy.mode == "auto"
+
+
+def test_run_request_uses_retry_policy_defaults() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+    )
+    assert request.retry_policy == RetryPolicy()
+    assert request.session_id is None
+    assert request.long_running_mode is False
+
+
+def test_run_session_serializes_membership() -> None:
+    session = RunSession(
+        session_id="session_001",
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        status="active",
+        latest_run_id="forge_run_001",
+        run_ids=("forge_run_001",),
+        created_at="2026-03-21T12:00:00Z",
+        updated_at="2026-03-21T12:00:00Z",
+    )
+    assert session.run_ids == ("forge_run_001",)
+
+
+def test_run_session_create_request_defaults_metadata() -> None:
+    request = RunSessionCreateRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+    )
+    assert request.metadata == {}
+
+
+def test_session_control_request_defaults_metadata() -> None:
+    request = SessionControlRequest(
+        control_type="steer",
+        message="Prioritize the failing tests first.",
+    )
+    assert request.metadata == {}
+
+
+def test_control_message_serializes_status() -> None:
+    control = ControlMessage(
+        control_id="control_001",
+        session_id="session_001",
+        run_id="forge_run_001",
+        control_type="follow_up",
+        status="applied",
+        message="Add docs after the code lands.",
+        created_at="2026-03-21T12:00:00Z",
+        applied_at="2026-03-21T12:01:00Z",
+    )
+    assert control.status == "applied"
+
+
+def test_run_checkpoint_serializes_summary() -> None:
+    checkpoint = RunCheckpoint(
+        checkpoint_id="checkpoint_001",
+        session_id="session_001",
+        run_id="forge_run_001",
+        summary_artifact_id="forge_run_001_checkpoint_summary_900",
+        summary="Implemented the requested capability.",
+        created_at="2026-03-21T12:00:00Z",
+    )
+    assert checkpoint.summary_artifact_id.endswith("900")
+
+
+def test_session_resume_request_defaults_metadata() -> None:
+    request = SessionResumeRequest()
+    assert request.metadata == {}
 
 
 def test_run_request_syncs_top_level_roots_into_execution_policy() -> None:
