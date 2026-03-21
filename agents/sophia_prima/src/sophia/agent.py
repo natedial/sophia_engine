@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 
+from sophia.agent_local_tools import create_local_tools
 from sophia.agent_profiles import AgentProfile
 from sophia.config import Settings, get_settings
 from sophia.context import ConversationContext, apply_transforms, summarize_long_tool_results
@@ -159,8 +160,7 @@ class SophiaAgent:
                 embed_semantic=self.settings.memory_embed_semantic,
                 query_use_embedding_index=self.settings.memory_query_use_embedding_index,
                 embedding_openai_api_key=(
-                    self.settings.memory_embedding_openai_api_key
-                    or self.settings.openai_api_key
+                    self.settings.memory_embedding_openai_api_key or self.settings.openai_api_key
                 ),
                 embedding_openai_base_url=self.settings.memory_embedding_openai_base_url,
                 embedding_timeout_sec=self.settings.memory_embedding_timeout_sec,
@@ -193,6 +193,7 @@ class SophiaAgent:
                 ),
                 seed_lessons=self.seed_lessons,
             )
+        self._local_tools = create_local_tools(self.memory)
         if self.settings.history_enabled:
             self.read_policy.ensure_allowed(
                 self.settings.history_store_path,
@@ -479,9 +480,7 @@ class SophiaAgent:
             profile_lines.append(self.profile.prompt)
         if self.profile.tool_allowlist is not None:
             if self.profile.tool_allowlist:
-                profile_lines.append(
-                    "Tool scope: " + ", ".join(self.profile.tool_allowlist)
-                )
+                profile_lines.append("Tool scope: " + ", ".join(self.profile.tool_allowlist))
             else:
                 profile_lines.append("Tool scope: (none)")
         dynamic_context["Active agent profile"] = "\n".join(profile_lines)
@@ -499,9 +498,7 @@ class SophiaAgent:
             active_lines = [f"Name: {active_skill.skill.name}"]
             if active_skill.skill.description:
                 active_lines.append(f"Description: {active_skill.skill.description}")
-            active_lines.append(
-                f"Match: {active_skill.reason} (score={active_skill.score:.2f})"
-            )
+            active_lines.append(f"Match: {active_skill.reason} (score={active_skill.score:.2f})")
             if active_skill.skill.allowed_tools is not None:
                 if active_skill.skill.allowed_tools:
                     active_lines.append(
@@ -510,13 +507,9 @@ class SophiaAgent:
                 else:
                     active_lines.append("Tool allowlist: (none)")
             if active_skill.skill.read_allowlist:
-                active_lines.append(
-                    "Read scope: " + ", ".join(active_skill.skill.read_allowlist)
-                )
+                active_lines.append("Read scope: " + ", ".join(active_skill.skill.read_allowlist))
             if active_skill.skill.write_allowlist:
-                active_lines.append(
-                    "Write scope: " + ", ".join(active_skill.skill.write_allowlist)
-                )
+                active_lines.append("Write scope: " + ", ".join(active_skill.skill.write_allowlist))
             active_lines.append("Instructions:")
             active_lines.append(active_skill.skill.body)
             dynamic_context["Active skill"] = "\n".join(active_lines)
@@ -596,13 +589,14 @@ class SophiaAgent:
     # ------------------------------------------------------------------
 
     def _get_tool_schemas(self) -> list[ToolSchema]:
-        """Get provider-agnostic tool schemas from pylon."""
+        """Get provider-agnostic tool schemas from pylon plus agent-local tools."""
         only_healthy = self.preflight_result is not None
         tool_defs = self.pylon.get_tools(only_healthy=only_healthy)
         if self.profile.tool_allowlist is not None:
             allowed = set(self.profile.tool_allowlist)
             tool_defs = [td for td in tool_defs if td.name in allowed]
-        return [
+
+        schemas = [
             ToolSchema(
                 name=td.name,
                 description=td.description,
@@ -610,6 +604,18 @@ class SophiaAgent:
             )
             for td in tool_defs
         ]
+
+        for tool_name, tool_def in self._local_tools.items():
+            if self.profile.tool_allowlist is None or tool_name in self.profile.tool_allowlist:
+                schemas.append(
+                    ToolSchema(
+                        name=tool_name,
+                        description=tool_def["description"],
+                        input_schema=tool_def["parameters"],
+                    )
+                )
+
+        return schemas
 
     @staticmethod
     def _remember_capability_handoffs(
@@ -809,18 +815,62 @@ class SophiaAgent:
 
         message = user_message.lower()
         keywords = (
-            "latest", "current", "value", "series", "observations", "data",
-            "yield", "rate", "cpi", "gdp", "inflation", "unemployment",
-            "treasury", "auction", "fed", "speech", "release",
-            "compute", "regression", "mean", "median", "std",
-            "percent change", "yoy", "mom", "moving average",
-            "normalize", "log", "difference",
-            "research", "evidence", "source", "sources", "study", "studies",
-            "paper", "papers", "consensus", "view", "views",
-            "citation", "citations", "cite", "cited",
-            "document", "documents", "provenance",
-            "tone", "rhetoric", "drift", "hawkish", "dovish",
-            "fomc", "fed chair", "fed president", "fed governor",
+            "latest",
+            "current",
+            "value",
+            "series",
+            "observations",
+            "data",
+            "yield",
+            "rate",
+            "cpi",
+            "gdp",
+            "inflation",
+            "unemployment",
+            "treasury",
+            "auction",
+            "fed",
+            "speech",
+            "release",
+            "compute",
+            "regression",
+            "mean",
+            "median",
+            "std",
+            "percent change",
+            "yoy",
+            "mom",
+            "moving average",
+            "normalize",
+            "log",
+            "difference",
+            "research",
+            "evidence",
+            "source",
+            "sources",
+            "study",
+            "studies",
+            "paper",
+            "papers",
+            "consensus",
+            "view",
+            "views",
+            "citation",
+            "citations",
+            "cite",
+            "cited",
+            "document",
+            "documents",
+            "provenance",
+            "tone",
+            "rhetoric",
+            "drift",
+            "hawkish",
+            "dovish",
+            "fomc",
+            "fed chair",
+            "fed president",
+            "fed governor",
         )
         if any(kw in message for kw in keywords):
             return True
@@ -876,6 +926,19 @@ class SophiaAgent:
     async def _execute_tool(self, tool_call: ToolCall, allowed: set[str]) -> ToolResult:
         if tool_call.name not in allowed:
             return ToolResult.fail(f"Unknown tool: {tool_call.name}", ErrorType.INVALID_INPUT)
+
+        if tool_call.name in self._local_tools:
+            tool_def = self._local_tools[tool_call.name]
+            handler = tool_def["handler"]
+            input_dict = tool_call.input if isinstance(tool_call.input, dict) else {}
+            try:
+                result = handler(**input_dict)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return ToolResult(value=result)
+            except Exception as e:
+                return ToolResult.fail(str(e), ErrorType.INVALID_INPUT)
+
         return await self.pylon.execute_tool(tool_call.name, tool_call.input)
 
     @staticmethod
@@ -972,7 +1035,9 @@ class SophiaAgent:
                             {
                                 "chunk_id": chunk_id.strip(),
                                 "source_path": source_path if isinstance(source_path, str) else "",
-                                "page_number": page_number if isinstance(page_number, int) else None,
+                                "page_number": page_number
+                                if isinstance(page_number, int)
+                                else None,
                                 "text": text.strip(),
                                 "hybrid_score": (
                                     float(result.get("hybrid_score"))
@@ -1092,13 +1157,70 @@ class SophiaAgent:
             return []
 
         stop_words = {
-            "a", "an", "and", "any", "are", "as", "at", "be", "by", "do", "for",
-            "from", "give", "how", "i", "in", "is", "it", "last", "me", "of", "on",
-            "or", "our", "that", "the", "this", "to", "was", "what", "when", "where",
-            "which", "who", "why", "with", "you", "your", "week", "specific", "broad",
-            "range", "view", "views", "document", "documents", "citation", "citations",
-            "being", "been", "down", "just", "only", "recent", "recently", "now",
-            "out", "since", "report", "reports", "focus", "seem", "ruled", "ruling",
+            "a",
+            "an",
+            "and",
+            "any",
+            "are",
+            "as",
+            "at",
+            "be",
+            "by",
+            "do",
+            "for",
+            "from",
+            "give",
+            "how",
+            "i",
+            "in",
+            "is",
+            "it",
+            "last",
+            "me",
+            "of",
+            "on",
+            "or",
+            "our",
+            "that",
+            "the",
+            "this",
+            "to",
+            "was",
+            "what",
+            "when",
+            "where",
+            "which",
+            "who",
+            "why",
+            "with",
+            "you",
+            "your",
+            "week",
+            "specific",
+            "broad",
+            "range",
+            "view",
+            "views",
+            "document",
+            "documents",
+            "citation",
+            "citations",
+            "being",
+            "been",
+            "down",
+            "just",
+            "only",
+            "recent",
+            "recently",
+            "now",
+            "out",
+            "since",
+            "report",
+            "reports",
+            "focus",
+            "seem",
+            "ruled",
+            "ruling",
             "friday",
         }
         keywords: list[str] = []
@@ -1457,17 +1579,11 @@ class SophiaAgent:
         if execution.summary:
             summary_parts.append(execution.summary.strip())
         if execution.changed_files:
-            summary_parts.append(
-                "Changed files: " + ", ".join(execution.changed_files[:8])
-            )
+            summary_parts.append("Changed files: " + ", ".join(execution.changed_files[:8]))
         if execution.verification:
-            summary_parts.append(
-                "Verification: " + "; ".join(execution.verification[:4])
-            )
+            summary_parts.append("Verification: " + "; ".join(execution.verification[:4]))
         if execution.follow_ups and not execution.success:
-            summary_parts.append(
-                "Follow-ups: " + "; ".join(execution.follow_ups[:4])
-            )
+            summary_parts.append("Follow-ups: " + "; ".join(execution.follow_ups[:4]))
         if execution.capabilities_added:
             summary_parts.append(
                 "Capabilities added: "
@@ -1475,9 +1591,13 @@ class SophiaAgent:
             )
             adopted = [row.tool_name for row in adoption_report.capabilities if row.adopted]
             pending = [row.tool_name for row in adoption_report.capabilities if not row.adopted]
-            handoff_ready = [row.tool_name for row in adoption_report.capabilities if row.handoff_ready]
+            handoff_ready = [
+                row.tool_name for row in adoption_report.capabilities if row.handoff_ready
+            ]
             handoff_pending = [
-                row.tool_name for row in adoption_report.capabilities if row.adopted and not row.handoff_ready
+                row.tool_name
+                for row in adoption_report.capabilities
+                if row.adopted and not row.handoff_ready
             ]
             if adopted:
                 summary_parts.append("Capabilities adopted: " + ", ".join(adopted[:4]))
@@ -1652,11 +1772,12 @@ class SophiaAgent:
                 )
             turn_tools = self._scope_tools_for_skill(available_tools, active_skill)
             allowed_tool_names = {tool.name for tool in turn_tools}
-            memory_context = self.memory.recall_for_prompt(
+            memory_snapshot = self.memory.freeze_for_turn(
                 session_id=context.session_id,
                 query=active_user_message,
                 messages=context.messages,
             )
+            memory_context = memory_snapshot.rendered_text
             system_prompt = self._build_system_prompt(
                 context,
                 memory_context,
@@ -1786,9 +1907,7 @@ class SophiaAgent:
                         context.messages.extend(steering)
 
                 # Apply context transforms
-                transformed = apply_transforms(
-                    context.messages, self.config.context_transformers
-                )
+                transformed = apply_transforms(context.messages, self.config.context_transformers)
 
                 # Call provider
                 yield message_start(
@@ -1848,23 +1967,15 @@ class SophiaAgent:
                         assistant_msg.content,
                         allowed_chunk_ids=cited_chunk_ids_seen,
                     )
-                    has_structured_citations = self._has_structured_citations(
-                        assistant_msg.content
-                    )
-                    citation_issue = (
-                        has_invalid_chunk_citations
-                        or (
-                            citations_required_for_turn
-                            and used_research_tools_this_turn
-                            and not has_structured_citations
-                        )
+                    has_structured_citations = self._has_structured_citations(assistant_msg.content)
+                    citation_issue = has_invalid_chunk_citations or (
+                        citations_required_for_turn
+                        and used_research_tools_this_turn
+                        and not has_structured_citations
                     )
 
                     # If cited chunk IDs don't match retrieved chunks, force one repair pass.
-                    if (
-                        not citation_repair_attempted
-                        and citation_issue
-                    ):
+                    if not citation_repair_attempted and citation_issue:
                         citation_repair_attempted = True
                         system_prompt = self._build_citation_repair_prompt(
                             system_prompt,
@@ -1911,7 +2022,11 @@ class SophiaAgent:
 
                 # Execute tool calls
                 tool_results: list[ToolResultMessage] = []
-                _RESEARCH_TOOL_NAMES = {"search_research", "get_research_chunk", "list_research_sources"}
+                _RESEARCH_TOOL_NAMES = {
+                    "search_research",
+                    "get_research_chunk",
+                    "list_research_sources",
+                }
                 for tc in assistant_msg.tool_calls:
                     used_tools_this_turn = True
                     if tc.name in _RESEARCH_TOOL_NAMES:
@@ -1986,9 +2101,7 @@ class SophiaAgent:
                 and last_message.tool_calls
                 and not last_message.content.strip()
             ):
-                transformed = apply_transforms(
-                    context.messages, self.config.context_transformers
-                )
+                transformed = apply_transforms(context.messages, self.config.context_transformers)
                 synthesis_prompt = self._build_force_final_response_prompt(system_prompt)
                 yield message_start(
                     run_id=active_run_id,

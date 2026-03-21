@@ -100,8 +100,15 @@ class MemorySnapshot:
     episodic: list[MemoryRecord]
     semantic: list[MemoryRecord]
 
-    def to_prompt_text(self) -> str:
-        """Render memory snapshot as prompt-ready text."""
+    def to_prompt_text(self, max_chars: int | None = None) -> str:
+        """Render memory snapshot as prompt-ready text.
+
+        Args:
+            max_chars: Optional character limit. If set, trim content from
+                lowest-salience records first (semantic, then episodic, then
+                working). Never drop lessons. If lessons alone exceed budget,
+                truncate the final output with a marker.
+        """
         parts: list[str] = [
             "Use relevant memory conservatively.",
             "Prioritize explicit user input in this turn over older memory.",
@@ -126,4 +133,90 @@ class MemorySnapshot:
         if len(parts) == 2:
             return ""
 
+        text = "\n".join(parts)
+
+        if max_chars is None or len(text) <= max_chars:
+            return text
+
+        return self._trim_to_budget(parts, max_chars)
+
+    def _trim_to_budget(self, parts: list[str], max_chars: int) -> str:
+        semantic = self.semantic.copy()
+        episodic = self.episodic.copy()
+        working = self.working_lines.copy()
+
+        while len("\n".join(parts)) > max_chars and (semantic or episodic or working):
+            if semantic:
+                semantic.pop()
+            elif episodic:
+                episodic.pop()
+            elif working:
+                working.pop(0)
+            else:
+                break
+
+            parts = self._rebuild_parts(semantic, episodic, working)
+
+        text = "\n".join(parts)
+        if len(text) > max_chars:
+            lessons_text = self._render_lessons()
+            budget_for_rest = max_chars - len(lessons_text) - 30
+            if budget_for_rest > 100:
+                text = lessons_text + "\n... [memory truncated]"
+            else:
+                text = lessons_text[:max_chars]
+
+        return text
+
+    def _rebuild_parts(
+        self,
+        semantic: list[MemoryRecord],
+        episodic: list[MemoryRecord],
+        working: list[str],
+    ) -> list[str]:
+        parts: list[str] = [
+            "Use relevant memory conservatively.",
+            "Prioritize explicit user input in this turn over older memory.",
+        ]
+
+        if working:
+            parts.append("Working memory:")
+            parts.extend(f"- {line}" for line in working)
+
+        if self.lessons:
+            parts.append("Lessons memory:")
+            parts.extend(f"- {rec.content}" for rec in self.lessons)
+
+        if episodic:
+            parts.append("Episodic memory:")
+            parts.extend(f"- {rec.content}" for rec in episodic)
+
+        if semantic:
+            parts.append("Semantic memory:")
+            parts.extend(f"- {rec.content}" for rec in semantic)
+
+        return parts
+
+    def _render_lessons(self) -> str:
+        parts: list[str] = [
+            "Use relevant memory conservatively.",
+            "Prioritize explicit user input in this turn over older memory.",
+        ]
+        if self.lessons:
+            parts.append("Lessons memory:")
+            parts.extend(f"- {rec.content}" for rec in self.lessons)
         return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class FrozenMemorySnapshot:
+    """Frozen memory snapshot for a single turn.
+
+    This is a value object that captures memory at a point in time,
+    ensuring the prompt doesn't change during inner-loop iterations.
+    """
+
+    rendered_text: str
+    created_at: datetime
+    session_id: str
+    query: str

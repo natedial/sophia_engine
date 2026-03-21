@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Awaitable, Callable
 
 from sophia.llm.types import Message, Role
 from sophia.memory.store import InMemoryMemoryStore, MemoryStore
-from sophia.memory.types import MemoryLevel, MemoryRecord, MemorySnapshot, utc_now
+from sophia.memory.types import (
+    FrozenMemorySnapshot,
+    MemoryLevel,
+    MemoryRecord,
+    MemorySnapshot,
+    utc_now,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,7 @@ class MemoryManagerConfig:
     semantic_recall_k: int = 3
     lesson_promotion_min_repeats: int = 2
     max_item_chars: int = 240
+    max_snapshot_chars: int = 3000
     compaction_enabled: bool = True
     compaction_every_n_turns: int = 10
     compaction_max_episodic_per_session: int = 120
@@ -100,6 +109,32 @@ class MemoryManager:
             query=query,
             messages=messages,
         ).to_prompt_text()
+
+    def freeze_for_turn(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        messages: list[Message],
+    ) -> FrozenMemorySnapshot:
+        """Build a frozen memory snapshot for the current turn.
+
+        This captures memory once per outer turn, ensuring the prompt
+        remains stable during inner-loop iterations while still
+        reflecting the latest conversation state.
+        """
+        snapshot = self.recall(
+            session_id=session_id,
+            query=query,
+            messages=messages,
+        )
+        text = snapshot.to_prompt_text(max_chars=self.config.max_snapshot_chars)
+        return FrozenMemorySnapshot(
+            rendered_text=text,
+            created_at=utc_now(),
+            session_id=session_id,
+            query=query,
+        )
 
     def ingest_turn(
         self,
@@ -224,6 +259,66 @@ class MemoryManager:
             )
         )
         self.store.delete_ids([rec.id for rec in compact_batch])
+
+    async def compact_session_with_model(
+        self,
+        *,
+        session_id: str,
+        summarizer: Callable[[str], Awaitable[str]],
+    ) -> bool:
+        """Compact using an LLM for higher-quality summaries.
+
+        This runs asynchronously and does not block the user-facing path.
+        Falls back to heuristic compaction if the summarizer fails.
+        """
+        episodic = self.store.list_records(
+            session_id=session_id,
+            levels={MemoryLevel.EPISODIC},
+            limit=None,
+            newest_first=False,
+        )
+        count = len(episodic)
+        if count <= self.config.compaction_max_episodic_per_session:
+            return False
+
+        overflow = count - self.config.compaction_max_episodic_per_session
+        batch_size = max(1, min(self.config.compaction_batch_size, count - 1))
+        to_compact_count = min(batch_size, overflow if overflow > 0 else batch_size)
+        compact_batch = episodic[:to_compact_count]
+        if not compact_batch:
+            return False
+
+        transcript = "\n".join(f"- {rec.content}" for rec in compact_batch)
+
+        try:
+            summary = await summarizer(transcript)
+            if not summary or not summary.strip():
+                raise ValueError("Empty summary returned")
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "model_compaction_failed session_id=%s, falling back to heuristic",
+                session_id,
+            )
+            self.compact_session(session_id=session_id)
+            return False
+
+        self.store.add(
+            MemoryRecord(
+                level=MemoryLevel.SEMANTIC,
+                session_id=session_id,
+                content=summary,
+                tags={"compaction", "episodic_summary", "model_generated"},
+                salience=self._average_salience(compact_batch),
+                metadata={
+                    "source": "compaction_llm",
+                    "compacted_ids": [rec.id for rec in compact_batch],
+                },
+            )
+        )
+        self.store.delete_ids([rec.id for rec in compact_batch])
+        return True
 
     def _build_working_memory(self, messages: list[Message]) -> list[str]:
         relevant: list[str] = []
@@ -446,20 +541,14 @@ class MemoryManager:
         if cached is not None:
             return cached
 
-        known = {
-            self._normalize_lesson(rec.content)
-            for rec in self._seed_lesson_records
-        }
+        known = {self._normalize_lesson(rec.content) for rec in self._seed_lesson_records}
         records = self.store.list_records(
             session_id=session_id,
             levels={MemoryLevel.LESSONS},
             limit=None,
             newest_first=True,
         )
-        known.update(
-            self._normalize_lesson(rec.content)
-            for rec in records
-        )
+        known.update(self._normalize_lesson(rec.content) for rec in records)
         known.discard("")
         self._known_lessons[session_id] = known
         return known
@@ -468,7 +557,7 @@ class MemoryManager:
     def _normalize_lesson(text: str) -> str:
         normalized = text.strip().lower()
         if normalized.startswith("lesson:"):
-            normalized = normalized[len("lesson:"):].strip()
+            normalized = normalized[len("lesson:") :].strip()
         return " ".join(normalized.split())
 
     def _clean_clause(self, text: str) -> str:
