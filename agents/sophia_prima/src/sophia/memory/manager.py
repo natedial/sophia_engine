@@ -9,10 +9,11 @@ from datetime import datetime
 from typing import Awaitable, Callable
 
 from sophia.llm.types import Message, Role
-from sophia.memory.store import InMemoryMemoryStore, MemoryStore
+from sophia.memory.store import InMemoryMemoryStore, MemoryStore, score_records
 from sophia.memory.types import (
     FrozenMemorySnapshot,
     MemoryLevel,
+    MemoryMatch,
     MemoryRecord,
     MemorySnapshot,
     utc_now,
@@ -28,6 +29,7 @@ class MemoryManagerConfig:
     lessons_recall_k: int = 4
     episodic_recall_k: int = 3
     semantic_recall_k: int = 3
+    resource_recall_k: int = 2
     lesson_promotion_min_repeats: int = 2
     max_item_chars: int = 240
     max_snapshot_chars: int = 3000
@@ -80,15 +82,19 @@ class MemoryManager:
                 limit=self.config.episodic_recall_k,
             )
         ]
-        semantic = [
-            m.record
-            for m in self.store.query(
-                session_id=session_id,
-                query=query,
-                levels={MemoryLevel.SEMANTIC},
-                limit=self.config.semantic_recall_k,
-            )
-        ]
+        resource_semantic = self._query_semantic_records(
+            session_id=session_id,
+            query=query,
+            limit=self.config.resource_recall_k,
+            resources_only=True,
+        )
+        general_semantic = self._query_semantic_records(
+            session_id=session_id,
+            query=query,
+            limit=self.config.semantic_recall_k,
+            resources_only=False,
+        )
+        semantic = resource_semantic + general_semantic
         return MemorySnapshot(
             lessons=lessons,
             working_lines=working_lines,
@@ -181,6 +187,11 @@ class MemoryManager:
                     salience=salience,
                 )
             )
+
+        for record in self._extract_resource_memories(user_text):
+            if self._resource_memory_exists(record.metadata.get("url")):
+                continue
+            self.store.add(record)
 
         if self.config.compaction_enabled:
             turns = self._turns_since_compaction.get(session_id, 0) + 1
@@ -385,6 +396,103 @@ class MemoryManager:
             deduped.append((content, tags, salience))
         return deduped
 
+    def _query_semantic_records(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        limit: int,
+        resources_only: bool,
+    ) -> list[MemoryRecord]:
+        if limit <= 0:
+            return []
+
+        records = self.store.list_records(
+            session_id=session_id,
+            levels={MemoryLevel.SEMANTIC},
+            limit=400,
+            newest_first=True,
+        )
+        filtered = [
+            record
+            for record in records
+            if self._is_resource_record(record) is resources_only
+        ]
+        if not filtered:
+            return []
+
+        matches = score_records(
+            records=filtered,
+            session_id=session_id,
+            query=query,
+            limit=limit,
+            now=utc_now(),
+            semantic_search_enabled=getattr(self.store, "_semantic_search_enabled", True),
+            lexical_weight=getattr(self.store, "_lexical_weight", 0.45),
+            semantic_weight=getattr(self.store, "_semantic_weight", 0.35),
+        )
+        self._touch_matches(matches)
+        return [match.record for match in matches]
+
+    def _extract_resource_memories(self, text: str) -> list[MemoryRecord]:
+        stripped = text.strip()
+        if not stripped:
+            return []
+
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if not lines:
+            return []
+
+        endorsed_urls: list[tuple[str, int]] = []
+        seen_urls: set[str] = set()
+        for idx, line in enumerate(lines):
+            if not self._looks_like_resource_intro(line):
+                continue
+
+            for url in self._extract_urls(line):
+                if url not in seen_urls:
+                    endorsed_urls.append((url, idx))
+                    seen_urls.add(url)
+
+            for follow_idx in range(idx + 1, len(lines)):
+                follow_line = lines[follow_idx]
+                urls = self._extract_urls(follow_line)
+                if urls:
+                    for url in urls:
+                        if url in seen_urls:
+                            continue
+                        endorsed_urls.append((url, idx))
+                        seen_urls.add(url)
+                    continue
+                break
+
+        records: list[MemoryRecord] = []
+        for url, intro_idx in endorsed_urls:
+            topic_hint = self._build_resource_topic_hint(lines[:intro_idx])
+            content = f"User-endorsed resource: {url}."
+            if topic_hint:
+                content = f"User-endorsed resource for {topic_hint}: {url}."
+
+            metadata = {
+                "source": "user_endorsed_resource",
+                "url": url,
+                "user_endorsed": True,
+            }
+            if topic_hint:
+                metadata["topic_hint"] = topic_hint
+
+            records.append(
+                MemoryRecord(
+                    level=MemoryLevel.SEMANTIC,
+                    session_id=None,
+                    content=self._truncate(content),
+                    tags={"resource", "user_endorsed_source", "link"},
+                    salience=0.88,
+                    metadata=metadata,
+                )
+            )
+        return records
+
     def _promote_lesson_candidates(
         self,
         *,
@@ -518,6 +626,35 @@ class MemoryManager:
                 score += 0.1
         return min(score, 0.95)
 
+    def _resource_memory_exists(self, url: object) -> bool:
+        if not isinstance(url, str) or not url:
+            return False
+        existing = self.store.search_by_substring(
+            substring=url,
+            session_id=None,
+            levels={MemoryLevel.SEMANTIC},
+        )
+        for record in existing:
+            if record.metadata.get("source") == "user_endorsed_resource":
+                return True
+        return False
+
+    def _touch_matches(self, matches: list[MemoryMatch]) -> None:
+        now = utc_now()
+        if hasattr(self.store, "_touch"):
+            touch = getattr(self.store, "_touch")
+            try:
+                touch([match.record for match in matches], now)
+                return
+            except Exception:
+                logging.getLogger(__name__).debug("memory_touch_matches_failed", exc_info=True)
+        for match in matches:
+            match.record.touch(now)
+
+    @staticmethod
+    def _is_resource_record(record: MemoryRecord) -> bool:
+        return record.metadata.get("source") == "user_endorsed_resource" or "resource" in record.tags
+
     def _set_seed_lessons(self, lessons: list[str]) -> None:
         self._seed_lesson_records = []
         for raw in lessons:
@@ -566,3 +703,45 @@ class MemoryManager:
         stripped = re.split(r"[.!?]\s", stripped, maxsplit=1)[0]
         stripped = stripped.strip(" -:\t\n")
         return self._truncate(stripped)
+
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        return re.findall(r"https?://[^\s<>\"]+", text)
+
+    @staticmethod
+    def _looks_like_resource_intro(text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            return False
+        markers = (
+            "good resource",
+            "good resources",
+            "helpful resource",
+            "helpful resources",
+            "useful resource",
+            "useful resources",
+            "good source",
+            "good sources",
+            "helpful source",
+            "helpful sources",
+            "useful source",
+            "useful sources",
+            "reference link",
+            "reference links",
+            "resource for this",
+            "resources for this",
+            "source for this",
+            "sources for this",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _build_resource_topic_hint(self, lines: list[str]) -> str:
+        context_lines = [line for line in lines if not self._extract_urls(line)]
+        if not context_lines:
+            return ""
+        hint = " ".join(context_lines[-2:])
+        hint = re.sub(r"^(can|could|would)\s+you\s+", "", hint, flags=re.IGNORECASE)
+        hint = re.sub(r"^please\s+", "", hint, flags=re.IGNORECASE)
+        hint = hint.strip(" .:?")
+        hint = " ".join(hint.split())
+        return self._truncate(hint)

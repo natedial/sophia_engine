@@ -132,6 +132,8 @@ services:
       CANVAS_BASE_URL: http://sophia_canvas:8003
       THOLOS_BASE_URL: http://sophia_tholos:8004
       FED_TRACKER_URL: ${FED_TRACKER_URL:-http://host.docker.internal:8005}
+      READWISE_CLI_PATH: ${READWISE_CLI_PATH:-/usr/local/bin/readwise}
+      READWISE_CLI_CONFIG_PATH: ${READWISE_CLI_CONFIG_PATH:-/root/.readwise-cli.json}
       CANVAS_DASHBOARD_URL: http://localhost:${DASHBOARD_PORT:-13000}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
@@ -141,6 +143,8 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      BRAVE_BASE_URL: ${BRAVE_BASE_URL:-https://api.search.brave.com}
       PERSONALITY_PATH: ${PERSONALITY_PATH:-/workspace/agents/sophia_prima/config/personality.md}
       SOUL_PATH: ${SOUL_PATH:-/workspace/agents/sophia_prima/config/soul.md}
       LESSONS_PATH: ${LESSONS_PATH:-/workspace/agents/sophia_prima/config/LESSONS.md}
@@ -163,6 +167,8 @@ services:
         condition: service_healthy
       sophia_tholos:
         condition: service_healthy
+    volumes:
+      - ${HOME}/.readwise-cli.json:/root/.readwise-cli.json
     healthcheck:
       test:
         - CMD-SHELL

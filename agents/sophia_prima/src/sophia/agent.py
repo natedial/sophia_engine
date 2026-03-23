@@ -181,6 +181,7 @@ class SophiaAgent:
                     lessons_recall_k=self.settings.memory_lessons_top_k,
                     episodic_recall_k=self.settings.memory_episodic_top_k,
                     semantic_recall_k=self.settings.memory_semantic_top_k,
+                    resource_recall_k=self.settings.memory_resource_top_k,
                     lesson_promotion_min_repeats=(
                         self.settings.memory_lesson_promotion_min_repeats
                     ),
@@ -455,6 +456,20 @@ class SophiaAgent:
                     "(e.g. 'Christopher J. Waller', 'Jerome H. Powell').\n"
                     "6) These tools analyze textual/sentiment patterns only — do not use them "
                     "for market pricing inference."
+                )
+            if {"readwise_list_commands", "readwise_run_command"} & set(tool_names):
+                dynamic_context["Readwise policy"] = (
+                    "When using Readwise tools:\n"
+                    "1) Use readwise_list_commands first if you are unsure which Readwise CLI "
+                    "subcommand is available.\n"
+                    "2) Use readwise_run_command with exact CLI subcommands such as "
+                    "`reader-search-documents`, `readwise-search-highlights`, or "
+                    "`reader-create-document`, passing flags as flat args like "
+                    "[`--query`, `aggregation theory`].\n"
+                    "3) Treat Readwise results as the user's private reading context. Quote or "
+                    "summarize only returned material; do not fabricate unread content.\n"
+                    "4) Respect readonly mode if the CLI reports it. Do not retry write commands "
+                    "unless the user explicitly wants to change Readwise settings."
                 )
             handoff_guidance = self._tool_handoff_guidance(context, active_tools)
             if handoff_guidance:
