@@ -26,6 +26,8 @@ RunEventType = Literal[
     "session_resumed",
     "verification_started",
     "verification_finished",
+    "promotion_started",
+    "promotion_finished",
     "artifact_created",
     "run_completed",
     "run_blocked",

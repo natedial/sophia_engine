@@ -9,6 +9,7 @@ from sophia_forge_protocol.run_models import (
     CapabilityHandoff,
     CapabilityHandoffUpdate,
     ControlMessage,
+    PromotionPolicy,
     RunCheckpoint,
     RetentionSummary,
     RunMetricsSummary,
@@ -108,6 +109,7 @@ def test_run_request_uses_retry_policy_defaults() -> None:
         timeout_sec=30.0,
     )
     assert request.retry_policy == RetryPolicy()
+    assert request.promotion_policy == PromotionPolicy()
     assert request.session_id is None
     assert request.long_running_mode is False
 
@@ -215,6 +217,30 @@ def test_execution_policy_supports_environment_and_secret_controls() -> None:
     assert policy.secret_env_vars == ("OPENAI_API_KEY",)
 
 
+def test_run_request_supports_promotion_policy() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+        promotion_policy=PromotionPolicy(
+            mode="draft_pr",
+            base_branch="main",
+            branch_name="forge/scheduler-hook",
+            commit_message="Add scheduler hook",
+            pr_title="Add scheduler hook",
+            draft=True,
+            require_verification_pass=True,
+            require_review=True,
+        ),
+    )
+
+    assert request.promotion_policy.mode == "draft_pr"
+    assert request.promotion_policy.base_branch == "main"
+    assert request.promotion_policy.require_review is True
+
+
 def test_capability_handoff_update_serializes_entries() -> None:
     update = CapabilityHandoffUpdate(
         entries=(
@@ -279,6 +305,18 @@ def test_run_event_uses_canonical_event_taxonomy() -> None:
     assert event.event_type == "run_started"
 
 
+def test_run_event_supports_promotion_events() -> None:
+    event = RunEvent(
+        run_id="forge_run_001",
+        sequence=9,
+        event_type="promotion_finished",
+        timestamp="2026-03-22T12:00:00Z",
+        payload={"mode": "patch", "status": "created"},
+    )
+
+    assert event.event_type == "promotion_finished"
+
+
 def test_run_artifact_supports_payload_metadata() -> None:
     artifact = RunArtifact(
         artifact_id="summary_001",
@@ -291,6 +329,34 @@ def test_run_artifact_supports_payload_metadata() -> None:
     )
 
     assert artifact.payload == {"status": "completed"}
+
+
+def test_run_artifact_supports_patch_artifacts() -> None:
+    artifact = RunArtifact(
+        artifact_id="patch_001",
+        run_id="forge_run_001",
+        artifact_type="patch",
+        content_type="text/x-diff",
+        path=".sophia/forge/runs/forge_run_001/promotion/changes.patch",
+        payload={"mode": "patch"},
+        created_at="2026-03-22T12:00:00Z",
+    )
+
+    assert artifact.artifact_type == "patch"
+
+
+def test_run_artifact_supports_pr_request_artifacts() -> None:
+    artifact = RunArtifact(
+        artifact_id="pr_request_001",
+        run_id="forge_run_001",
+        artifact_type="pr_request",
+        content_type="application/json",
+        path=".sophia/forge/runs/forge_run_001/promotion/pull_request.json",
+        payload={"mode": "draft_pr"},
+        created_at="2026-03-22T12:00:00Z",
+    )
+
+    assert artifact.artifact_type == "pr_request"
 
 
 def test_verification_result_serializes_structured_outcome() -> None:

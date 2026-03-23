@@ -607,6 +607,50 @@ def test_subagent_planner_adds_coding_worker_for_missing_compute_or_scheduler() 
     assert {task.profile_name for task in compute_gap_tasks} == {"coding_worker"}
 
 
+def test_subagent_planner_adds_coding_worker_for_explicit_repo_write_requests() -> None:
+    orchestrator = SubagentOrchestrator(
+        profiles={
+            "research_worker": SubagentProfile(name="research_worker", instructions=""),
+            "quant_worker": SubagentProfile(name="quant_worker", instructions=""),
+            "chart_worker": SubagentProfile(name="chart_worker", instructions=""),
+            "citation_auditor": SubagentProfile(name="citation_auditor", instructions=""),
+            "memory_curator": SubagentProfile(name="memory_curator", instructions=""),
+            "coding_worker": SubagentProfile(name="coding_worker", instructions=""),
+        },
+        max_parallel_workers=2,
+    )
+
+    tasks = orchestrator.plan_for_message(
+        message="Please write this into our codebase and open a PR.",
+        available_tools=[],
+        canvas_id=None,
+    )
+
+    assert {task.profile_name for task in tasks} == {"coding_worker"}
+
+
+def test_subagent_planner_adds_coding_worker_for_tool_build_and_deploy_requests() -> None:
+    orchestrator = SubagentOrchestrator(
+        profiles={
+            "research_worker": SubagentProfile(name="research_worker", instructions=""),
+            "quant_worker": SubagentProfile(name="quant_worker", instructions=""),
+            "chart_worker": SubagentProfile(name="chart_worker", instructions=""),
+            "citation_auditor": SubagentProfile(name="citation_auditor", instructions=""),
+            "memory_curator": SubagentProfile(name="memory_curator", instructions=""),
+            "coding_worker": SubagentProfile(name="coding_worker", instructions=""),
+        },
+        max_parallel_workers=2,
+    )
+
+    tasks = orchestrator.plan_for_message(
+        message="Build and deploy a Telegram delivery tool for long-form reports.",
+        available_tools=[],
+        canvas_id=None,
+    )
+
+    assert {task.profile_name for task in tasks} == {"coding_worker"}
+
+
 @pytest.mark.asyncio
 async def test_gateway_skill_service_generates_artifacts(tmp_path) -> None:
     class FakePylon:

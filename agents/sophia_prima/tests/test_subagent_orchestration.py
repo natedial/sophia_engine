@@ -12,6 +12,7 @@ from sophia.events import EventType
 from sophia.llm.types import CompletionResponse, Message, Role, StopReason, TokenUsage
 from sophia.memory import MemoryManager, MemoryManagerConfig
 from sophia.memory.store import InMemoryMemoryStore
+from sophia.subagents import SubagentResult
 
 
 class DummyToolDef:
@@ -107,7 +108,11 @@ def _build_settings(tmp_path: Path, **overrides) -> Settings:
         subagents_default_max_tool_iterations=2,
         subagents_default_token_budget_chars=2000,
         subagents_default_max_result_chars=300,
-        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+        agent_fs_read_allowlist=(
+            f"{tmp_path / 'config'},"
+            "/Users/ncdial/devwork/sophia_engine/agents/sophia_prima/config,"
+            ".sophia"
+        ),
     )
     base.update(overrides)
     return Settings(**base)
@@ -234,3 +239,91 @@ async def test_subagent_token_budget_emits_error_event(tmp_path: Path) -> None:
     }
     for error_event in budget_errors:
         assert error_event.data["run_id"] == start_run_ids[error_event.data["task_id"]]
+
+
+@pytest.mark.asyncio
+async def test_agent_delegates_explicit_repo_write_requests_to_coding_worker(tmp_path: Path) -> None:
+    provider = DelegationProvider()
+    agent = _build_agent(tmp_path, provider)
+    context = ConversationContext(session_id="session-subagents-coding")
+
+    async def _fake_run_coding_worker_task(*, task, profile, parent_run_id):
+        return SubagentResult(
+            task_id=task.task_id,
+            profile_name=profile.name,
+            run_id=f"{parent_run_id}:{task.task_id}",
+            success=True,
+            content="Implemented directly in the repo.",
+            metadata={
+                "delegated_execution": {
+                    "backend": "codex",
+                    "runtime_mode_requested": "forge_service",
+                    "runtime_mode_effective": "forge_service",
+                    "forge_used": True,
+                    "changed_files": ["scripts/render_and_send.py"],
+                }
+            },
+        )
+
+    agent._run_coding_worker_task = _fake_run_coding_worker_task  # type: ignore[method-assign]
+
+    events = [
+        event
+        async for event in agent.run(
+            "Write this into our codebase and open a PR for the new Telegram report tool.",
+            context,
+        )
+    ]
+
+    coding_starts = [
+        e for e in events if e.type == EventType.SUBAGENT_START and e.data.get("name") == "coding_worker"
+    ]
+    coding_ends = [
+        e for e in events if e.type == EventType.SUBAGENT_END and e.data.get("name") == "coding_worker"
+    ]
+
+    assert len(coding_starts) == 1
+    assert len(coding_ends) == 1
+    assert coding_starts[0].data["task_id"] == "coding"
+    assert coding_ends[0].data["task_id"] == "coding"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_prompt_includes_recent_forge_execution_trace(tmp_path: Path) -> None:
+    provider = DelegationProvider()
+    agent = _build_agent(tmp_path, provider)
+    context = ConversationContext(session_id="session-subagents-follow-up")
+
+    async def _fake_run_coding_worker_task(*, task, profile, parent_run_id):
+        return SubagentResult(
+            task_id=task.task_id,
+            profile_name=profile.name,
+            run_id=f"{parent_run_id}:{task.task_id}",
+            success=True,
+            content="Implemented directly in the repo.",
+            metadata={
+                "delegated_execution": {
+                    "backend": "codex",
+                    "runtime_mode_requested": "forge_service",
+                    "runtime_mode_effective": "forge_service",
+                    "forge_used": True,
+                    "changed_files": ["scripts/render_and_send.py"],
+                }
+            },
+        )
+
+    agent._run_coding_worker_task = _fake_run_coding_worker_task  # type: ignore[method-assign]
+
+    _ = [
+        event
+        async for event in agent.run(
+            "Write this into our codebase and open a PR for the new Telegram report tool.",
+            context,
+        )
+    ]
+    _ = [event async for event in agent.run("Did you use our Forge tool?", context)]
+
+    parent_prompts = [p for p in provider.system_prompts if "SUBAGENT PROFILE:" not in p]
+    assert "Recent delegated execution" in parent_prompts[-1]
+    assert "runtime=forge_service" in parent_prompts[-1]
+    assert "forge_used=yes" in parent_prompts[-1]

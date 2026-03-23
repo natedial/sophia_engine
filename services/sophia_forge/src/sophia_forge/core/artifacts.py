@@ -143,6 +143,62 @@ class ArtifactManager:
             index=900,
         )
 
+    def persist_promotion_status(
+        self,
+        *,
+        run_id: str,
+        payload: dict[str, object],
+    ) -> RunArtifact:
+        run_dir = self._ensure_run_dir(run_id)
+        promotion_dir = run_dir / "promotion"
+        promotion_dir.mkdir(parents=True, exist_ok=True)
+        return self._write_artifact(
+            run_id=run_id,
+            artifact_type="promotion_status",
+            path=promotion_dir / "status.json",
+            payload=payload,
+            index=950,
+        )
+
+    def persist_patch_artifact(
+        self,
+        *,
+        run_id: str,
+        patch_text: str,
+        payload: dict[str, object] | None = None,
+    ) -> RunArtifact:
+        run_dir = self._ensure_run_dir(run_id)
+        promotion_dir = run_dir / "promotion"
+        promotion_dir.mkdir(parents=True, exist_ok=True)
+        path = promotion_dir / "changes.patch"
+        path.write_text(patch_text, encoding="utf-8")
+        return RunArtifact(
+            artifact_id=f"{_sanitize_run_id(run_id)}_patch_951",
+            run_id=run_id,
+            artifact_type="patch",
+            content_type="text/x-diff",
+            path=str(path),
+            payload=payload,
+            created_at=_utc_now(),
+        )
+
+    def persist_pr_request(
+        self,
+        *,
+        run_id: str,
+        payload: dict[str, object],
+    ) -> RunArtifact:
+        run_dir = self._ensure_run_dir(run_id)
+        promotion_dir = run_dir / "promotion"
+        promotion_dir.mkdir(parents=True, exist_ok=True)
+        return self._write_artifact(
+            run_id=run_id,
+            artifact_type="pr_request",
+            path=promotion_dir / "pull_request.json",
+            payload=payload,
+            index=952,
+        )
+
     def write_artifact_index(self, *, run_id: str, artifacts: tuple[RunArtifact, ...]) -> None:
         self._write_artifact_index(run_id=run_id, artifacts=artifacts)
 

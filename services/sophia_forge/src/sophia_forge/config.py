@@ -43,3 +43,12 @@ class ForgeSettings(BaseModel):
     environment_retention_days: int = 7
     run_artifact_retention_days: int = 30
     eval_artifact_retention_days: int = 30
+    git_author_name: str = "Sophia Forge"
+    git_author_email: str = "forge@example.local"
+    git_remote_name: str = "origin"
+    git_host_provider: Literal["disabled", "github", "gitlab"] = "disabled"
+    git_host_request_timeout_sec: float = 15.0
+    github_api_base_url: str = "https://api.github.com"
+    github_token_env_var: str = "GITHUB_TOKEN"
+    gitlab_api_base_url: str = "https://gitlab.com/api/v4"
+    gitlab_token_env_var: str = "GITLAB_TOKEN"

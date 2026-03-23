@@ -18,6 +18,9 @@ ArtifactType = Literal[
     "summary",
     "run_result",
     "capability_adoption",
+    "promotion_status",
+    "pr_request",
+    "patch",
 ]
 
 

@@ -132,10 +132,90 @@ class SubagentOrchestrator:
                 "set up",
                 "setup",
                 "plumb",
+                "save",
+                "commit",
+                "patch",
+                "deploy",
+                "ship",
+                "release",
             )
         )
+        wants_tool_build = wants_engineering_action and _contains_any(
+            lowered,
+            (
+                " tool",
+                "tool ",
+                "tools",
+                "skill",
+                "connector",
+                "integration",
+                "endpoint",
+                "api",
+                "command",
+                "automation",
+                "workflow",
+                "bot",
+            ),
+        )
+        wants_repo_mutation = (
+            _contains_any(
+                lowered,
+                (
+                    "save this to our codebase",
+                    "save this to the codebase",
+                    "save this to our repo",
+                    "save this to the repo",
+                    "write this into our codebase",
+                    "write this into the codebase",
+                    "write this into our repo",
+                    "write this into the repo",
+                    "write it into our codebase",
+                    "write it into our repo",
+                    "put it in our codebase",
+                    "put it in the repo",
+                    "build it in our codebase",
+                    "build it in the repo",
+                    "check it into the repo",
+                    "open a pr",
+                    "open the pr",
+                    "pull request",
+                    "commit this",
+                    "commit it",
+                    "apply the patch",
+                    "apply this diff",
+                ),
+            )
+            or (
+                _contains_any(lowered, ("repo", "repository", "codebase", "branch"))
+                and _contains_any(
+                    lowered,
+                    ("save", "write", "put", "add", "build", "implement", "commit", "patch"),
+                )
+            )
+        )
+        wants_deployment_work = _contains_any(
+            lowered,
+            (
+                "deploy this",
+                "deployment config",
+                "deployment pipeline",
+                "release this",
+                "ship this",
+                "roll this out",
+                "roll it out",
+            ),
+        )
         if not any((wants_research, wants_quant, wants_citation_audit, wants_memory, wants_chart)):
-            if not any((wants_scheduler, wants_data_pipeline, wants_engineering_action)):
+            if not any(
+                (
+                    wants_scheduler,
+                    wants_data_pipeline,
+                    wants_engineering_action,
+                    wants_tool_build,
+                    wants_repo_mutation,
+                    wants_deployment_work,
+                )
+            ):
                 return []
 
         tool_names = {t.name for t in available_tools}
@@ -163,6 +243,15 @@ class SubagentOrchestrator:
         if wants_data_pipeline and wants_engineering_action:
             should_delegate_coding = True
             coding_reasons.append("data pipeline/integration work is requested")
+        if wants_tool_build:
+            should_delegate_coding = True
+            coding_reasons.append("tooling/capability implementation is requested")
+        if wants_repo_mutation:
+            should_delegate_coding = True
+            coding_reasons.append("explicit repo/codebase mutation is requested")
+        if wants_deployment_work:
+            should_delegate_coding = True
+            coding_reasons.append("deployment workflow work is requested")
         if wants_research and has_data_tools:
             tasks.append(
                 SubagentTask(
@@ -303,3 +392,7 @@ class SubagentOrchestrator:
         for fut in asyncio.as_completed(futures):
             results.append(await fut)
         return results
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sophia_forge.core.artifacts import ArtifactManager
 from sophia_forge.core.environments import EnvironmentManager
 from sophia_forge.core.outcomes import is_retryable_failure
+from sophia_forge.core.promotion import PromotionManager
 from sophia_forge.core.verification import VerificationRunner, summarize_verification
 from sophia_forge.core.workspaces import WorkspaceManager
 from sophia_forge_protocol.event_models import RunEvent
@@ -33,6 +34,7 @@ class RuntimeScheduler:
         max_concurrent_runs: int = 1,
         workspace_manager: WorkspaceManager | None = None,
         environment_manager: EnvironmentManager | None = None,
+        promotion_manager: PromotionManager | None = None,
     ) -> None:
         self.run_store = run_store
         self.artifact_manager = artifact_manager
@@ -40,6 +42,7 @@ class RuntimeScheduler:
         self.executor = executor or self._default_executor
         self.workspace_manager = workspace_manager or WorkspaceManager(artifact_manager.settings)
         self.environment_manager = environment_manager or EnvironmentManager(artifact_manager.settings)
+        self.promotion_manager = promotion_manager or PromotionManager(artifact_manager)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrent_runs))
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -182,18 +185,6 @@ class RuntimeScheduler:
                             "verification": list(result.verification),
                         },
                     )
-                artifacts_tuple = tuple(artifacts)
-                self.run_store.replace_artifacts(run_id, artifacts_tuple)
-                self.artifact_manager.write_artifact_index(run_id=run_id, artifacts=artifacts_tuple)
-                for artifact in artifacts_tuple:
-                    self._append_event(
-                        run_id,
-                        event_type="artifact_created",
-                        payload={
-                            "artifact_id": artifact.artifact_id,
-                            "artifact_type": artifact.artifact_type,
-                        },
-                    )
                 if checkpoint_record is not None:
                     self._append_event(
                         run_id,
@@ -209,6 +200,39 @@ class RuntimeScheduler:
                         event_type="verification_finished",
                         payload={"count": len(verification_results)},
                     )
+                self._append_event(
+                    run_id,
+                    event_type="promotion_started",
+                    payload={"mode": finalized_request.promotion_policy.mode},
+                )
+                promotion = self.promotion_manager.promote(
+                    request=finalized_request,
+                    result=result,
+                    verification_results=verification_results,
+                )
+                artifacts.extend(promotion.artifacts)
+                artifacts_tuple = tuple(artifacts)
+                self.run_store.replace_artifacts(run_id, artifacts_tuple)
+                self.artifact_manager.write_artifact_index(run_id=run_id, artifacts=artifacts_tuple)
+                for artifact in artifacts_tuple:
+                    self._append_event(
+                        run_id,
+                        event_type="artifact_created",
+                        payload={
+                            "artifact_id": artifact.artifact_id,
+                            "artifact_type": artifact.artifact_type,
+                        },
+                    )
+                self._append_event(
+                    run_id,
+                    event_type="promotion_finished",
+                    payload={
+                        "mode": promotion.mode,
+                        "status": promotion.status,
+                        "message": promotion.message,
+                        "artifact_ids": [artifact.artifact_id for artifact in promotion.artifacts],
+                    },
+                )
                 finalized = result.model_copy(
                     update={
                         "run_id": run_id,

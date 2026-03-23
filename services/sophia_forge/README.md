@@ -77,3 +77,10 @@ Phase 4 additions:
 - service API now exposes capability registry listing and upsert operations for adopted Sophia-facing tools
 - temporary bridge execution path removed; forge now runs through native service backends only
 - local ops path is explicit via `python -m sophia_forge`
+
+Promotion support today:
+
+- `promotion_policy.mode=patch` writes a durable patch artifact after verification
+- `promotion_policy.mode=draft_pr` prepares a local branch and commit plus a PR request artifact
+- optional GitHub/GitLab publication is supported through configurable git-host providers when remotes and tokens are available
+- `direct_commit` and `deploy_after_merge` are still contract-only modes and currently return blocked promotion status
