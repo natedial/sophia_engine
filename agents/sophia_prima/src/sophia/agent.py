@@ -44,6 +44,8 @@ from sophia.llm.types import (
 )
 from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_store
 from sophia.personality.loader import Personality, load_personality
+from sophia.presentation import PresentationRegistry
+from sophia.presentation.models import PresentationPromptContext
 from sophia.forge_client import ForgeClient
 from sophia.skills.models import SkillMatch
 from sophia.skills.registry import SkillRegistry
@@ -212,6 +214,18 @@ class SophiaAgent:
         self.get_follow_up_messages = get_follow_up_messages
         self.personality = self._load_personality()
         self.soul = self._load_soul()
+        self.presentation = (
+            PresentationRegistry(
+                core_path=self.settings.presentation_core_path,
+                channels_path=self.settings.presentation_channels_path,
+                rendering_path=self.settings.presentation_rendering_path,
+                skills_root=self.settings.skills_path,
+                max_loaded_chars=self.settings.skills_max_loaded_chars,
+                read_policy=self.read_policy,
+            )
+            if self.settings.presentation_enabled
+            else None
+        )
         self.skills = SkillRegistry(
             skills_root=self.settings.skills_path,
             enabled=(
@@ -380,8 +394,10 @@ class SophiaAgent:
         memory_context: str | None = None,
         active_skill: SkillMatch | None = None,
         active_tools: list[ToolSchema] | None = None,
+        session_recall_context: str | None = None,
         subagent_context: str | None = None,
         research_plan_context: str | None = None,
+        presentation_context: PresentationPromptContext | None = None,
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
@@ -503,11 +519,34 @@ class SophiaAgent:
         if memory_context:
             dynamic_context["Memory context"] = memory_context
 
+        if session_recall_context:
+            dynamic_context["Relevant past sessions"] = session_recall_context
+
         if subagent_context:
             dynamic_context["Subagent findings"] = subagent_context
 
+        recent_subagent_execution = self._recent_subagent_execution_guidance(context)
+        if recent_subagent_execution:
+            dynamic_context["Recent delegated execution"] = recent_subagent_execution
+
         if research_plan_context:
             dynamic_context["Research plan"] = research_plan_context
+
+        if presentation_context is not None:
+            if presentation_context.core_guidance:
+                dynamic_context["Presentation policy"] = presentation_context.core_guidance
+            if presentation_context.channel_summary:
+                dynamic_context["Channel presentation constraints"] = (
+                    presentation_context.channel_summary
+                )
+            if presentation_context.guide is not None:
+                guide_lines = [f"Name: {presentation_context.guide.name}"]
+                if presentation_context.guide.description:
+                    guide_lines.append(f"Description: {presentation_context.guide.description}")
+                if presentation_context.guide.body:
+                    guide_lines.append("Instructions:")
+                    guide_lines.append(presentation_context.guide.body)
+                dynamic_context["Active presentation SOP"] = "\n".join(guide_lines)
 
         if active_skill is not None:
             active_lines = [f"Name: {active_skill.skill.name}"]
@@ -937,6 +976,72 @@ class SophiaAgent:
             if msg.role == Role.USER and msg.content:
                 return msg.content
         return ""
+
+    @staticmethod
+    def _should_attempt_session_recall(message: str) -> bool:
+        normalized = re.sub(r"\s+", " ", message).strip()
+        if len(normalized) < 24 or len(normalized.split()) < 4:
+            return False
+        if re.fullmatch(
+            r"(?i)(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|great|who are you)[!. ]*",
+            normalized,
+        ):
+            return False
+        return not bool(
+            re.search(
+                r"(?i)\b(joke|poem|haiku|story|greeting|introduce yourself)\b",
+                normalized,
+            )
+        )
+
+    def _format_session_recall_context(self, results: list[Any]) -> str | None:
+        if not results:
+            return None
+
+        max_excerpt_chars = max(80, self.settings.history_session_recall_max_excerpt_chars)
+        lines = [
+            "Use these only if they are clearly relevant. Treat them as prior context, not as current facts.",
+        ]
+        for idx, result in enumerate(results, start=1):
+            earliest = result.earliest.date().isoformat()
+            latest = result.latest.date().isoformat()
+            lines.append(
+                f"Session {idx} | matches={result.match_count} | range={earliest} to {latest}"
+            )
+            for excerpt in result.excerpts[
+                : self.settings.history_session_recall_max_excerpts_per_session
+            ]:
+                cleaned = re.sub(r"\s+", " ", excerpt).strip()
+                if len(cleaned) > max_excerpt_chars:
+                    cleaned = f"{cleaned[: max_excerpt_chars - 3].rstrip()}..."
+                lines.append(f"- {cleaned}")
+        return "\n".join(lines)
+
+    def _build_session_recall_context(
+        self,
+        *,
+        session_id: str,
+        query: str,
+    ) -> str | None:
+        if self.history is None or not self.settings.history_session_recall_enabled:
+            return None
+        if not self._should_attempt_session_recall(query):
+            return None
+
+        try:
+            results = self.history.search_sessions(
+                query=query,
+                exclude_session_ids={session_id},
+                max_sessions=max(1, self.settings.history_session_recall_top_k),
+                max_results_per_session=max(
+                    1, self.settings.history_session_recall_max_excerpts_per_session
+                ),
+            )
+        except Exception:
+            logger.exception("session_history_recall_failed session_id=%s", session_id)
+            return None
+
+        return self._format_session_recall_context(results)
 
     async def _execute_tool(self, tool_call: ToolCall, allowed: set[str]) -> ToolResult:
         if tool_call.name not in allowed:
@@ -1438,6 +1543,87 @@ class SophiaAgent:
         lines.append("Use these findings as additional context and validate where needed.")
         return "\n".join(lines)
 
+    @staticmethod
+    def _remember_recent_subagent_runs(
+        context: ConversationContext,
+        results: list[SubagentResult],
+    ) -> None:
+        existing = context.metadata.get("recent_subagent_runs")
+        if not isinstance(existing, list):
+            existing = []
+
+        for result in results:
+            entry: dict[str, object] = {
+                "task_id": result.task_id,
+                "profile_name": result.profile_name,
+                "run_id": result.run_id,
+                "success": result.success,
+                "timed_out": result.timed_out,
+            }
+            if result.content:
+                entry["content"] = result.content
+            if result.error:
+                entry["error"] = result.error
+            delegated_execution = result.metadata.get("delegated_execution")
+            if isinstance(delegated_execution, dict) and delegated_execution:
+                entry["delegated_execution"] = delegated_execution
+            existing.append(entry)
+
+        context.metadata["recent_subagent_runs"] = existing[-8:]
+
+    @staticmethod
+    def _recent_subagent_execution_guidance(
+        context: ConversationContext | None,
+    ) -> str | None:
+        if context is None:
+            return None
+        entries = context.metadata.get("recent_subagent_runs")
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        lines: list[str] = []
+        for entry in entries[-4:]:
+            if not isinstance(entry, dict):
+                continue
+            profile_name = str(entry.get("profile_name") or "").strip() or "unknown"
+            run_id = str(entry.get("run_id") or "").strip()
+            status = "completed" if bool(entry.get("success")) else "failed"
+            if bool(entry.get("timed_out")):
+                status = "timed_out"
+            parts = [profile_name]
+            if run_id:
+                parts.append(f"run_id={run_id}")
+            parts.append(f"status={status}")
+            delegated_execution = entry.get("delegated_execution")
+            if isinstance(delegated_execution, dict):
+                requested_mode = str(delegated_execution.get("runtime_mode_requested") or "").strip()
+                effective_mode = str(delegated_execution.get("runtime_mode_effective") or "").strip()
+                backend = str(delegated_execution.get("backend") or "").strip()
+                if backend:
+                    parts.append(f"backend={backend}")
+                if effective_mode:
+                    parts.append(f"runtime={effective_mode}")
+                elif requested_mode:
+                    parts.append(f"runtime={requested_mode}")
+                if bool(delegated_execution.get("forge_used")):
+                    parts.append("forge_used=yes")
+                elif requested_mode == "forge_service":
+                    parts.append("forge_used=no")
+                changed_files = delegated_execution.get("changed_files")
+                if isinstance(changed_files, list) and changed_files:
+                    parts.append(
+                        "changed_files=" + ", ".join(str(item) for item in changed_files[:4])
+                    )
+            lines.append("- " + "; ".join(parts))
+
+        if not lines:
+            return None
+        return (
+            "Use this recent execution trace when the user asks what the agent used or whether Forge ran. "
+            "Do not deny use of a listed runtime or worker.\n"
+            + "\n".join(lines)
+        )
+
     async def _run_subagent_task(
         self,
         task: SubagentTask,
@@ -1578,12 +1764,21 @@ class SophiaAgent:
                 },
             )
         )
+        configured_runtime_mode = self.settings.coding_runtime_mode.strip().lower() or "inline"
+        run_events = client.get_run_events(sub_run_id)
+        effective_runtime_mode = configured_runtime_mode
+        if any(
+            event.event_type == "run_failed"
+            and str(event.payload.get("fallback") or "").strip().lower() == "inline"
+            for event in run_events
+        ):
+            effective_runtime_mode = "inline"
         adoption_report = self._verify_capability_adoption(execution.capabilities_added)
         if execution.capabilities_added:
             client.persist_capability_adoption(
                 run_id=sub_run_id,
                 report=adoption_report,
-                mode=self.settings.coding_runtime_mode.strip().lower() or "inline",
+                mode=configured_runtime_mode,
             )
             await client.persist_capability_handoffs(
                 run_id=sub_run_id,
@@ -1638,6 +1833,13 @@ class SophiaAgent:
                     cap.model_dump(mode="json") for cap in execution.capabilities_added
                 ],
                 "capability_adoption_report": adoption_report.model_dump(mode="json"),
+                "delegated_execution": {
+                    "backend": self.settings.coding_worker_backend.strip().lower() or "codex",
+                    "runtime_mode_requested": configured_runtime_mode,
+                    "runtime_mode_effective": effective_runtime_mode,
+                    "forge_used": effective_runtime_mode == "forge_service",
+                    "changed_files": list(execution.changed_files),
+                },
             },
         )
 
@@ -1720,6 +1922,7 @@ class SophiaAgent:
                         task_id=result.task_id,
                     )
             if results:
+                self._remember_recent_subagent_runs(context, results)
                 for result in results:
                     capability_payloads = result.metadata.get("capabilities_added", [])
                     report_payload = result.metadata.get("capability_adoption_report")
@@ -1787,6 +1990,19 @@ class SophiaAgent:
                 )
             turn_tools = self._scope_tools_for_skill(available_tools, active_skill)
             allowed_tool_names = {tool.name for tool in turn_tools}
+            session_recall_context = self._build_session_recall_context(
+                session_id=context.session_id,
+                query=active_user_message,
+            )
+            channel = str(context.metadata.get("channel") or "").strip()
+            presentation_context = (
+                self.presentation.resolve_prompt_context(
+                    channel=channel,
+                    user_message=active_user_message,
+                )
+                if self.presentation is not None
+                else None
+            )
             memory_snapshot = self.memory.freeze_for_turn(
                 session_id=context.session_id,
                 query=active_user_message,
@@ -1798,8 +2014,10 @@ class SophiaAgent:
                 memory_context,
                 active_skill=active_skill,
                 active_tools=turn_tools,
+                session_recall_context=session_recall_context,
                 subagent_context=subagent_context,
                 research_plan_context=research_plan_context,
+                presentation_context=presentation_context,
             )
             iterations = 0
             last_message: Message | None = None

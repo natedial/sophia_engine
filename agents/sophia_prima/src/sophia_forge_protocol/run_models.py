@@ -49,6 +49,14 @@ EnvironmentCleanupPolicy = Literal[
     "cleanup_on_success",
     "cleanup_always",
 ]
+PromotionMode = Literal[
+    "inherit",
+    "none",
+    "patch",
+    "draft_pr",
+    "direct_commit",
+    "deploy_after_merge",
+]
 
 
 class CapabilityAdded(BaseModel):
@@ -168,6 +176,24 @@ class RetryPolicy(BaseModel):
     max_backoff_sec: float = 30.0
 
 
+class PromotionPolicy(BaseModel):
+    """Caller intent for how a verified change should be promoted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PromotionMode = "inherit"
+    base_branch: str | None = None
+    branch_name: str | None = None
+    commit_message: str | None = None
+    pr_title: str | None = None
+    pr_body: str | None = None
+    draft: bool = True
+    require_verification_pass: bool = True
+    require_review: bool = True
+    auto_deploy_after_merge: bool = False
+    deployment_environment: str | None = None
+
+
 class RunSession(BaseModel):
     """Durable long-running session that can span multiple forge runs."""
 
@@ -262,6 +288,7 @@ class RunRequest(BaseModel):
     timeout_sec: float
     execution_policy: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    promotion_policy: PromotionPolicy = Field(default_factory=PromotionPolicy)
     verification_policy: VerificationPolicy = Field(default_factory=VerificationPolicy)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

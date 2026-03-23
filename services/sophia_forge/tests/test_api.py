@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -21,6 +22,24 @@ async def _fake_executor(request: RunRequest) -> RunResult:
         summary="Implemented the requested capability.",
         changed_files=("services/foo/tool.py",),
     )
+
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "forge-tests@example.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Forge Tests"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return path
 
 
 def _wait_for_terminal_run(client: TestClient, run_id: str, *, timeout_sec: float = 1.0) -> dict:
@@ -102,6 +121,177 @@ def test_forge_api_creates_and_completes_run(tmp_path) -> None:
         artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["artifacts"]
         artifact_types = {artifact["artifact_type"] for artifact in artifacts}
         assert {"task_spec", "run_result", "changed_files", "summary"} <= artifact_types
+
+
+def test_forge_api_creates_patch_promotion_artifacts(tmp_path) -> None:
+    repo_root = _init_git_repo(tmp_path / "repo")
+    target = repo_root / "services" / "foo" / "tool.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("def run():\n    return True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_root), "add", "."], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "commit", "-m", "seed tool"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    async def _patch_executor(request: RunRequest) -> RunResult:
+        await asyncio.sleep(0)
+        effective_root = Path(request.workspace_root)
+        file_path = effective_root / "services" / "foo" / "tool.py"
+        file_path.write_text("def run():\n    return False\n", encoding="utf-8")
+        return RunResult(
+            run_id=request.run_id,
+            status="completed",
+            summary="Updated the tool implementation.",
+            changed_files=("services/foo/tool.py",),
+        )
+
+    runtime = ForgeRuntime(
+        settings=ForgeSettings(
+            store_path=tmp_path / "forge_runs.db",
+            output_dir=tmp_path / "runs",
+        ),
+        executor=_patch_executor,
+    )
+    app = create_app(runtime=runtime)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "client_name": "sophia_prima",
+                "task": "Implement a missing tool.",
+                "workspace_root": str(repo_root),
+                "readable_roots": [str(repo_root)],
+                "writable_roots": [str(repo_root)],
+                "backend": "codex",
+                "timeout_sec": 30.0,
+                "verification_policy": {"mode": "none", "steps": []},
+                "promotion_policy": {"mode": "patch"},
+            },
+        )
+        assert response.status_code == 200
+        run_id = response.json()["run_id"]
+
+        latest = _wait_for_terminal_run(client, run_id)
+        assert latest["status"] == "completed"
+
+        events = client.get(f"/v1/runs/{run_id}/events").json()["events"]
+        event_types = [event["event_type"] for event in events]
+        assert "promotion_started" in event_types
+        assert "promotion_finished" in event_types
+
+        artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["artifacts"]
+        artifact_types = {artifact["artifact_type"] for artifact in artifacts}
+        assert "promotion_status" in artifact_types
+        assert "patch" in artifact_types
+
+        patch_artifact = next(artifact for artifact in artifacts if artifact["artifact_type"] == "patch")
+        patch_text = Path(patch_artifact["path"]).read_text(encoding="utf-8")
+        assert "diff --git a/services/foo/tool.py b/services/foo/tool.py" in patch_text
+        assert "-    return True" in patch_text
+        assert "+    return False" in patch_text
+
+        status_artifact = next(
+            artifact for artifact in artifacts if artifact["artifact_type"] == "promotion_status"
+        )
+        status_payload = json.loads(Path(status_artifact["path"]).read_text(encoding="utf-8"))
+        assert status_payload["mode"] == "patch"
+        assert status_payload["status"] == "created"
+
+
+def test_forge_api_prepares_local_draft_pr_artifacts(tmp_path) -> None:
+    repo_root = _init_git_repo(tmp_path / "repo")
+    target = repo_root / "services" / "foo" / "tool.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("def run():\n    return True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_root), "add", "."], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "commit", "-m", "seed tool"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "-C", str(repo_root), "branch", "-M", "main"], check=True, capture_output=True, text=True)
+
+    async def _draft_pr_executor(request: RunRequest) -> RunResult:
+        await asyncio.sleep(0)
+        effective_root = Path(request.workspace_root)
+        file_path = effective_root / "services" / "foo" / "tool.py"
+        file_path.write_text("def run():\n    return False\n", encoding="utf-8")
+        return RunResult(
+            run_id=request.run_id,
+            status="completed",
+            summary="Updated the tool implementation.",
+            changed_files=("services/foo/tool.py",),
+        )
+
+    runtime = ForgeRuntime(
+        settings=ForgeSettings(
+            store_path=tmp_path / "forge_runs.db",
+            output_dir=tmp_path / "runs",
+        ),
+        executor=_draft_pr_executor,
+    )
+    app = create_app(runtime=runtime)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "client_name": "sophia_prima",
+                "task": "Implement a missing tool.",
+                "workspace_root": str(repo_root),
+                "readable_roots": [str(repo_root)],
+                "writable_roots": [str(repo_root)],
+                "backend": "codex",
+                "timeout_sec": 30.0,
+                "verification_policy": {"mode": "none", "steps": []},
+                "promotion_policy": {"mode": "draft_pr", "base_branch": "main"},
+            },
+        )
+        assert response.status_code == 200
+        run_id = response.json()["run_id"]
+
+        latest = _wait_for_terminal_run(client, run_id)
+        assert latest["status"] == "completed"
+
+        artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["artifacts"]
+        artifact_types = {artifact["artifact_type"] for artifact in artifacts}
+        assert "promotion_status" in artifact_types
+        assert "pr_request" in artifact_types
+
+        pr_request = next(artifact for artifact in artifacts if artifact["artifact_type"] == "pr_request")
+        pr_payload = json.loads(Path(pr_request["path"]).read_text(encoding="utf-8"))
+        assert pr_payload["mode"] == "draft_pr"
+        assert pr_payload["base_branch"] == "main"
+        assert pr_payload["branch_name"].startswith("forge/")
+        assert pr_payload["publish_status"] == "not_configured"
+
+        status_artifact = next(
+            artifact for artifact in artifacts if artifact["artifact_type"] == "promotion_status"
+        )
+        status_payload = json.loads(Path(status_artifact["path"]).read_text(encoding="utf-8"))
+        assert status_payload["mode"] == "draft_pr"
+        assert status_payload["status"] == "prepared"
+
+        branch_name = pr_payload["branch_name"]
+        current_branch = subprocess.run(
+            ["git", "-C", str(repo_root), "branch", "--show-current"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert current_branch == branch_name
+        head_message = subprocess.run(
+            ["git", "-C", str(repo_root), "log", "-1", "--pretty=%s"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head_message == "Updated the tool implementation."
 
 
 def test_forge_api_creates_session_and_links_runs(tmp_path) -> None:
