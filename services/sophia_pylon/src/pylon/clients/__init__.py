@@ -6,6 +6,7 @@ from pylon.clients.brave import BraveClient
 from pylon.clients.canvas import CanvasClient
 from pylon.clients.fed_tracker import FedTrackerClient
 from pylon.clients.oikonomia import OikonomiaClient
+from pylon.clients.readwise import ReadwiseClient
 from pylon.clients.scrivener import ScrivenerClient
 from pylon.clients.tholos import TholosClient
 
@@ -16,6 +17,7 @@ __all__ = [
     "CanvasClient",
     "FedTrackerClient",
     "OikonomiaClient",
+    "ReadwiseClient",
     "ScrivenerClient",
     "TholosClient",
 ]

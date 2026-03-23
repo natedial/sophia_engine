@@ -406,6 +406,54 @@ async def test_agent_injects_seed_lessons_into_memory_context(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_agent_injects_resource_memory_guidance_into_system_prompt(tmp_path: Path) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        memory_resource_top_k=1,
+        memory_semantic_top_k=1,
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylon(),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    agent.memory.ingest_turn(
+        session_id="test-session-resources",
+        user_message=(
+            "Find a FOMC hawk dove breakdown.\n\n"
+            "Helpful resources for this:\n"
+            "https://itc-m.com/HawkDove"
+        ),
+        assistant_message="Noted.",
+    )
+    context = ConversationContext(session_id="test-session-resources")
+
+    _ = [event async for event in agent.run("what should I read for FOMC hawk dove context", context)]
+
+    assert provider.system_prompts
+    assert "Resource memory:" in provider.system_prompts[0]
+    assert "user-endorsed starting points for sourcing" in provider.system_prompts[0]
+    assert "https://itc-m.com/HawkDove" in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_agent_injects_research_retrieval_policy_when_tholos_tools_present(
     tmp_path: Path,
 ) -> None:
@@ -442,6 +490,48 @@ async def test_agent_injects_research_retrieval_policy_when_tholos_tools_present
     assert "Research retrieval policy" in provider.system_prompts[0]
     assert "keyword_weight=0.65" in provider.system_prompts[0]
     assert "chunk_id" in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_injects_readwise_policy_when_readwise_tools_present(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(
+            ["readwise_list_commands", "readwise_run_command"]
+        ),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-readwise-policy")
+
+    _ = [event async for event in agent.run("search my readwise highlights for Powell notes", context)]
+
+    assert provider.system_prompts
+    assert "Readwise policy" in provider.system_prompts[0]
+    assert "readwise_list_commands" in provider.system_prompts[0]
+    assert "readwise_run_command" in provider.system_prompts[0]
+    assert "reader-search-documents" in provider.system_prompts[0]
 
 
 def test_should_enforce_tools_for_research_queries() -> None:

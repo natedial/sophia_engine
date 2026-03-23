@@ -193,6 +193,8 @@ async def setup_pylon(settings) -> tuple[Pylon, PreflightResult]:
         canvas_url=settings.canvas_base_url,
         tholos_url=settings.tholos_base_url,
         fed_tracker_url=settings.fed_tracker_url,
+        readwise_cli_path=settings.readwise_cli_path,
+        readwise_cli_config_path=settings.readwise_cli_config_path,
         brave_base_url=settings.brave_base_url,
         brave_api_key=settings.brave_api_key,
     )

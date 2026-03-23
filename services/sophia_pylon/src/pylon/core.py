@@ -11,6 +11,7 @@ from pylon.clients.brave import BraveClient
 from pylon.clients.canvas import CanvasClient
 from pylon.clients.fed_tracker import FedTrackerClient
 from pylon.clients.oikonomia import OikonomiaClient
+from pylon.clients.readwise import ReadwiseClient
 from pylon.clients.scrivener import ScrivenerClient
 from pylon.clients.tholos import TholosClient
 from pylon.tools.arithmos import ArithmosToolExecutor
@@ -19,6 +20,7 @@ from pylon.tools.brave import BraveToolExecutor
 from pylon.tools.canvas import CanvasToolExecutor
 from pylon.tools.fed_tracker import FedTrackerToolExecutor
 from pylon.tools.oikonomia import OikonomiaToolExecutor
+from pylon.tools.readwise import ReadwiseToolExecutor
 from pylon.tools.scrivener import ScrivenerToolExecutor
 from pylon.tools.tholos import TholosToolExecutor
 
@@ -33,6 +35,8 @@ class PylonConfig:
     tholos_url: str = "http://localhost:8004"
     fed_tracker_url: str = "http://127.0.0.1:8005"
     oikonomia_url: str = "http://localhost:8006"
+    readwise_cli_path: str = "readwise"
+    readwise_cli_config_path: str = "~/.readwise-cli.json"
     brave_base_url: str = "https://api.search.brave.com"
     brave_api_key: str = ""
     max_concurrency_per_service: int = 8
@@ -157,6 +161,13 @@ _EXECUTOR_SPECS: tuple[_ExecutorSpec, ...] = (
         class_name="OikonomiaToolExecutor",
         dependency_attrs=("_oikonomia_client",),
     ),
+    _ExecutorSpec(
+        service_name="readwise",
+        executor_attr="_readwise_executor",
+        module_name="pylon.tools.readwise",
+        class_name="ReadwiseToolExecutor",
+        dependency_attrs=("_readwise_client",),
+    ),
 )
 
 
@@ -185,6 +196,11 @@ class Pylon:
         self._tholos_client = TholosClient(base_url=self.config.tholos_url)
         self._fed_tracker_client = FedTrackerClient(base_url=self.config.fed_tracker_url)
         self._oikonomia_client = OikonomiaClient(base_url=self.config.oikonomia_url)
+        self._readwise_client = ReadwiseClient(
+            cli_path=self.config.readwise_cli_path,
+            config_path=self.config.readwise_cli_config_path,
+            timeout=self.config.tool_timeout_sec,
+        )
         self._brave_client = BraveClient(
             base_url=self.config.brave_base_url,
             api_key=self.config.brave_api_key,
@@ -247,6 +263,7 @@ class Pylon:
         await self._tholos_client.close()
         await self._fed_tracker_client.close()
         await self._oikonomia_client.close()
+        await self._readwise_client.close()
         await self._brave_client.close()
 
     # -------------------------------------------------------------------------
@@ -274,6 +291,8 @@ class Pylon:
                 healthy = await self._fed_tracker_client.health_check()
             elif name == "oikonomia":
                 healthy = await self._oikonomia_client.health_check()
+            elif name == "readwise":
+                healthy = await self._readwise_client.health_check()
             elif name == "brave":
                 healthy = await self._brave_client.health_check()
             else:
@@ -459,3 +478,8 @@ class Pylon:
     def brave(self) -> BraveClient:
         """Direct access to Brave client for non-LLM use cases."""
         return self._brave_client
+
+    @property
+    def readwise(self) -> ReadwiseClient:
+        """Direct access to Readwise client for non-LLM use cases."""
+        return self._readwise_client

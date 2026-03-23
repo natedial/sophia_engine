@@ -5,6 +5,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /workspace
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g @readwise/cli \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy required local packages from monorepo
 COPY services/sophia_pylon /workspace/services/sophia_pylon
 COPY agents/sophia_prima /workspace/agents/sophia_prima

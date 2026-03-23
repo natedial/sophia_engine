@@ -113,22 +113,19 @@ class MemorySnapshot:
             "Use relevant memory conservatively.",
             "Prioritize explicit user input in this turn over older memory.",
         ]
-
-        if self.working_lines:
-            parts.append("Working memory:")
-            parts.extend(f"- {line}" for line in self.working_lines)
-
-        if self.lessons:
-            parts.append("Lessons memory:")
-            parts.extend(f"- {rec.content}" for rec in self.lessons)
-
-        if self.episodic:
-            parts.append("Episodic memory:")
-            parts.extend(f"- {rec.content}" for rec in self.episodic)
-
-        if self.semantic:
-            parts.append("Semantic memory:")
-            parts.extend(f"- {rec.content}" for rec in self.semantic)
+        if self._split_semantic(self.semantic)[0]:
+            parts.append(
+                "When Resource memory is relevant, treat those links as user-endorsed starting points "
+                "for sourcing, but still verify freshness and applicability before relying on them."
+            )
+        parts.extend(
+            self._rebuild_parts(
+                semantic=self.semantic,
+                episodic=self.episodic,
+                working=self.working_lines,
+                include_preamble=False,
+            )
+        )
 
         if len(parts) == 2:
             return ""
@@ -141,13 +138,17 @@ class MemorySnapshot:
         return self._trim_to_budget(parts, max_chars)
 
     def _trim_to_budget(self, parts: list[str], max_chars: int) -> str:
-        semantic = self.semantic.copy()
+        resource_semantic, general_semantic = self._split_semantic(self.semantic)
         episodic = self.episodic.copy()
         working = self.working_lines.copy()
 
-        while len("\n".join(parts)) > max_chars and (semantic or episodic or working):
-            if semantic:
-                semantic.pop()
+        while len("\n".join(parts)) > max_chars and (
+            general_semantic or resource_semantic or episodic or working
+        ):
+            if general_semantic:
+                general_semantic.pop()
+            elif resource_semantic:
+                resource_semantic.pop()
             elif episodic:
                 episodic.pop()
             elif working:
@@ -155,7 +156,11 @@ class MemorySnapshot:
             else:
                 break
 
-            parts = self._rebuild_parts(semantic, episodic, working)
+            parts = self._rebuild_parts(
+                semantic=[*resource_semantic, *general_semantic],
+                episodic=episodic,
+                working=working,
+            )
 
         text = "\n".join(parts)
         if len(text) > max_chars:
@@ -173,11 +178,17 @@ class MemorySnapshot:
         semantic: list[MemoryRecord],
         episodic: list[MemoryRecord],
         working: list[str],
+        *,
+        include_preamble: bool = True,
     ) -> list[str]:
-        parts: list[str] = [
-            "Use relevant memory conservatively.",
-            "Prioritize explicit user input in this turn over older memory.",
-        ]
+        parts: list[str] = []
+        if include_preamble:
+            parts.extend(
+                [
+                    "Use relevant memory conservatively.",
+                    "Prioritize explicit user input in this turn over older memory.",
+                ]
+            )
 
         if working:
             parts.append("Working memory:")
@@ -191,9 +202,14 @@ class MemorySnapshot:
             parts.append("Episodic memory:")
             parts.extend(f"- {rec.content}" for rec in episodic)
 
-        if semantic:
+        resource_semantic, general_semantic = self._split_semantic(semantic)
+        if resource_semantic:
+            parts.append("Resource memory:")
+            parts.extend(f"- {rec.content}" for rec in resource_semantic)
+
+        if general_semantic:
             parts.append("Semantic memory:")
-            parts.extend(f"- {rec.content}" for rec in semantic)
+            parts.extend(f"- {rec.content}" for rec in general_semantic)
 
         return parts
 
@@ -206,6 +222,19 @@ class MemorySnapshot:
             parts.append("Lessons memory:")
             parts.extend(f"- {rec.content}" for rec in self.lessons)
         return "\n".join(parts)
+
+    @staticmethod
+    def _split_semantic(
+        semantic: list[MemoryRecord],
+    ) -> tuple[list[MemoryRecord], list[MemoryRecord]]:
+        resource_semantic: list[MemoryRecord] = []
+        general_semantic: list[MemoryRecord] = []
+        for record in semantic:
+            if record.metadata.get("source") == "user_endorsed_resource" or "resource" in record.tags:
+                resource_semantic.append(record)
+                continue
+            general_semantic.append(record)
+        return resource_semantic, general_semantic
 
 
 @dataclass(frozen=True)

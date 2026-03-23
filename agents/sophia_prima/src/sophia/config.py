@@ -132,6 +132,14 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8005",
         description="Base URL for Fed Textual Change Tracker service",
     )
+    readwise_cli_path: str = Field(
+        default="readwise",
+        description="Path to the installed Readwise CLI binary",
+    )
+    readwise_cli_config_path: str = Field(
+        default="~/.readwise-cli.json",
+        description="Path to the Readwise CLI auth/config file",
+    )
     brave_base_url: str = Field(
         default="https://api.search.brave.com",
         description="Base URL for Brave Search API",
@@ -212,6 +220,10 @@ class Settings(BaseSettings):
     memory_semantic_top_k: int = Field(
         default=3,
         description="Top semantic memories to inject into prompt context",
+    )
+    memory_resource_top_k: int = Field(
+        default=2,
+        description="Top user-endorsed resource memories to inject into prompt context",
     )
     memory_lesson_promotion_min_repeats: int = Field(
         default=2,

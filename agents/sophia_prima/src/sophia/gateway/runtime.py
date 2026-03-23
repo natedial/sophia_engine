@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import AsyncGenerator
@@ -82,6 +83,8 @@ class GatewayRuntime:
             pylon = await self._create_pylon()
             run_store = GatewayRunStore(self.settings.gateway_artifact_store_path)
             preflight = await pylon.preflight()
+            if preflight.unavailable_tools:
+                logger.warning("gateway preflight unavailable tools:\n%s", preflight.summary())
             profiles = load_agent_profiles(
                 default_agent_id=self.settings.gateway_default_agent_id,
                 raw_profiles_json=self.settings.gateway_agents_json,
@@ -183,6 +186,11 @@ class GatewayRuntime:
             decision.session_id,
             len(text),
         )
+        self._record_live_web_unavailability_if_relevant(
+            run_id=run_id,
+            message_text=text,
+            run_store=run_store,
+        )
 
         if self._startup_error:
             fallback = (
@@ -231,6 +239,11 @@ class GatewayRuntime:
                     async for event in agent_run(text, session.context, run_id=run_id):
                         sequence += 1
                         run_store.append_event(run_id=run_id, sequence=sequence, event=event)
+                        self._record_tool_event_diagnostics(
+                            run_id=run_id,
+                            event=event,
+                            run_store=run_store,
+                        )
                         if (
                             event.type == EventType.MESSAGE_END
                             and event.data.get("message") is not None
@@ -503,6 +516,8 @@ class GatewayRuntime:
             canvas_url=self.settings.canvas_base_url,
             tholos_url=self.settings.tholos_base_url,
             fed_tracker_url=self.settings.fed_tracker_url,
+            readwise_cli_path=self.settings.readwise_cli_path,
+            readwise_cli_config_path=self.settings.readwise_cli_config_path,
             brave_base_url=self.settings.brave_base_url,
             brave_api_key=self.settings.brave_api_key,
         )
@@ -515,6 +530,95 @@ class GatewayRuntime:
         if self._run_store is None:
             self._run_store = GatewayRunStore(self.settings.gateway_artifact_store_path)
         return self._run_store
+
+    def _record_live_web_unavailability_if_relevant(
+        self,
+        *,
+        run_id: str,
+        message_text: str,
+        run_store: GatewayRunStore,
+    ) -> None:
+        preflight = next(iter(self._agents.values())).preflight_result if self._agents else None
+        if preflight is None:
+            return
+
+        unavailable = set(preflight.unavailable_tools)
+        live_web_tools = {"search_web", "get_web_context"}
+        if not (unavailable & live_web_tools):
+            return
+        if not _looks_like_live_web_request(message_text):
+            return
+
+        logger.warning(
+            "gateway live web tools unavailable: run_id=%s tools=%s text=%r",
+            run_id,
+            sorted(unavailable & live_web_tools),
+            message_text[:200],
+        )
+        run_store.update_run_diagnostics(
+            run_id=run_id,
+            failure_stage="tool_unavailable",
+            provider_name=self.settings.llm_provider,
+            tool_name="search_web",
+            service_name="brave",
+        )
+
+    def _record_tool_event_diagnostics(
+        self,
+        *,
+        run_id: str,
+        event: AgentEvent,
+        run_store: GatewayRunStore,
+    ) -> None:
+        if event.type not in {EventType.TOOL_EXECUTION_START, EventType.TOOL_EXECUTION_END}:
+            return
+
+        tool_call = event.data.get("tool_call")
+        tool_name = getattr(tool_call, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            return
+
+        service_name = _infer_service_name(tool_name)
+        if event.type == EventType.TOOL_EXECUTION_START:
+            logger.info(
+                "gateway tool start: run_id=%s tool=%s service=%s",
+                run_id,
+                tool_name,
+                service_name or "local",
+            )
+            run_store.update_run_diagnostics(
+                run_id=run_id,
+                provider_name=self.settings.llm_provider,
+                tool_name=tool_name,
+                service_name=service_name,
+            )
+            return
+
+        result_text = str(event.data.get("result") or "")
+        if bool(event.data.get("is_error")):
+            logger.warning(
+                "gateway tool error: run_id=%s tool=%s service=%s result=%r",
+                run_id,
+                tool_name,
+                service_name or "local",
+                result_text[:240],
+            )
+            run_store.update_run_diagnostics(
+                run_id=run_id,
+                failure_stage="tool_execution",
+                provider_name=self.settings.llm_provider,
+                tool_name=tool_name,
+                service_name=service_name,
+            )
+            return
+
+        logger.info(
+            "gateway tool success: run_id=%s tool=%s service=%s result_chars=%s",
+            run_id,
+            tool_name,
+            service_name or "local",
+            len(result_text),
+        )
 
 
 def _is_provider_capacity_error(exc: RuntimeError) -> bool:
@@ -536,3 +640,46 @@ def _is_provider_capacity_error(exc: RuntimeError) -> bool:
         or "request too large" in text
         or "rate limit reached" in text
     )
+
+
+def _looks_like_live_web_request(message_text: str) -> bool:
+    lowered = message_text.lower()
+    if "http://" in lowered or "https://" in lowered or "www." in lowered:
+        return True
+    return bool(
+        re.search(r"\b(url|link|links|website|web page|webpage|open this page)\b", lowered)
+    )
+
+
+def _infer_service_name(tool_name: str) -> str | None:
+    if tool_name in {"search_web", "get_web_context"}:
+        return "brave"
+    if tool_name in {"search_research", "get_research_chunk", "list_research_sources"}:
+        return "tholos"
+    if tool_name.startswith("fed_"):
+        return "fed_tracker"
+    if tool_name.startswith("create_") or tool_name in {"get_canvas", "update_canvas_layout"}:
+        return "canvas"
+    if tool_name in {"compute", "list_computation_types"}:
+        return "arithmos"
+    if tool_name in {
+        "list_series",
+        "search_series",
+        "get_series_info",
+        "get_latest_value",
+        "get_observations",
+        "get_series_change",
+        "resolve_external_series",
+        "ingest_series",
+        "get_auctions",
+        "get_auction_summary",
+        "get_releases_upcoming",
+        "get_releases_today",
+        "get_releases_week",
+        "get_releases_summary",
+        "get_speeches",
+        "get_speech",
+        "get_speakers",
+    }:
+        return "scrivener"
+    return None
