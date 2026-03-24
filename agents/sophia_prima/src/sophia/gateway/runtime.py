@@ -27,6 +27,7 @@ from sophia.gateway.research_plan_artifacts import (
 from sophia.gateway.run_store import GatewayRunStore
 from sophia.gateway.routing import GatewayRouter
 from sophia.llm.base import ModelProvider
+from sophia.presentation import PresentationRegistry, PresentationResolver
 
 logger = logging.getLogger("sophia.gateway.runtime")
 
@@ -61,6 +62,21 @@ class GatewayRuntime:
         self._provider: ModelProvider | None = None
         self._pylon: Pylon | None = None
         self._run_store: GatewayRunStore | None = None
+        read_policy = self.settings.build_read_policy()
+        write_policy = self.settings.build_write_policy()
+        self._presentation_registry = PresentationRegistry(
+            core_path=self.settings.presentation_core_path,
+            channels_path=self.settings.presentation_channels_path,
+            rendering_path=self.settings.presentation_rendering_path,
+            skills_root=self.settings.skills_path,
+            max_loaded_chars=self.settings.skills_max_loaded_chars,
+            read_policy=read_policy,
+        )
+        self._presentation_resolver = PresentationResolver(
+            registry=self._presentation_registry,
+            artifact_dir=self.settings.presentation_artifact_dir,
+            write_policy=write_policy,
+        )
         self._startup_error: str | None = None
         self._started = False
 
@@ -164,6 +180,8 @@ class GatewayRuntime:
         if session is None:
             session = SessionState(context=ConversationContext(session_id=decision.session_id))
             self._sessions[decision.session_id] = session
+        session.context.metadata["channel"] = message.channel
+        session.context.metadata["account_id"] = message.account_id
 
         session.last_message_at = datetime.now(UTC)
         run_id = str(uuid4())
@@ -311,11 +329,6 @@ class GatewayRuntime:
                 )
                 raise
 
-        run_store.update_run_diagnostics(
-            run_id=run_id,
-            outbound_text_len=len(last_assistant_text.strip() or "(empty response)"),
-            provider_name=self.settings.llm_provider,
-        )
         outbound = OutboundMessage(
             text=last_assistant_text.strip() or "(empty response)",
             session_id=decision.session_id,
@@ -324,6 +337,16 @@ class GatewayRuntime:
             account_id=message.account_id,
             peer_id=message.peer_id,
             run_id=run_id,
+        )
+        outbound = self._presentation_resolver.resolve_outbound(
+            outbound=outbound,
+            user_message=text,
+            run_store=run_store,
+        )
+        run_store.update_run_diagnostics(
+            run_id=run_id,
+            outbound_text_len=len(outbound.text.strip() or "(empty response)"),
+            provider_name=self.settings.llm_provider,
         )
         run_store.finish_run(
             run_id=run_id,
@@ -538,7 +561,8 @@ class GatewayRuntime:
         message_text: str,
         run_store: GatewayRunStore,
     ) -> None:
-        preflight = next(iter(self._agents.values())).preflight_result if self._agents else None
+        first_agent = next(iter(self._agents.values()), None)
+        preflight = getattr(first_agent, "preflight_result", None)
         if preflight is None:
             return
 

@@ -73,6 +73,7 @@ def load_skill(
         allowed_tools=allowed_tools,
         read_allowlist=read_allowlist or (),
         write_allowlist=write_allowlist or (),
+        metadata=dict(metadata),
     )
 
 

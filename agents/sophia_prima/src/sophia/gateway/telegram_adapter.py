@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from sophia.gateway.models import InboundMessage
+from sophia.gateway.models import DeliveryArtifact, InboundMessage
 from sophia.gateway.runtime import GatewayRuntime
 
 logger = logging.getLogger("sophia.gateway.telegram")
@@ -127,20 +128,24 @@ class TelegramChannelAdapter:
 
         try:
             logger.info(
-                "telegram outbound delivery starting: account_id=%s peer_id=%s run_id=%s text_len=%s",
+                "telegram outbound delivery starting: account_id=%s peer_id=%s run_id=%s text_len=%s artifacts=%s",
                 self.account.account_id,
                 inbound.peer_id,
                 outbound.run_id,
                 len(outbound.text or ""),
+                len(outbound.artifacts),
             )
             for chunk in _chunk_telegram_text(outbound.text):
                 await update.effective_message.reply_text(chunk)
+            for artifact in outbound.artifacts:
+                await self._send_artifact(update, artifact)
             logger.info(
-                "telegram outbound delivery completed: account_id=%s peer_id=%s run_id=%s chunks=%s",
+                "telegram outbound delivery completed: account_id=%s peer_id=%s run_id=%s chunks=%s artifacts=%s",
                 self.account.account_id,
                 inbound.peer_id,
                 outbound.run_id,
                 len(_chunk_telegram_text(outbound.text)),
+                len(outbound.artifacts),
             )
         except Exception:
             logger.exception(
@@ -151,6 +156,22 @@ class TelegramChannelAdapter:
             await update.effective_message.reply_text(
                 "I finished processing that, but Telegram failed to deliver the full response. "
                 "Please retry or use the web gateway for longer outputs."
+            )
+
+    async def _send_artifact(self, update: Update, artifact: DeliveryArtifact) -> None:
+        if update.effective_message is None:
+            return
+        path = Path(artifact.path)
+        with path.open("rb") as handle:
+            if artifact.kind == "image":
+                await update.effective_message.reply_photo(
+                    photo=handle,
+                    caption=artifact.caption,
+                )
+                return
+            await update.effective_message.reply_document(
+                document=handle,
+                caption=artifact.caption,
             )
 
 

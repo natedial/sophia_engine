@@ -20,6 +20,17 @@ class InboundMessage:
 
 
 @dataclass(frozen=True)
+class DeliveryArtifact:
+    """One outbound attachment created by presentation policy."""
+
+    artifact_id: str
+    kind: str
+    mime_type: str
+    path: str
+    caption: str | None = None
+
+
+@dataclass(frozen=True)
 class OutboundMessage:
     """Gateway response envelope produced after agent execution."""
 
@@ -30,3 +41,5 @@ class OutboundMessage:
     account_id: str
     peer_id: str
     run_id: str | None = None
+    artifacts: tuple[DeliveryArtifact, ...] = ()
+    delivery_mode: str = "text"

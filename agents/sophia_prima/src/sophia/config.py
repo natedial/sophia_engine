@@ -80,6 +80,26 @@ class Settings(BaseSettings):
         default_factory=lambda: get_project_root() / "skills",
         description="Path to local skill folders containing SKILL.md files",
     )
+    presentation_enabled: bool = Field(
+        default=True,
+        description="Enable channel-aware presentation policy resolution",
+    )
+    presentation_core_path: Path = Field(
+        default_factory=lambda: get_project_root() / "config" / "presentation" / "core.md",
+        description="Path to compact global presentation policy markdown",
+    )
+    presentation_channels_path: Path = Field(
+        default_factory=lambda: get_project_root() / "config" / "presentation" / "channels",
+        description="Path to per-channel presentation capability config files",
+    )
+    presentation_rendering_path: Path = Field(
+        default_factory=lambda: get_project_root() / "config" / "presentation" / "rendering",
+        description="Path to presentation rendering themes and image guidelines",
+    )
+    presentation_artifact_dir: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "presentation",
+        description="Directory used for rendered presentation artifacts",
+    )
     skills_max_loaded_chars: int = Field(
         default=12000,
         description="Maximum characters loaded from each skill body",
@@ -342,6 +362,22 @@ class Settings(BaseSettings):
         description=(
             "Maximum stored tool-result characters per history event; 0 keeps full result text"
         ),
+    )
+    history_session_recall_enabled: bool = Field(
+        default=True,
+        description="Enable automatic cross-session recall from searchable history",
+    )
+    history_session_recall_top_k: int = Field(
+        default=2,
+        description="Maximum number of prior sessions surfaced into prompt context",
+    )
+    history_session_recall_max_excerpts_per_session: int = Field(
+        default=2,
+        description="Maximum excerpts included per recalled prior session",
+    )
+    history_session_recall_max_excerpt_chars: int = Field(
+        default=220,
+        description="Maximum characters kept from one recalled history excerpt",
     )
 
     # Subagent Orchestration (thin-slice)

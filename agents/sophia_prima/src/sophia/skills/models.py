@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -17,6 +17,7 @@ class SkillManifest:
     allowed_tools: tuple[str, ...] | None = None
     read_allowlist: tuple[str, ...] = ()
     write_allowlist: tuple[str, ...] = ()
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

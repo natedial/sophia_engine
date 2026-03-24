@@ -1,0 +1,12 @@
+{
+  "channel": "cli",
+  "supports_markdown_tables": true,
+  "supports_image_attachments": false,
+  "supports_document_attachments": false,
+  "max_text_chars": 12000,
+  "preferred_structured_delivery": {
+    "table": "text",
+    "chart": "text",
+    "long_report": "text"
+  }
+}
