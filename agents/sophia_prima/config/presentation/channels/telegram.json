@@ -1,0 +1,12 @@
+{
+  "channel": "telegram",
+  "supports_markdown_tables": false,
+  "supports_image_attachments": true,
+  "supports_document_attachments": true,
+  "max_text_chars": 4000,
+  "preferred_structured_delivery": {
+    "table": "image",
+    "chart": "image",
+    "long_report": "document"
+  }
+}
