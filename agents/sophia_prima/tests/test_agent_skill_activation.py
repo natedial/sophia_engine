@@ -192,6 +192,49 @@ class CitationProvider(DummyProvider):
         )
 
 
+class WebPreferenceProvider(DummyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tools_seen: list[list[str]] = []
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools=None,
+        max_tokens: int = 4096,
+    ) -> CompletionResponse:
+        self.system_prompts.append(system)
+        tool_names = [t.name for t in (tools or [])]
+        self.tools_seen.append(tool_names)
+        if "search_web" in tool_names:
+            return CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-web",
+                            name="search_web",
+                            input={"query": "nfp forecasts"},
+                        )
+                    ],
+                ),
+                stop_reason=StopReason.TOOL_USE,
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            )
+        return CompletionResponse(
+            message=Message(
+                role=Role.ASSISTANT,
+                content="Claim (source_path: test.pdf, p.1, chunk_id: c-1)",
+            ),
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
 @pytest.mark.asyncio
 async def test_agent_emits_skill_activation_and_injects_skill_context(tmp_path: Path) -> None:
     personality_file = tmp_path / "config" / "personality.md"
@@ -590,8 +633,81 @@ def test_requires_research_citations_for_synthesis_and_legal_recency_queries() -
         "any specific citations on section 122",
         tools,
     )
+    assert SophiaAgent._requires_research_citations(
+        "What's the range of NFP forecasts for this upcoming Friday?",
+        tools,
+    )
     assert not SophiaAgent._requires_research_citations(
         "What's the latest CPI print?",
+        tools,
+    )
+
+
+def test_should_prioritize_local_research_for_forecast_style_queries() -> None:
+    tools = [
+        ToolSchema(
+            name="search_research",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        ),
+        ToolSchema(
+            name="search_web",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    ]
+
+    assert SophiaAgent._should_prioritize_local_research(
+        "What's the range of NFP forecasts for this upcoming Friday?",
+        tools,
+    )
+    assert not SophiaAgent._should_prioritize_local_research(
+        "Search online for the latest Reuters NFP preview.",
+        tools,
+    )
+    assert not SophiaAgent._should_prioritize_local_research(
+        "What's our engine forecast for core CPI?",
+        tools,
+    )
+
+
+def test_forecast_request_classifier_distinguishes_research_engine_and_compare() -> None:
+    assert (
+        SophiaAgent._classify_forecast_request(
+            "What's the range of bank NFP forecasts for Friday?"
+        )
+        == "research"
+    )
+    assert (
+        SophiaAgent._classify_forecast_request(
+            "What's our engine forecast for CPI?"
+        )
+        == "engine"
+    )
+    assert (
+        SophiaAgent._classify_forecast_request(
+            "Compare our model forecast for CPI versus street forecasts."
+        )
+        == "compare"
+    )
+
+
+def test_engine_forecast_requests_do_not_require_research_citations() -> None:
+    tools = [
+        ToolSchema(
+            name="search_research",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        ),
+        ToolSchema(
+            name="get_research_chunk",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    ]
+
+    assert not SophiaAgent._requires_research_citations(
+        "Show me our published projection for macro_us_inflation.",
         tools,
     )
 
@@ -890,6 +1006,202 @@ async def test_agent_prefetches_research_before_completion_for_citation_turns(
     assert tool_name == "search_research"
     assert payload["query"] == "any specific citations on section 122"
     assert payload["keyword_weight"] == 0.65
+
+
+@pytest.mark.asyncio
+async def test_agent_prefetches_research_for_forecast_range_turns(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = CitationProvider()
+    pylon = DummyPylonWithTools(["search_research"])
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-forecast-prefetch")
+
+    final = await agent.chat(
+        "What's the range of NFP forecasts for this upcoming Friday?",
+        context,
+    )
+
+    assert "chunk_id: c-1" in final.content
+    assert pylon.executions
+    tool_name, payload = pylon.executions[0]
+    assert tool_name == "search_research"
+    assert payload["query"] == "What's the range of NFP forecasts for this upcoming Friday?"
+    assert payload["keyword_weight"] == 0.65
+
+
+@pytest.mark.asyncio
+async def test_agent_hides_web_tools_on_first_pass_when_local_research_hits(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = WebPreferenceProvider()
+    pylon = DummyPylonWithTools(["search_research", "search_web", "get_web_context"])
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-local-first")
+
+    final = await agent.chat(
+        "What's the range of NFP forecasts for this upcoming Friday?",
+        context,
+    )
+
+    assert "chunk_id: c-1" in final.content
+    assert pylon.executions
+    assert pylon.executions[0][0] == "search_research"
+    assert provider.tools_seen
+    assert "search_web" not in provider.tools_seen[0]
+    assert "get_web_context" not in provider.tools_seen[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_requests_confirmation_before_web_when_local_research_prefetch_is_empty(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = WebPreferenceProvider()
+    pylon = DummyPylonWithTools(
+        ["search_research", "search_web", "get_web_context"],
+        tool_result=DummyToolResult(payload={"results": [], "count": 0, "query": "nfp"}),
+    )
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False, max_tool_iterations=1),
+    )
+    context = ConversationContext(session_id="test-session-web-fallback")
+
+    final = await agent.chat(
+        "What's the range of NFP forecasts for this upcoming Friday?",
+        context,
+    )
+
+    assert pylon.executions
+    assert pylon.executions[0][0] == "search_research"
+    assert provider.tools_seen == []
+    assert "I paused before using external sources" in final.content
+    assert "couldn't find matching corpus hits in the current scope" in final.content
+    assert "widen the corpus scope or switch to web" in final.content
+
+
+@pytest.mark.asyncio
+async def test_agent_emits_local_research_web_fallback_reason_when_prefetch_is_empty(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = WebPreferenceProvider()
+    pylon = DummyPylonWithTools(
+        ["search_research", "search_web", "get_web_context"],
+        tool_result=DummyToolResult(payload={"results": [], "count": 0, "query": "nfp"}),
+    )
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False, max_tool_iterations=1),
+    )
+    context = ConversationContext(session_id="test-session-web-fallback-event")
+
+    events = [
+        event
+        async for event in agent.run(
+            "What's the range of NFP forecasts for this upcoming Friday?",
+            context,
+        )
+    ]
+
+    fallback_events = [event for event in events if event.type == EventType.WORKFLOW_DECISION]
+    assert fallback_events
+    assert fallback_events[0].data["category"] == "local_research_web_fallback"
+    assert fallback_events[0].data["reason"] == "local_research_prefetch_returned_no_hits"
+    assert fallback_events[0].data["details"]["prefetch_attempts"] >= 1
+    assert fallback_events[0].data["details"]["successful_prefetches"] == 0
+    assert fallback_events[0].data["details"]["web_tools_enabled"] == [
+        "get_web_context",
+        "search_web",
+    ]
+    message_events = [event for event in events if event.type == EventType.MESSAGE_END]
+    assert message_events
+    assert "I paused before using external sources" in message_events[-1].data["message"].content
 
 
 @pytest.mark.asyncio
