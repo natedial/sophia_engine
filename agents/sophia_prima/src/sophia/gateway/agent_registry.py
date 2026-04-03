@@ -64,6 +64,8 @@ def _default_profiles(*, default_agent_id: str) -> list[AgentProfile]:
                 "and bias toward research retrieval and Fed-text analysis tools."
             ),
             tool_allowlist=(
+                "search_web",
+                "get_web_context",
                 "search_research",
                 "get_research_chunk",
                 "list_research_sources",

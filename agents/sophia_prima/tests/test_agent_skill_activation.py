@@ -103,6 +103,27 @@ class DummyPylonWithTools(DummyPylon):
         return self._tool_result
 
 
+class SequencedPylonWithTools(DummyPylon):
+    def __init__(
+        self,
+        tool_names: list[str],
+        *,
+        tool_results: list[DummyToolResult],
+    ) -> None:
+        self._tools = [DummyToolDef(name) for name in tool_names]
+        self.executions: list[tuple[str, dict]] = []
+        self._tool_results = list(tool_results)
+
+    def get_tools(self, only_healthy: bool = True):
+        return self._tools
+
+    async def execute_tool(self, name: str, payload: dict):
+        self.executions.append((name, payload))
+        if self._tool_results:
+            return self._tool_results.pop(0)
+        return DummyToolResult(payload={"results": [], "count": 0, "query": payload.get("query", "")})
+
+
 class ToolRecordingProvider(DummyProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -229,6 +250,51 @@ class WebPreferenceProvider(DummyProvider):
             message=Message(
                 role=Role.ASSISTANT,
                 content="Claim (source_path: test.pdf, p.1, chunk_id: c-1)",
+            ),
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+class LiveWebFallbackProvider(DummyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self.tools_seen: list[list[str]] = []
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools=None,
+        max_tokens: int = 4096,
+    ) -> CompletionResponse:
+        self.system_prompts.append(system)
+        self.calls += 1
+        tool_names = [t.name for t in (tools or [])]
+        self.tools_seen.append(tool_names)
+        if self.calls == 1 and "search_web" in tool_names:
+            return CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-live-web",
+                            name="search_web",
+                            input={"query": "Lorie Logan speech today"},
+                        )
+                    ],
+                ),
+                stop_reason=StopReason.TOOL_USE,
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            )
+        return CompletionResponse(
+            message=Message(
+                role=Role.ASSISTANT,
+                content="Bottom line: today's Logan remarks were retrieved from web sources.",
             ),
             stop_reason=StopReason.END_TURN,
             usage=TokenUsage(input_tokens=1, output_tokens=1),
@@ -1144,6 +1210,68 @@ async def test_agent_requests_confirmation_before_web_when_local_research_prefet
     assert "I paused before using external sources" in final.content
     assert "couldn't find matching corpus hits in the current scope" in final.content
     assert "widen the corpus scope or switch to web" in final.content
+
+
+@pytest.mark.asyncio
+async def test_agent_switches_to_web_for_live_current_request_when_local_research_prefetch_is_empty(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = LiveWebFallbackProvider()
+    pylon = SequencedPylonWithTools(
+        ["search_research", "search_web", "get_web_context"],
+        tool_results=[
+            DummyToolResult(payload={"results": [], "count": 0, "query": "lorie logan speech today"}),
+            DummyToolResult(
+                payload={
+                    "query": "Lorie Logan speech today",
+                    "results": [
+                        {
+                            "title": "Speech",
+                            "url": "https://example.com/logan",
+                            "description": "Remarks by Lorie Logan.",
+                        }
+                    ],
+                    "total_results": 1,
+                }
+            ),
+        ],
+    )
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False, max_tool_iterations=3),
+    )
+    context = ConversationContext(session_id="test-session-live-web-fallback")
+
+    final = await agent.chat(
+        "Please analyze today's Lorie Logan speech and let me know what the main takeaways are for bank asset purchases.",
+        context,
+    )
+
+    assert [name for name, _ in pylon.executions[:2]] == ["search_research", "search_web"]
+    assert provider.tools_seen
+    assert "search_web" in provider.tools_seen[0]
+    assert "I paused before using external sources" not in final.content
+    assert "today's Logan remarks were retrieved from web sources" in final.content
 
 
 @pytest.mark.asyncio
