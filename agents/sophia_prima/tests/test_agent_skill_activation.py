@@ -20,6 +20,7 @@ from sophia.llm.types import (
 )
 from sophia.memory import MemoryManager, MemoryManagerConfig
 from sophia.memory.store import InMemoryMemoryStore
+from sophia.memory.types import FrozenMemorySnapshot, utc_now
 
 
 class DummyProvider:
@@ -301,6 +302,34 @@ class LiveWebFallbackProvider(DummyProvider):
         )
 
 
+class FailingIngestMemoryManager:
+    def set_seed_lessons(self, lessons: list[str]) -> None:
+        return None
+
+    def freeze_for_turn(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        messages: list[Message],
+    ) -> FrozenMemorySnapshot:
+        return FrozenMemorySnapshot(
+            rendered_text="",
+            created_at=utc_now(),
+            session_id=session_id,
+            query=query,
+        )
+
+    def ingest_turn(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        raise RuntimeError("memory backend unavailable")
+
+
 @pytest.mark.asyncio
 async def test_agent_emits_skill_activation_and_injects_skill_context(tmp_path: Path) -> None:
     personality_file = tmp_path / "config" / "personality.md"
@@ -356,6 +385,46 @@ async def test_agent_emits_skill_activation_and_injects_skill_context(tmp_path: 
     assert provider.system_prompts
     assert "Active skill" in provider.system_prompts[0]
     assert "release-calendar-query-formatting" in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_surfaces_reply_even_if_memory_ingest_fails(tmp_path: Path) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylon(),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+        memory_manager=FailingIngestMemoryManager(),
+    )
+    context = ConversationContext(session_id="test-session-memory-failure")
+
+    events = [event async for event in agent.run("Use paragraph breaks and bold/italics.", context)]
+
+    message_events = [event for event in events if event.type == EventType.MESSAGE_END]
+    assert message_events
+    assert message_events[-1].data["message"].content == "ok"
+
+    trace_events = [event for event in events if event.type == EventType.TRACE]
+    assert any(event.data.get("stage") == "memory_ingest_failed" for event in trace_events)
 
 
 def test_agent_rejects_memory_path_outside_write_allowlist(tmp_path: Path) -> None:

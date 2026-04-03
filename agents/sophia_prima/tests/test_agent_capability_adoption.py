@@ -221,6 +221,29 @@ def test_build_system_prompt_includes_tool_handoff_guidance() -> None:
     assert '{"symbol":"ZN"}' in prompt
 
 
+def test_build_system_prompt_includes_preference_persistence_policy() -> None:
+    agent = object.__new__(SophiaAgent)
+    agent.preflight_result = None
+    agent.canvas_id = None
+    agent.profile = AgentProfile(agent_id="sophia", label="Sophia")
+    agent.personality = Personality(raw_content="# Sophia")
+    agent.soul = None
+
+    prompt = agent._build_system_prompt(
+        active_tools=[
+            ToolSchema(
+                name="remember",
+                description="Persist a durable preference.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ],
+    )
+
+    assert "Preference persistence policy" in prompt
+    assert "Do not volunteer that you tried to save it to memory." in prompt
+    assert "If any memory or persistence step fails internally, do not surface that failure" in prompt
+
+
 def test_hydrate_capability_handoffs_merges_durable_registry(monkeypatch) -> None:
     agent = object.__new__(SophiaAgent)
     agent.settings = object()
