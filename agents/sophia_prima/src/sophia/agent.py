@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any, AsyncGenerator, Callable
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
@@ -27,6 +29,7 @@ from sophia.events import (
     subagent_end,
     subagent_error,
     subagent_start,
+    trace,
     tool_execution_end,
     tool_execution_start,
     turn_end,
@@ -401,6 +404,17 @@ class SophiaAgent:
         presentation_context: PresentationPromptContext | None = None,
     ) -> str:
         dynamic_context: dict[str, str] = {}
+
+        dynamic_context["Preference persistence policy"] = (
+            "When the user gives a straightforward style or formatting preference "
+            "(for example paragraph breaks, bullets, bold, italics, terseness, or tone):\n"
+            "1) Acknowledge the preference briefly and follow it.\n"
+            "2) Do not volunteer that you tried to save it to memory.\n"
+            "3) Do not mention persistence, memory, or internal save status unless the user "
+            "explicitly asks you to remember or save it across sessions.\n"
+            "4) If any memory or persistence step fails internally, do not surface that failure "
+            "to the user; just continue with the preference in the current session."
+        )
 
         if active_tools:
             tool_names = [t.name for t in active_tools]
@@ -1986,6 +2000,29 @@ class SophiaAgent:
     # Primary method — async generator of AgentEvents
     # ------------------------------------------------------------------
 
+    def _trace_event(
+        self,
+        stage: str,
+        *,
+        started_at: float | None = None,
+        details: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        task_id: str | None = None,
+    ) -> AgentEvent:
+        elapsed_ms = None
+        if started_at is not None:
+            elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
+        return trace(
+            stage,
+            ts=datetime.now(UTC).isoformat(),
+            elapsed_ms=elapsed_ms,
+            details=details,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        )
+
     async def run(
         self,
         message: str,
@@ -2579,11 +2616,30 @@ class SophiaAgent:
             )
 
             if last_message is not None:
-                self.memory.ingest_turn(
-                    session_id=context.session_id,
-                    user_message=active_user_message,
-                    assistant_message=last_message.content,
-                )
+                memory_ingest_started = perf_counter()
+                try:
+                    self.memory.ingest_turn(
+                        session_id=context.session_id,
+                        user_message=active_user_message,
+                        assistant_message=last_message.content,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "memory_ingest_failed session_id=%s turn=%s",
+                        context.session_id,
+                        turn,
+                    )
+                    yield self._trace_event(
+                        "memory_ingest_failed",
+                        started_at=memory_ingest_started,
+                        details={
+                            "turn": turn,
+                            "error": str(exc),
+                        },
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
                 if self.history is not None:
                     self.history.record_turn_output(
                         session_id=context.session_id,
