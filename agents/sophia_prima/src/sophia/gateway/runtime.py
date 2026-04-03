@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
+from time import perf_counter
 from typing import AsyncGenerator
 from uuid import uuid4
 
@@ -16,7 +17,7 @@ from sophia.agent import SophiaAgent
 from sophia.agent_profiles import AgentProfile
 from sophia.config import Settings, get_settings
 from sophia.context import ConversationContext
-from sophia.events import AgentEvent, EventType
+from sophia.events import AgentEvent, EventType, trace
 from sophia.gateway.acquisition import GatewayAcquisitionService
 from sophia.gateway.agent_registry import load_agent_profiles
 from sophia.gateway.models import InboundMessage, OutboundMessage
@@ -27,9 +28,24 @@ from sophia.gateway.research_plan_artifacts import (
 from sophia.gateway.run_store import GatewayRunStore
 from sophia.gateway.routing import GatewayRouter
 from sophia.llm.base import ModelProvider
+from sophia.llm.registry import (
+    OPENAI_COMPATIBLE_PROVIDERS,
+    ResolvedLLMConfig,
+    list_model_catalog,
+    normalized_llm_settings,
+    resolve_llm_config,
+)
 from sophia.presentation import PresentationRegistry, PresentationResolver
 
 logger = logging.getLogger("sophia.gateway.runtime")
+
+_LIVE_ACK_RESPONSES = (
+    "Sure thing.",
+    "Having a look.",
+    "On it.",
+    "Checking now.",
+    "Working on it.",
+)
 
 
 @dataclass
@@ -60,6 +76,7 @@ class GatewayRuntime:
         self._agents: dict[str, SophiaAgent] = {}
         self._agent_profiles: dict[str, AgentProfile] = {}
         self._provider: ModelProvider | None = None
+        self._resolved_llm: ResolvedLLMConfig | None = None
         self._pylon: Pylon | None = None
         self._run_store: GatewayRunStore | None = None
         read_policy = self.settings.build_read_policy()
@@ -79,6 +96,7 @@ class GatewayRuntime:
         )
         self._startup_error: str | None = None
         self._started = False
+        self._component_inventory: list[dict[str, object]] = []
 
     @property
     def startup_error(self) -> str | None:
@@ -88,6 +106,33 @@ class GatewayRuntime:
     def is_ready(self) -> bool:
         return self._started and self._startup_error is None
 
+    def _trace_event(
+        self,
+        stage: str,
+        *,
+        run_id: str,
+        started_at: float | None = None,
+        details: dict[str, object] | None = None,
+    ) -> AgentEvent:
+        elapsed_ms = None
+        if started_at is not None:
+            elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
+        return trace(
+            stage,
+            ts=datetime.now(UTC).isoformat(),
+            elapsed_ms=elapsed_ms,
+            details=details,
+            run_id=run_id,
+        )
+
+    def _select_live_ack_text(self, seed: str) -> str:
+        compact_seed = seed.replace("-", "")
+        try:
+            ack_index = int(compact_seed, 16) % len(_LIVE_ACK_RESPONSES)
+        except ValueError:
+            ack_index = sum(seed.encode("utf-8")) % len(_LIVE_ACK_RESPONSES)
+        return _LIVE_ACK_RESPONSES[ack_index]
+
     async def start(self) -> None:
         """Initialize provider, pylon, and default agent."""
         if self._started:
@@ -95,20 +140,31 @@ class GatewayRuntime:
 
         self._started = True
         try:
+            resolved = self._resolve_llm(require_api_key=True)
             provider = self._create_provider()
             pylon = await self._create_pylon()
             run_store = GatewayRunStore(self.settings.gateway_artifact_store_path)
             preflight = await pylon.preflight()
             if preflight.unavailable_tools:
                 logger.warning("gateway preflight unavailable tools:\n%s", preflight.summary())
+            component_inventory = await self._build_component_inventory(
+                pylon=pylon,
+                include_live_metadata=True,
+            )
             profiles = load_agent_profiles(
                 default_agent_id=self.settings.gateway_default_agent_id,
                 raw_profiles_json=self.settings.gateway_agents_json,
             )
+            base_agent_settings = normalized_llm_settings(
+                self.settings,
+                require_api_key=False,
+            )
             agents: dict[str, SophiaAgent] = {}
             for agent_id, profile in profiles.items():
-                agent_settings = self.settings.model_copy(
+                agent_settings = base_agent_settings.model_copy(
                     update={
+                        "llm_provider": resolved.provider,
+                        "llm_model": resolved.wire_model,
                         "skills_enabled": (
                             self.settings.skills_enabled
                             if profile.skills_enabled is None
@@ -127,12 +183,14 @@ class GatewayRuntime:
                     pylon=pylon,
                     preflight_result=preflight,
                     profile=profile,
+                    runtime_component_inventory=component_inventory,
                 )
             self._provider = provider
             self._pylon = pylon
             self._run_store = run_store
             self._agent_profiles = profiles
             self._agents = agents
+            self._component_inventory = component_inventory
             logger.info(
                 "Gateway runtime ready: default_agent_id=%s agents=%s",
                 self.settings.gateway_default_agent_id,
@@ -154,6 +212,8 @@ class GatewayRuntime:
         self._agent_profiles.clear()
         self._sessions.clear()
         self._run_store = None
+        self._component_inventory = []
+        self._resolved_llm = None
         self._started = False
 
     async def handle_inbound(self, message: InboundMessage) -> OutboundMessage:
@@ -175,6 +235,7 @@ class GatewayRuntime:
         if not text:
             raise ValueError("message text cannot be empty")
 
+        run_started_at = perf_counter()
         decision = self.router.resolve(message)
         session = self._sessions.get(decision.session_id)
         if session is None:
@@ -204,6 +265,32 @@ class GatewayRuntime:
             decision.session_id,
             len(text),
         )
+        sequence = 0
+
+        def append_event(event: AgentEvent) -> AgentEvent:
+            nonlocal sequence
+            sequence += 1
+            run_store.append_event(run_id=run_id, sequence=sequence, event=event)
+            self._record_tool_event_diagnostics(
+                run_id=run_id,
+                event=event,
+                run_store=run_store,
+            )
+            return event
+
+        yield append_event(
+            self._trace_event(
+                "gateway_run_initialized",
+                run_id=run_id,
+                started_at=run_started_at,
+                details={
+                    "channel": message.channel,
+                    "agent_id": decision.agent_id,
+                    "session_id": decision.session_id,
+                    "text_len": len(text),
+                },
+            )
+        )
         self._record_live_web_unavailability_if_relevant(
             run_id=run_id,
             message_text=text,
@@ -211,6 +298,14 @@ class GatewayRuntime:
         )
 
         if self._startup_error:
+            yield append_event(
+                self._trace_event(
+                    "startup_guard_failed",
+                    run_id=run_id,
+                    started_at=run_started_at,
+                    details={"error": self._startup_error},
+                )
+            )
             fallback = (
                 "Sophia gateway is not fully configured yet. "
                 f"Startup error: {self._startup_error}"
@@ -223,6 +318,14 @@ class GatewayRuntime:
                 account_id=message.account_id,
                 peer_id=message.peer_id,
                 run_id=run_id,
+            )
+            yield append_event(
+                self._trace_event(
+                    "gateway_run_completed",
+                    run_id=run_id,
+                    started_at=run_started_at,
+                    details={"status": "completed", "delivery_mode": outbound.delivery_mode},
+                )
             )
             run_store.finish_run(
                 run_id=run_id,
@@ -244,26 +347,57 @@ class GatewayRuntime:
             raise RuntimeError(f"no agent registered for id '{decision.agent_id}'")
 
         last_assistant_text = ""
-        sequence = 0
-        async with session.lock:
+        live_ack = self._select_live_ack_text(run_id)
+        yield append_event(
+            self._trace_event(
+                "live_ack_emitted",
+                run_id=run_id,
+                started_at=run_started_at,
+                details={"text": live_ack},
+            )
+        )
+        yield OutboundMessage(
+            text=live_ack,
+            session_id=decision.session_id,
+            agent_id=decision.agent_id,
+            channel=message.channel,
+            account_id=message.account_id,
+            peer_id=message.peer_id,
+            run_id=run_id,
+            delivery_mode="placeholder",
+        )
+
+        lock_wait_started = perf_counter()
+        await session.lock.acquire()
+        yield append_event(
+            self._trace_event(
+                "session_lock_acquired",
+                run_id=run_id,
+                started_at=lock_wait_started,
+            )
+        )
+        agent_execution_started = perf_counter()
+        try:
             try:
                 logger.info(
                     "gateway agent execution starting: run_id=%s agent_id=%s",
                     run_id,
                     decision.agent_id,
                 )
+                yield append_event(
+                    self._trace_event(
+                        "agent_execution_started",
+                        run_id=run_id,
+                        started_at=agent_execution_started,
+                    )
+                )
                 agent_run = getattr(agent, "run", None)
                 if callable(agent_run):
                     async for event in agent_run(text, session.context, run_id=run_id):
-                        sequence += 1
-                        run_store.append_event(run_id=run_id, sequence=sequence, event=event)
-                        self._record_tool_event_diagnostics(
-                            run_id=run_id,
-                            event=event,
-                            run_store=run_store,
-                        )
+                        append_event(event)
                         if (
                             event.type == EventType.MESSAGE_END
+                            and not bool(event.data.get("placeholder"))
                             and event.data.get("message") is not None
                         ):
                             last_assistant_text = str(event.data["message"].content or "")
@@ -271,13 +405,29 @@ class GatewayRuntime:
                 else:
                     assistant = await agent.chat(text, session.context)
                     last_assistant_text = assistant.content
+                yield append_event(
+                    self._trace_event(
+                        "agent_execution_completed",
+                        run_id=run_id,
+                        started_at=agent_execution_started,
+                        details={"assistant_chars": len(last_assistant_text)},
+                    )
+                )
             except RuntimeError as exc:
                 if _is_provider_capacity_error(exc):
                     logger.warning("Provider capacity/limit error: %s", exc)
+                    yield append_event(
+                        self._trace_event(
+                            "provider_capacity_error",
+                            run_id=run_id,
+                            started_at=agent_execution_started,
+                            details={"error": str(exc)},
+                        )
+                    )
                     run_store.update_run_diagnostics(
                         run_id=run_id,
                         failure_stage="provider_completion",
-                        provider_name=self.settings.llm_provider,
+                        provider_name=self._resolve_llm().provider,
                     )
                     retry_text = (
                         "I hit a temporary model capacity limit while processing that. "
@@ -292,12 +442,20 @@ class GatewayRuntime:
                         peer_id=message.peer_id,
                         run_id=run_id,
                     )
+                    yield append_event(
+                        self._trace_event(
+                            "gateway_run_completed",
+                            run_id=run_id,
+                            started_at=run_started_at,
+                            details={"status": "completed", "delivery_mode": outbound.delivery_mode},
+                        )
+                    )
                     run_store.finish_run(
                         run_id=run_id,
                         status="completed",
                         final_text=retry_text,
                         failure_stage="provider_completion",
-                        provider_name=self.settings.llm_provider,
+                        provider_name=self._resolve_llm().provider,
                     )
                     yield outbound
                     return
@@ -306,12 +464,20 @@ class GatewayRuntime:
                     run_id,
                     exc,
                 )
+                yield append_event(
+                    self._trace_event(
+                        "agent_runtime_failed",
+                        run_id=run_id,
+                        started_at=agent_execution_started,
+                        details={"error": str(exc)},
+                    )
+                )
                 run_store.finish_run(
                     run_id=run_id,
                     status="failed",
                     error=str(exc),
                     failure_stage="agent_runtime",
-                    provider_name=self.settings.llm_provider,
+                    provider_name=self._resolve_llm().provider,
                 )
                 raise
             except Exception as exc:
@@ -320,15 +486,33 @@ class GatewayRuntime:
                     run_id,
                     exc,
                 )
+                yield append_event(
+                    self._trace_event(
+                        "agent_execution_failed",
+                        run_id=run_id,
+                        started_at=agent_execution_started,
+                        details={"error": str(exc)},
+                    )
+                )
                 run_store.finish_run(
                     run_id=run_id,
                     status="failed",
                     error=str(exc),
                     failure_stage="agent_execution",
-                    provider_name=self.settings.llm_provider,
+                    provider_name=self._resolve_llm().provider,
                 )
                 raise
+        finally:
+            session.lock.release()
 
+        presentation_started = perf_counter()
+        yield append_event(
+            self._trace_event(
+                "presentation_resolution_started",
+                run_id=run_id,
+                started_at=presentation_started,
+            )
+        )
         outbound = OutboundMessage(
             text=last_assistant_text.strip() or "(empty response)",
             session_id=decision.session_id,
@@ -343,16 +527,35 @@ class GatewayRuntime:
             user_message=text,
             run_store=run_store,
         )
+        yield append_event(
+            self._trace_event(
+                "presentation_resolution_completed",
+                run_id=run_id,
+                started_at=presentation_started,
+                details={
+                    "delivery_mode": outbound.delivery_mode,
+                    "artifact_count": len(outbound.artifacts),
+                },
+            )
+        )
         run_store.update_run_diagnostics(
             run_id=run_id,
             outbound_text_len=len(outbound.text.strip() or "(empty response)"),
-            provider_name=self.settings.llm_provider,
+            provider_name=self._resolve_llm().provider,
+        )
+        yield append_event(
+            self._trace_event(
+                "gateway_run_completed",
+                run_id=run_id,
+                started_at=run_started_at,
+                details={"status": "completed", "delivery_mode": outbound.delivery_mode},
+            )
         )
         run_store.finish_run(
             run_id=run_id,
             status="completed",
             final_text=outbound.text,
-            provider_name=self.settings.llm_provider,
+            provider_name=self._resolve_llm().provider,
         )
         logger.info(
             "gateway run completed: run_id=%s agent_id=%s outbound_len=%s",
@@ -366,6 +569,40 @@ class GatewayRuntime:
         """Return one persisted run record with events."""
         store = self._ensure_run_store()
         return store.get_run(run_id)
+
+    def list_run_records(
+        self,
+        *,
+        limit: int = 25,
+        agent_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Return recent persisted run summaries."""
+        store = self._ensure_run_store()
+        return store.list_runs(limit=limit, agent_id=agent_id, status=status)
+
+    def get_skill_artifact(self, artifact_id: str) -> dict[str, object] | None:
+        """Return one persisted skill artifact record."""
+        store = self._ensure_run_store()
+        return store.get_skill_artifact(artifact_id)
+
+    def reload_presentation_registry(self) -> None:
+        """Rebuild presentation registry/resolver after config edits."""
+        read_policy = self.settings.build_read_policy()
+        write_policy = self.settings.build_write_policy()
+        self._presentation_registry = PresentationRegistry(
+            core_path=self.settings.presentation_core_path,
+            channels_path=self.settings.presentation_channels_path,
+            rendering_path=self.settings.presentation_rendering_path,
+            skills_root=self.settings.skills_path,
+            max_loaded_chars=self.settings.skills_max_loaded_chars,
+            read_policy=read_policy,
+        )
+        self._presentation_resolver = PresentationResolver(
+            registry=self._presentation_registry,
+            artifact_dir=self.settings.presentation_artifact_dir,
+            write_policy=write_policy,
+        )
 
     def create_acquisition_job(
         self,
@@ -495,45 +732,103 @@ class GatewayRuntime:
             )
         return out
 
+    async def describe_components(self) -> list[dict[str, object]]:
+        """Return an inventory of models and tool services for the agent surface."""
+        if self._component_inventory:
+            return [self._copy_component_inventory_row(row) for row in self._component_inventory]
+
+        inventory = await self._build_component_inventory(
+            pylon=self._pylon,
+            include_live_metadata=self._pylon is not None,
+        )
+        if self._pylon is not None:
+            self._component_inventory = inventory
+        return [self._copy_component_inventory_row(row) for row in inventory]
+
+    def describe_llm_catalog(self) -> dict[str, object]:
+        """Return dashboard metadata for manual LLM selection."""
+        resolved = self._resolve_llm()
+        tool_names = self._default_agent_tool_names()
+        current_spec = f"{resolved.provider}:{resolved.wire_model}"
+        return {
+            "current_model_spec": current_spec,
+            "current_provider": resolved.provider,
+            "current_wire_model": resolved.wire_model,
+            "default_agent_id": self.settings.gateway_default_agent_id,
+            "models": [
+                {
+                    "model_spec": entry.model_spec,
+                    "provider": entry.provider,
+                    "wire_model": entry.wire_model,
+                    "label": entry.label,
+                    "description": entry.description,
+                    "supports_tool_calls": entry.supports_tool_calls,
+                    "tools": list(tool_names),
+                    "selected": entry.model_spec == current_spec,
+                }
+                for entry in list_model_catalog()
+            ],
+        }
+
+    async def update_llm_model(self, model_spec: str) -> dict[str, object]:
+        """Apply a new explicit llm model spec and restart the runtime."""
+        next_model_spec = model_spec.strip()
+        candidate_settings = self.settings.model_copy(update={"llm_model": next_model_spec})
+        resolve_llm_config(candidate_settings, require_api_key=True)
+
+        previous_model = self.settings.llm_model
+        await self.stop()
+        self.settings.llm_model = next_model_spec
+        self._startup_error = None
+        await self.start()
+        if self._startup_error is not None:
+            failed_error = self._startup_error
+            await self.stop()
+            self.settings.llm_model = previous_model
+            self._startup_error = None
+            await self.start()
+            raise RuntimeError(
+                f"Failed to apply llm model '{next_model_spec}': {failed_error}"
+            )
+        return self.describe_llm_catalog()
+
     def clear_session(self, message: InboundMessage) -> bool:
         """Clear the resolved session for a given inbound envelope."""
         decision = self.router.resolve(message)
         return self._sessions.pop(decision.session_id, None) is not None
 
     def _create_provider(self) -> ModelProvider:
-        provider_name = self.settings.llm_provider.lower().strip()
-        if provider_name == "anthropic":
-            if not self.settings.anthropic_api_key:
-                raise ValueError("ANTHROPIC_API_KEY is required for gateway operation")
+        resolved = self._resolve_llm(require_api_key=True)
+        if resolved.provider == "anthropic":
             from sophia.llm.anthropic_provider import AnthropicProvider
-            return AnthropicProvider(api_key=self.settings.anthropic_api_key)
+            return AnthropicProvider(api_key=resolved.api_key)
 
-        if provider_name == "openai":
-            if not self.settings.openai_api_key:
-                raise ValueError("OPENAI_API_KEY is required for gateway operation")
+        if resolved.provider in OPENAI_COMPATIBLE_PROVIDERS:
             from sophia.llm.openai_provider import OpenAIProvider
             return OpenAIProvider(
-                api_key=self.settings.openai_api_key,
-                base_url=self.settings.openai_base_url,
+                api_key=resolved.api_key,
+                base_url=resolved.base_url or self.settings.openai_base_url,
                 timeout=self.settings.llm_request_timeout_sec,
             )
-        if provider_name == "groq":
-            if not self.settings.groq_api_key:
-                raise ValueError("GROQ_API_KEY is required for gateway operation")
+        if resolved.provider == "groq":
             from sophia.llm.groq_provider import GroqProvider
             return GroqProvider(
-                api_key=self.settings.groq_api_key,
-                base_url=self.settings.groq_base_url,
+                api_key=resolved.api_key,
+                base_url=resolved.base_url or self.settings.groq_base_url,
                 timeout=self.settings.llm_request_timeout_sec,
             )
 
-        raise ValueError(
-            f"unsupported llm_provider '{self.settings.llm_provider}', "
-            "gateway currently supports: anthropic, openai, groq"
-        )
+        raise ValueError(f"Unsupported provider '{resolved.provider}'")
 
     async def _create_pylon(self) -> Pylon:
-        config = PylonConfig(
+        config = self._build_pylon_config()
+        pylon = Pylon(config)
+        # Prime health state before serving traffic.
+        await pylon.preflight()
+        return pylon
+
+    def _build_pylon_config(self) -> PylonConfig:
+        return PylonConfig(
             scrivener_url=self.settings.scrivener_base_url,
             arithmos_url=self.settings.arithmos_base_url,
             canvas_url=self.settings.canvas_base_url,
@@ -544,15 +839,275 @@ class GatewayRuntime:
             brave_base_url=self.settings.brave_base_url,
             brave_api_key=self.settings.brave_api_key,
         )
-        pylon = Pylon(config)
-        # Prime health state before serving traffic.
-        await pylon.preflight()
-        return pylon
 
     def _ensure_run_store(self) -> GatewayRunStore:
         if self._run_store is None:
             self._run_store = GatewayRunStore(self.settings.gateway_artifact_store_path)
         return self._run_store
+
+    async def _build_component_inventory(
+        self,
+        *,
+        pylon: Pylon | None,
+        include_live_metadata: bool,
+    ) -> list[dict[str, object]]:
+        inventory: list[dict[str, object]] = [
+            {
+                "component_id": "sophia_prima",
+                "label": "Sophia Prima",
+                "scope": "agent",
+                "category": "llm",
+                "provider": self._resolve_llm().provider,
+                "model_name": self.settings.llm_model,
+                "target": self._provider_target(),
+                "tools": [],
+                "healthy": self.is_ready if self._started else None,
+                "latency_ms": None,
+                "error": self._startup_error,
+                "notes": "Primary completion model used by the gateway agent.",
+            },
+            {
+                "component_id": "memory_embeddings",
+                "label": "Memory embeddings",
+                "scope": "memory",
+                "category": "embedding" if self.settings.memory_embedding_enabled else "non_model",
+                "provider": (
+                    self.settings.memory_embedding_provider
+                    if self.settings.memory_embedding_enabled
+                    else None
+                ),
+                "model_name": (
+                    self.settings.memory_embedding_model
+                    if self.settings.memory_embedding_enabled
+                    else None
+                ),
+                "target": (
+                    self.settings.memory_embedding_openai_base_url
+                    if self.settings.memory_embedding_enabled
+                    and self.settings.memory_embedding_provider == "openai"
+                    else None
+                ),
+                "tools": [],
+                "healthy": None,
+                "latency_ms": None,
+                "error": None,
+                "notes": (
+                    "Semantic memory indexing and retrieval."
+                    if self.settings.memory_embedding_enabled
+                    else "Embeddings disabled; lexical memory retrieval only."
+                ),
+            },
+        ]
+
+        ephemeral_pylon: Pylon | None = None
+        pylon_ref = pylon
+        if pylon_ref is None:
+            ephemeral_pylon = Pylon(self._build_pylon_config())
+            pylon_ref = ephemeral_pylon
+
+        try:
+            service_tools = {
+                service_name: list(tool_names)
+                for service_name, tool_names in pylon_ref._service_tools.items()
+            }
+            service_status = dict(pylon_ref._service_status)
+
+            inventory.extend(
+                [
+                    self._build_service_component(
+                        component_id="scrivener",
+                        label="Scrivener",
+                        category="non_model",
+                        target=pylon_ref._scrivener_client.base_url,
+                        tools=service_tools.get("scrivener", []),
+                        status=service_status.get("scrivener"),
+                        notes="Economic and market data service.",
+                    ),
+                    self._build_service_component(
+                        component_id="arithmos",
+                        label="Arithmos",
+                        category="non_model",
+                        target=pylon_ref._arithmos_client.base_url,
+                        tools=service_tools.get("arithmos", []),
+                        status=service_status.get("arithmos"),
+                        notes="Deterministic computation service.",
+                    ),
+                    self._build_service_component(
+                        component_id="canvas",
+                        label="Canvas",
+                        category="non_model",
+                        target=pylon_ref._canvas_client.base_url,
+                        tools=service_tools.get("canvas", []),
+                        status=service_status.get("canvas"),
+                        notes="Chart and visualization rendering service.",
+                    ),
+                    self._build_service_component(
+                        component_id="tholos",
+                        label="Tholos",
+                        category="embedding",
+                        target=pylon_ref._tholos_client.base_url,
+                        tools=service_tools.get("tholos", []),
+                        status=service_status.get("tholos"),
+                        notes="Research retrieval service; model name is service-reported when available.",
+                    ),
+                    self._build_service_component(
+                        component_id="fed_tracker",
+                        label="Fed tracker",
+                        category="unknown",
+                        target=pylon_ref._fed_tracker_client.base_url,
+                        tools=service_tools.get("fed_tracker", []),
+                        status=service_status.get("fed_tracker"),
+                        notes="Fed communications analysis service.",
+                    ),
+                    self._build_service_component(
+                        component_id="oikonomia",
+                        label="Oikonomia",
+                        category="model_registry",
+                        target=pylon_ref._oikonomia_client.base_url,
+                        tools=service_tools.get("oikonomia", []),
+                        status=service_status.get("oikonomia"),
+                        notes="Published economic model outputs; specific model varies by tool call.",
+                    ),
+                    self._build_service_component(
+                        component_id="readwise",
+                        label="Readwise CLI",
+                        category="non_model",
+                        target=self.settings.readwise_cli_path,
+                        tools=service_tools.get("readwise", []),
+                        status=service_status.get("readwise"),
+                        notes="CLI-backed private reading context.",
+                    ),
+                    self._build_service_component(
+                        component_id="brave",
+                        label="Brave Search",
+                        category="non_model",
+                        target=pylon_ref._brave_client.base_url,
+                        tools=service_tools.get("brave", []),
+                        status=service_status.get("brave"),
+                        notes="Live web search and page-context API.",
+                    ),
+                ]
+            )
+
+            if include_live_metadata:
+                await self._enrich_component_inventory_with_live_metadata(
+                    inventory=inventory,
+                    pylon=pylon_ref,
+                )
+        finally:
+            if ephemeral_pylon is not None:
+                await ephemeral_pylon.close()
+
+        return inventory
+
+    async def _enrich_component_inventory_with_live_metadata(
+        self,
+        *,
+        inventory: list[dict[str, object]],
+        pylon: Pylon,
+    ) -> None:
+        by_id = {str(row.get("component_id")): row for row in inventory}
+        tholos = by_id.get("tholos")
+        if tholos is None:
+            return
+
+        try:
+            payload = await pylon._tholos_client.get_status()
+        except Exception:
+            return
+
+        model_name = payload.get("model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            tholos["model_name"] = model_name.strip()
+
+        note_parts: list[str] = []
+        chunk_count = payload.get("chunk_count")
+        if isinstance(chunk_count, int):
+            note_parts.append(f"{chunk_count} chunks loaded")
+        npz_dims = payload.get("npz_dims")
+        if isinstance(npz_dims, list) and npz_dims:
+            note_parts.append(f"embedding dims={npz_dims}")
+        if note_parts:
+            base = str(tholos.get("notes") or "").strip()
+            suffix = ". ".join(note_parts)
+            tholos["notes"] = f"{base} {suffix}".strip()
+
+    def _build_service_component(
+        self,
+        *,
+        component_id: str,
+        label: str,
+        category: str,
+        target: str | None,
+        tools: list[str],
+        status: object | None,
+        notes: str,
+    ) -> dict[str, object]:
+        healthy = getattr(status, "healthy", None)
+        latency_ms = getattr(status, "latency_ms", None)
+        error = getattr(status, "error", None)
+        return {
+            "component_id": component_id,
+            "label": label,
+            "scope": "tool_service",
+            "category": category,
+            "provider": None,
+            "model_name": None,
+            "target": target,
+            "tools": list(tools),
+            "healthy": healthy,
+            "latency_ms": latency_ms,
+            "error": error,
+            "notes": notes,
+        }
+
+    def _provider_target(self) -> str | None:
+        provider_name = self._resolve_llm().provider
+        if provider_name == "openai":
+            return self.settings.openai_base_url
+        if provider_name == "groq":
+            return self.settings.groq_base_url
+        if provider_name == "deepinfra":
+            return self.settings.deepinfra_base_url
+        return None
+
+    def _resolve_llm(self, *, require_api_key: bool = False) -> ResolvedLLMConfig:
+        if self._resolved_llm is None:
+            self._resolved_llm = resolve_llm_config(
+                self.settings,
+                require_api_key=require_api_key,
+            )
+        elif require_api_key and not self._resolved_llm.api_key:
+            raise ValueError(
+                f"{self._resolved_llm.api_key_field.upper()} is required for gateway operation"
+            )
+        return self._resolved_llm
+
+    def _default_agent_tool_names(self) -> list[str]:
+        agent = self._agents.get(self.settings.gateway_default_agent_id)
+        if agent is not None:
+            get_tool_schemas = getattr(agent, "_get_tool_schemas", None)
+            if callable(get_tool_schemas):
+                try:
+                    return sorted({schema.name for schema in get_tool_schemas()})
+                except Exception:
+                    logger.exception("failed loading tool schemas for dashboard catalog")
+
+        if self._pylon is not None:
+            try:
+                return sorted({tool.name for tool in self._pylon.get_tools(only_healthy=True)})
+            except Exception:
+                logger.exception("failed loading pylon tools for dashboard catalog")
+
+        return []
+
+    @staticmethod
+    def _copy_component_inventory_row(row: dict[str, object]) -> dict[str, object]:
+        copied = dict(row)
+        tools = copied.get("tools")
+        if isinstance(tools, list):
+            copied["tools"] = list(tools)
+        return copied
 
     def _record_live_web_unavailability_if_relevant(
         self,
@@ -582,7 +1137,7 @@ class GatewayRuntime:
         run_store.update_run_diagnostics(
             run_id=run_id,
             failure_stage="tool_unavailable",
-            provider_name=self.settings.llm_provider,
+            provider_name=self._resolve_llm().provider,
             tool_name="search_web",
             service_name="brave",
         )
@@ -612,7 +1167,7 @@ class GatewayRuntime:
             )
             run_store.update_run_diagnostics(
                 run_id=run_id,
-                provider_name=self.settings.llm_provider,
+                provider_name=self._resolve_llm().provider,
                 tool_name=tool_name,
                 service_name=service_name,
             )
@@ -630,7 +1185,7 @@ class GatewayRuntime:
             run_store.update_run_diagnostics(
                 run_id=run_id,
                 failure_stage="tool_execution",
-                provider_name=self.settings.llm_provider,
+                provider_name=self._resolve_llm().provider,
                 tool_name=tool_name,
                 service_name=service_name,
             )
