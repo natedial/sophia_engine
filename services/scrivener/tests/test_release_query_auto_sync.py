@@ -3,6 +3,8 @@
 from datetime import date
 from types import SimpleNamespace
 
+import src.config as config_module
+import src.fetchers.fred as fred_module
 from src.query.releases import ReleaseQuery
 
 
@@ -122,3 +124,28 @@ def test_format_rows_handles_missing_release_metadata():
     assert results[0]["name"] == "Release 999"
     assert results[0]["fred_release_id"] == 999
     assert results[0]["press_release"] is False
+
+
+def test_auto_sync_returns_false_for_degraded_sync(monkeypatch):
+    """Read-path auto-sync should not treat degraded release syncs as authoritative."""
+
+    class FakeFetcher:
+        def sync_release_calendar(self, *, days_ahead):
+            assert days_ahead == 90
+            return {
+                "status": "degraded",
+                "ready": False,
+                "dates": {
+                    "status": "degraded",
+                    "degraded_reason": "anchor_validation_failed",
+                },
+            }
+
+    monkeypatch.setattr(
+        config_module,
+        "get_settings",
+        lambda: SimpleNamespace(fred_api_key="test-key"),
+    )
+    monkeypatch.setattr(fred_module, "FredFetcher", FakeFetcher)
+
+    assert ReleaseQuery._auto_sync_release_calendar(90) is False

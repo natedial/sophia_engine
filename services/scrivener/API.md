@@ -719,6 +719,8 @@ Get upcoming release dates for a specific FRED release.
 ### POST /releases/sync
 
 Sync FRED releases and upcoming release dates from the FRED API.
+The response indicates whether the fetched snapshot was `complete` enough to reconcile destructively or whether Scrivener stayed in degraded, insert-only mode.
+Degraded syncs return HTTP `503` with the sync payload in the error detail.
 
 **Query Parameters:**
 | Parameter | Type | Default | Description |
@@ -728,8 +730,36 @@ Sync FRED releases and upcoming release dates from the FRED API.
 **Response:**
 ```json
 {
-  "releases": {"inserted": 321, "updated": 0},
-  "dates": {"inserted": 764, "skipped": 0}
+  "status": "complete",
+  "ready": true,
+  "releases": {
+    "fetched": 321,
+    "expected": 321,
+    "inserted": 321,
+    "updated": 0,
+    "complete": true,
+    "status": "complete",
+    "degraded_reason": null
+  },
+  "dates": {
+    "fetched": 764,
+    "expected": 764,
+    "inserted": 764,
+    "skipped": 0,
+    "skipped_missing_release": 0,
+    "removed": 12,
+    "complete": true,
+    "status": "complete",
+    "degraded_reason": null,
+    "destructive_cleanup_performed": true,
+    "integrity_ok": true,
+    "anchor_validation": {
+      "enabled": true,
+      "ok": true,
+      "checked_until": "2026-05-18",
+      "missing_releases": []
+    }
+  }
 }
 ```
 

@@ -79,8 +79,15 @@ class ReleaseQuery:
             from src.fetchers.fred import FredFetcher
 
             fetcher = FredFetcher()
-            fetcher.sync_release_calendar(days_ahead=max(days_ahead, 30))
-            return True
+            result = fetcher.sync_release_calendar(days_ahead=max(days_ahead, 30))
+            ready = bool(result.get("ready"))
+            if not ready:
+                logger.warning(
+                    "Release auto-sync completed in degraded mode: status=%s reason=%s",
+                    result.get("dates", {}).get("status"),
+                    result.get("dates", {}).get("degraded_reason"),
+                )
+            return ready
         except Exception as exc:
             logger.warning("Release auto-sync failed: %s", exc)
             return False
