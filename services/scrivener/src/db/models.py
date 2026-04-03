@@ -6,18 +6,22 @@ from typing import Any
 
 from sqlalchemy import (
     ARRAY,
+    Boolean,
     BigInteger,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     Text,
     func,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -149,7 +153,7 @@ class EconomicEvent(Base):
 
     __tablename__ = "economic_events"
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)  # UUID as text
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True)
     run_id: Mapped[str] = mapped_column(Text, nullable=False)
     extraction_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     calendar_date: Mapped[str | None] = mapped_column(Text)
@@ -167,6 +171,85 @@ class EconomicEvent(Base):
     event_date: Mapped[date | None] = mapped_column(Date)
     importance_indicator: Mapped[str | None] = mapped_column(Text)
     day_date: Mapped[str | None] = mapped_column(Text)
+
+
+class EconomicEventForecast(Base):
+    """Source-specific economic forecast rows."""
+
+    __tablename__ = "economic_event_forecasts"
+
+    id: Mapped[str] = mapped_column(
+        Text,
+        primary_key=True,
+        server_default=sql_text("gen_random_uuid()::text"),
+    )
+    economic_event_id: Mapped[str | None] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("economic_events.id")
+    )
+    parsed_research_id: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_date: Mapped[date | None] = mapped_column(Date)
+    document_name: Mapped[str | None] = mapped_column(Text)
+    document_link: Mapped[str | None] = mapped_column(Text)
+    document_hash: Mapped[str | None] = mapped_column(Text)
+    indicator_key: Mapped[str] = mapped_column(Text, nullable=False)
+    event_name: Mapped[str] = mapped_column(Text, nullable=False)
+    country: Mapped[str | None] = mapped_column(Text)
+    period: Mapped[str | None] = mapped_column(Text)
+    release_date: Mapped[date | None] = mapped_column(Date)
+    forecast_type: Mapped[str] = mapped_column(Text, nullable=False)
+    forecast_value_numeric: Mapped[Decimal | None] = mapped_column(Numeric)
+    forecast_value_low: Mapped[Decimal | None] = mapped_column(Numeric)
+    forecast_value_high: Mapped[Decimal | None] = mapped_column(Numeric)
+    forecast_value_text: Mapped[str] = mapped_column(Text, nullable=False)
+    forecast_unit: Mapped[str | None] = mapped_column(Text)
+    qualifier_text: Mapped[str | None] = mapped_column(Text)
+    extraction_confidence: Mapped[str | None] = mapped_column(Text)
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    review_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sql_text("'pending'"),
+    )
+    upload_source: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sql_text("'research_analysis_layer'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index("idx_economic_event_forecasts_event_id", "economic_event_id"),
+        Index(
+            "idx_economic_event_forecasts_indicator_release_date",
+            "indicator_key",
+            "release_date",
+        ),
+        Index(
+            "idx_economic_event_forecasts_source_source_date",
+            "source",
+            "source_date",
+        ),
+        Index(
+            "idx_economic_event_forecasts_sem_unique",
+            "parsed_research_id",
+            "indicator_key",
+            "forecast_value_text",
+            "release_date",
+            unique=True,
+        ),
+    )
 
 
 class Release(Base):
@@ -212,6 +295,47 @@ class ReleaseDate(Base):
         Index("idx_release_dates_release_id", "release_id"),
         Index("idx_release_dates_date", "release_date"),
         Index("idx_release_dates_unique", "release_id", "release_date", unique=True),
+    )
+
+
+class ReleaseCalendarSyncRun(Base):
+    """Audit log for release calendar sync attempts."""
+
+    __tablename__ = "release_calendar_sync_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    days_ahead: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lock_acquired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    releases_fetched: Mapped[int | None] = mapped_column(Integer)
+    releases_expected: Mapped[int | None] = mapped_column(Integer)
+    releases_inserted: Mapped[int | None] = mapped_column(Integer)
+    releases_updated: Mapped[int | None] = mapped_column(Integer)
+    dates_fetched: Mapped[int | None] = mapped_column(Integer)
+    dates_expected: Mapped[int | None] = mapped_column(Integer)
+    dates_inserted: Mapped[int | None] = mapped_column(Integer)
+    dates_skipped: Mapped[int | None] = mapped_column(Integer)
+    dates_skipped_missing_release: Mapped[int | None] = mapped_column(Integer)
+    dates_removed: Mapped[int | None] = mapped_column(Integer)
+    dates_complete: Mapped[bool | None] = mapped_column(Boolean)
+    destructive_cleanup_performed: Mapped[bool | None] = mapped_column(Boolean)
+    integrity_ok: Mapped[bool | None] = mapped_column(Boolean)
+    degraded_reason: Mapped[str | None] = mapped_column(Text)
+    missing_anchors: Mapped[list[str] | None] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_release_calendar_sync_runs_started", "started_at"),
+        Index("idx_release_calendar_sync_runs_status", "status"),
     )
 
 

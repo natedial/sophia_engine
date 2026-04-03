@@ -1,13 +1,13 @@
 """FastAPI service for Scrivener data queries."""
 
 from datetime import date, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from src.acquisition import AcquisitionService
-from src.query import SeriesQuery, AuctionQuery
+from src.query import AuctionQuery, ForecastQuery, SeriesQuery
 
 app = FastAPI(
     title="Scrivener API",
@@ -105,6 +105,35 @@ class AuctionSummary(BaseModel):
     max_yield: float | None = None
     avg_bid_to_cover: float | None = None
     by_type: dict[str, int] | None = None
+
+
+class ForecastRecord(BaseModel):
+    id: str
+    economic_event_id: str | None
+    parsed_research_id: int | None
+    source: str
+    source_date: str | None
+    document_name: str | None
+    document_link: str | None
+    document_hash: str | None
+    indicator_key: str
+    event_name: str
+    country: str | None
+    period: str | None
+    release_date: str | None
+    forecast_type: str
+    forecast_value_numeric: float | None
+    forecast_value_low: float | None
+    forecast_value_high: float | None
+    forecast_value_text: str
+    forecast_unit: str | None
+    qualifier_text: str | None
+    extraction_confidence: str | None
+    evidence_text: str
+    review_status: str
+    upload_source: str
+    created_at: str | None
+    updated_at: str | None
 
 
 class SeriesAcquisitionRequest(BaseModel):
@@ -566,8 +595,10 @@ class ReleaseDateRecord(BaseModel):
 
 
 class ReleaseSyncResult(BaseModel):
-    releases: dict[str, int]
-    dates: dict[str, int]
+    status: str
+    ready: bool
+    releases: dict[str, Any]
+    dates: dict[str, Any]
 
 
 # --- Release Endpoints ---
@@ -781,8 +812,93 @@ def sync_releases(
 
     fetcher = FredFetcher()
     result = fetcher.sync_release_calendar(days_ahead=days_ahead)
+    if not result["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Release calendar sync completed in degraded mode",
+                "sync": result,
+            },
+        )
 
     return ReleaseSyncResult(
+        status=result["status"],
+        ready=result["ready"],
         releases=result["releases"],
         dates=result["dates"],
+    )
+
+
+@app.get("/forecasts", response_model=list[ForecastRecord])
+def list_forecasts(
+    indicator_key: Annotated[
+        str | None,
+        Query(description="Filter by normalized indicator key"),
+    ] = None,
+    source: Annotated[
+        str | None,
+        Query(description="Filter by research source"),
+    ] = None,
+    country: Annotated[
+        str | None,
+        Query(description="Filter by country code or name"),
+    ] = None,
+    release_date: Annotated[
+        date | None,
+        Query(description="Exact release date (YYYY-MM-DD)"),
+    ] = None,
+    release_date_from: Annotated[
+        date | None,
+        Query(description="Earliest release date (YYYY-MM-DD)"),
+    ] = None,
+    release_date_to: Annotated[
+        date | None,
+        Query(description="Latest release date (YYYY-MM-DD)"),
+    ] = None,
+    source_date_from: Annotated[
+        date | None,
+        Query(description="Earliest source publication date (YYYY-MM-DD)"),
+    ] = None,
+    source_date_to: Annotated[
+        date | None,
+        Query(description="Latest source publication date (YYYY-MM-DD)"),
+    ] = None,
+    review_status: Annotated[
+        str | None,
+        Query(description="Review status: pending, approved, rejected, uploaded"),
+    ] = None,
+    forecast_type: Annotated[
+        str | None,
+        Query(description="Forecast type such as point, range, or directional"),
+    ] = None,
+    economic_event_id: Annotated[
+        str | None,
+        Query(description="Linked economic_events.id"),
+    ] = None,
+    parsed_research_id: Annotated[
+        int | None,
+        Query(description="Original parsed_research.id when available"),
+    ] = None,
+    event_name_contains: Annotated[
+        str | None,
+        Query(description="Case-insensitive substring match on event name"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+):
+    """List source-specific economic forecasts."""
+    return ForecastQuery.list_forecasts(
+        indicator_key=indicator_key,
+        source=source,
+        country=country,
+        release_date=release_date,
+        release_date_from=release_date_from,
+        release_date_to=release_date_to,
+        source_date_from=source_date_from,
+        source_date_to=source_date_to,
+        review_status=review_status,
+        forecast_type=forecast_type,
+        economic_event_id=economic_event_id,
+        parsed_research_id=parsed_research_id,
+        event_name_contains=event_name_contains,
+        limit=limit,
     )

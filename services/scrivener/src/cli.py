@@ -369,8 +369,44 @@ def sync_releases(
     releases = result["releases"]
     dates = result["dates"]
 
-    console.print(f"\nReleases: {releases['inserted']} new, {releases['updated']} updated", style="green")
-    console.print(f"Dates: {dates['inserted']} new, {dates['skipped']} existing", style="green")
+    status_style = "green" if result["status"] == "complete" else "yellow"
+    console.print(f"\nSync status: {result['status']}", style=status_style)
+    console.print(
+        f"Releases: {releases['inserted']} new, {releases['updated']} updated "
+        f"(fetched {releases['fetched']}/{releases['expected'] or releases['fetched']})",
+        style="green" if releases["status"] == "complete" else "yellow",
+    )
+    console.print(
+        f"Dates: {dates['inserted']} new, {dates['skipped']} existing, {dates['removed']} removed "
+        f"(fetched {dates['fetched']}/{dates['expected'] or dates['fetched']})",
+        style="green" if dates["status"] == "complete" else "yellow",
+    )
+    if dates["degraded_reason"]:
+        console.print(f"Date sync degraded reason: {dates['degraded_reason']}", style="yellow")
+    if dates["skipped_missing_release"]:
+        console.print(
+            "Skipped "
+            f"{dates['skipped_missing_release']} date row(s) because the release "
+            "catalog was incomplete.",
+            style="yellow",
+        )
+    if not dates["destructive_cleanup_performed"]:
+        console.print("Destructive cleanup was skipped for safety.", style="yellow")
+    anchor_validation = dates["anchor_validation"]
+    if anchor_validation["enabled"]:
+        if anchor_validation["ok"]:
+            console.print(
+                f"Anchor validation passed through {anchor_validation['checked_until']}.",
+                style="green",
+            )
+        else:
+            missing = ", ".join(anchor_validation["missing_releases"])
+            console.print(
+                f"Anchor validation failed through {anchor_validation['checked_until']}: {missing}",
+                style="red",
+            )
+    if not result["ready"]:
+        raise typer.Exit(1)
 
 
 @app.command()

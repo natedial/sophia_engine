@@ -90,6 +90,42 @@ scrivener serve --port 8000
 Deployment notes:
 - Run two long-lived processes: the scheduler (`scrivener scheduler`) and the API server (`scrivener serve`).
 - Order does not matter, but the scheduler only schedules release-based fetches once `release_dates` are populated (run `scrivener sync-releases` at least once, and periodically thereafter).
+- `scrivener sync-releases` now reports whether the FRED snapshot was complete. Only `complete` runs perform destructive cleanup of future `release_dates`; degraded runs stay insert-only for safety and exit non-zero.
+- `docker-compose.yml` includes an API healthcheck on `/health` so the host can distinguish "running" from "serving traffic".
+
+### Email Alerts
+
+Scrivener includes a host-side watchdog for EC2 deployments. It checks the Docker Compose services every minute and sends an email when a service is missing, crash-looping, exited, or unhealthy. It also sends a recovery email when the service returns to normal.
+
+Watchdog env vars:
+
+```bash
+SCRIVENER_ALERT_SMTP_HOST=email-smtp.us-east-1.amazonaws.com
+SCRIVENER_ALERT_SMTP_PORT=587
+SCRIVENER_ALERT_SMTP_USERNAME=...
+SCRIVENER_ALERT_SMTP_PASSWORD=...
+SCRIVENER_ALERT_FROM=scrivener-alerts@example.com
+SCRIVENER_ALERT_TO=you@example.com
+
+# Optional
+SCRIVENER_ALERT_SMTP_USE_TLS=true
+SCRIVENER_ALERT_SUBJECT_PREFIX=[Scrivener Alert]
+SCRIVENER_ALERT_SERVICES=api,scheduler
+SCRIVENER_ALERT_LOG_LINES=40
+SCRIVENER_ALERT_COOLDOWN_MINUTES=60
+SCRIVENER_ALERT_STATE_FILE=/opt/scrivener/.scrivener-watchdog-state.json
+```
+
+Recommended EC2 rollout:
+
+```bash
+sudo cp deploy/systemd/scrivener-watchdog.service /etc/systemd/system/
+sudo cp deploy/systemd/scrivener-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now scrivener-watchdog.timer
+```
+
+The systemd unit reads both `/opt/scrivener/.env` and `/opt/scrivener/.monitor.env`, so SMTP credentials can live outside the app container env file if preferred.
 
 ## CLI Commands
 
@@ -156,7 +192,7 @@ When running `scrivener serve`, the following endpoints are available:
 - `GET /releases/{id}` - Get release by FRED ID
 - `GET /releases/{id}/schedule` - Get release with upcoming dates
 - `GET /releases/{id}/dates` - Get release dates
-- `POST /releases/sync` - Sync releases from FRED
+- `POST /releases/sync` - Sync releases from FRED and report `complete` vs `degraded` calendar status (`503` on degraded syncs)
 
 ### Health
 - `GET /health` - Health check
