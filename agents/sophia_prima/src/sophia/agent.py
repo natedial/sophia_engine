@@ -1578,6 +1578,23 @@ class SophiaAgent:
 
         return False
 
+    @staticmethod
+    def _looks_like_live_current_request(user_message: str) -> bool:
+        message = re.sub(r"\s+", " ", (user_message or "").strip().lower())
+        if not message:
+            return False
+        return bool(
+            re.search(
+                r"\b("
+                r"today|today's|todays|latest|most recent|current|currently|right now|"
+                r"just released|just out|newly released|posted today|published today|"
+                r"this morning|this afternoon|this evening|tonight|overnight|"
+                r"yesterday|breaking|live"
+                r")\b",
+                message,
+            )
+        )
+
     @classmethod
     def _should_prioritize_local_research(
         cls,
@@ -2283,7 +2300,7 @@ class SophiaAgent:
                     if any(
                         tool.name in {"search_web", "get_web_context"}
                         for tool in turn_tools
-                    ):
+                    ) and not self._looks_like_live_current_request(active_user_message):
                         local_research_scope_miss_response = (
                             self._build_local_research_scope_miss_response(
                                 user_message=active_user_message,

@@ -550,6 +550,8 @@ def test_load_agent_profiles_includes_specialists() -> None:
         "canvas_analyst",
     }
     assert profiles["macro_research"].tool_allowlist is not None
+    assert "search_web" in profiles["macro_research"].tool_allowlist
+    assert "get_web_context" in profiles["macro_research"].tool_allowlist
 
 
 def test_subagent_planner_adds_quant_and_citation_workers() -> None:
