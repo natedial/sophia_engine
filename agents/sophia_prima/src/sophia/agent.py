@@ -31,6 +31,7 @@ from sophia.events import (
     tool_execution_start,
     turn_end,
     turn_start,
+    workflow_decision,
 )
 from sophia.history import LosslessHistoryManager
 from sophia.llm.base import ContentDelta, ModelProvider, StreamComplete
@@ -1270,6 +1271,27 @@ class SophiaAgent:
         return "\n".join(lines)
 
     @staticmethod
+    def _build_local_research_scope_miss_response(
+        *,
+        user_message: str,
+        fallback_reason: str,
+    ) -> str:
+        request = re.sub(r"\s+", " ", (user_message or "").strip())
+        if fallback_reason == "local_research_prefetch_failed":
+            return (
+                "I paused before using external sources because this looks like a local-first "
+                "research request, but I couldn't complete the corpus check cleanly in this turn.\n\n"
+                f"Request: {request}\n\n"
+                "If you want, I can retry the corpus search, widen the corpus scope, or switch to web."
+            )
+        return (
+            "I paused before using external sources because this looks like a local-first "
+            "research request, but I couldn't find matching corpus hits in the current scope.\n\n"
+            f"Request: {request}\n\n"
+            "If you want, I can widen the corpus scope or switch to web."
+        )
+
+    @staticmethod
     def _build_research_probe_queries(user_message: str) -> list[str]:
         raw = re.sub(r"\s+", " ", (user_message or "").strip())
         raw = re.sub(r"\badn\b", "and", raw, flags=re.IGNORECASE)
@@ -1473,6 +1495,51 @@ class SophiaAgent:
         )
 
     @classmethod
+    def _classify_forecast_request(
+        cls,
+        user_message: str,
+    ) -> str | None:
+        message = re.sub(r"\s+", " ", (user_message or "").strip().lower())
+        if not message:
+            return None
+
+        has_engine_terms = bool(
+            re.search(
+                r"\b("
+                r"our model|our engine|our forecast|internal model|internal forecast|"
+                r"published projection|production slot|champion model|oikonomia|"
+                r"model projection|engine projection"
+                r")\b",
+                message,
+            )
+        )
+        has_research_terms = bool(
+            re.search(
+                r"\b("
+                r"bank|banks|street|sell-side|house view|house views|research|"
+                r"economists?\s+(?:expect|see|forecast)|"
+                r"consensus|survey|poll|range of forecasts?|forecast range|"
+                r"range of views|estimates?\b"
+                r")\b",
+                message,
+            )
+        )
+        has_compare_terms = bool(
+            re.search(
+                r"\b(compare|comparison|versus|vs\.?|against|relative to|stack up)\b",
+                message,
+            )
+        )
+
+        if has_engine_terms and (has_research_terms or has_compare_terms):
+            return "compare"
+        if has_engine_terms:
+            return "engine"
+        if has_research_terms:
+            return "research"
+        return None
+
+    @classmethod
     def _requires_research_citations(
         cls,
         user_message: str,
@@ -1486,10 +1553,18 @@ class SophiaAgent:
             return False
 
         message = (user_message or "").lower()
+        forecast_classification = cls._classify_forecast_request(user_message)
+        if forecast_classification == "engine":
+            return False
 
         # Fast path for synthesis-style prompts that should be evidence-grounded.
         if re.search(
-            r"\b(range of views|broad range|consensus|debate|research-backed|evidence)\b",
+            r"\b("
+            r"range of views|broad range|consensus|debate|research-backed|evidence|"
+            r"range of forecasts?|forecast range|consensus range|"
+            r"economists?\s+(?:expect|see|forecast)|"
+            r"forecasts?\b|estimates?\b|survey\b|poll\b|pricing\b"
+            r")\b",
             message,
         ):
             return True
@@ -1502,6 +1577,53 @@ class SophiaAgent:
             return True
 
         return False
+
+    @classmethod
+    def _should_prioritize_local_research(
+        cls,
+        user_message: str,
+        tools: list[ToolSchema],
+    ) -> bool:
+        tool_names = {tool.name for tool in tools}
+        if "search_research" not in tool_names:
+            return False
+        if not ({"search_web", "get_web_context"} & tool_names):
+            return False
+
+        message = (user_message or "").strip().lower()
+        if not message:
+            return False
+
+        forecast_classification = cls._classify_forecast_request(user_message)
+        if forecast_classification == "engine":
+            return False
+
+        if re.search(
+            r"\b(search web|search online|google|website|web page|webpage|browser|online first)\b",
+            message,
+        ):
+            return False
+
+        if cls._requires_explicit_citations(user_message):
+            return True
+
+        if cls._requires_research_citations(user_message, tools):
+            return True
+
+        return bool(
+            re.search(
+                r"\b("
+                r"our research|internal research|research corpus|corpus|desk notes|"
+                r"report|reports|paper|papers|forecast|forecasts|estimate|estimates|"
+                r"survey|poll|consensus|range|throughline|takeaways?"
+                r")\b",
+                message,
+            )
+        )
+
+    @staticmethod
+    def _filter_out_web_tools(tools: list[ToolSchema]) -> list[ToolSchema]:
+        return [tool for tool in tools if tool.name not in {"search_web", "get_web_context"}]
 
     @staticmethod
     def _has_structured_citations(text: str) -> bool:
@@ -2025,6 +2147,10 @@ class SophiaAgent:
                 active_user_message,
                 turn_tools,
             ) and not bool(subagent_context)
+            local_research_first_for_turn = self._should_prioritize_local_research(
+                active_user_message,
+                turn_tools,
+            )
             citations_required_for_turn = self._requires_research_citations(
                 active_user_message,
                 turn_tools,
@@ -2035,13 +2161,20 @@ class SophiaAgent:
             cited_chunk_ids_seen: set[str] = set()
             evidence_by_chunk: dict[str, dict[str, Any]] = {}
             citation_repair_attempted = False
+            local_research_scope_miss_response: str | None = None
+            prefetch_attempts = 0
+            failed_prefetches = 0
+            successful_prefetches = 0
 
             # Deterministic bootstrap: prefetch evidence for citation-required
             # research prompts so the model starts with grounded context.
-            if citations_required_for_turn and "search_research" in allowed_tool_names:
+            if (
+                (citations_required_for_turn or local_research_first_for_turn)
+                and "search_research" in allowed_tool_names
+            ):
                 probe_queries = self._build_research_probe_queries(active_user_message)[:3]
-                successful_prefetches = 0
                 for probe_index, probe_query in enumerate(probe_queries):
+                    prefetch_attempts += 1
                     prefetch_call = ToolCall(
                         id=f"prefetch-search-research-{turn}-{probe_index}",
                         name="search_research",
@@ -2078,13 +2211,6 @@ class SophiaAgent:
                             prefetch_content,
                         )
                     )
-                    for row in self._extract_evidence_rows_from_tool_output(
-                        prefetch_call.name,
-                        prefetch_content,
-                    ):
-                        chunk_id = str(row.get("chunk_id") or "").strip()
-                        if chunk_id and chunk_id not in evidence_by_chunk:
-                            evidence_by_chunk[chunk_id] = row
                     context.add_assistant_message(
                         Message(
                             role=Role.ASSISTANT,
@@ -2119,6 +2245,8 @@ class SophiaAgent:
                             result=prefetch_content,
                             is_error=not prefetch_result.success,
                         )
+                    if not prefetch_result.success:
+                        failed_prefetches += 1
                     if prefetch_result.success and self._search_result_count(prefetch_content) > 0:
                         successful_prefetches += 1
                         if successful_prefetches >= 2:
@@ -2128,110 +2256,183 @@ class SophiaAgent:
                         system_prompt,
                         allowed_chunk_ids=cited_chunk_ids_seen,
                     )
+                if local_research_first_for_turn and successful_prefetches == 0:
+                    fallback_reason = (
+                        "local_research_prefetch_failed"
+                        if failed_prefetches == prefetch_attempts and prefetch_attempts > 0
+                        else "local_research_prefetch_returned_no_hits"
+                    )
+                    yield workflow_decision(
+                        "local_research_web_fallback",
+                        fallback_reason,
+                        details={
+                            "local_research_first": True,
+                            "prefetch_attempts": prefetch_attempts,
+                            "failed_prefetches": failed_prefetches,
+                            "successful_prefetches": successful_prefetches,
+                            "web_tools_enabled": sorted(
+                                tool.name
+                                for tool in turn_tools
+                                if tool.name in {"search_web", "get_web_context"}
+                            ),
+                        },
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
+                    if any(
+                        tool.name in {"search_web", "get_web_context"}
+                        for tool in turn_tools
+                    ):
+                        local_research_scope_miss_response = (
+                            self._build_local_research_scope_miss_response(
+                                user_message=active_user_message,
+                                fallback_reason=fallback_reason,
+                            )
+                        )
 
-            # INNER LOOP: tool calls
-            while iterations < self.config.max_tool_iterations:
-                iterations += 1
-
-                # Check for steering messages
-                if self.get_steering_messages:
-                    steering = self.get_steering_messages()
-                    if steering:
-                        context.messages.extend(steering)
-
-                # Apply context transforms
-                transformed = apply_transforms(context.messages, self.config.context_transformers)
-
-                # Call provider
+            if local_research_scope_miss_response is not None:
+                assistant_msg = Message(
+                    role=Role.ASSISTANT,
+                    content=local_research_scope_miss_response,
+                )
                 yield message_start(
                     run_id=active_run_id,
                     parent_run_id=parent_run_id,
                     task_id=task_id,
                 )
+                yield message_end(
+                    assistant_msg,
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
+                )
+                context.add_assistant_message(assistant_msg)
+                last_message = assistant_msg
+            else:
+                # INNER LOOP: tool calls
+                while iterations < self.config.max_tool_iterations:
+                    iterations += 1
 
-                if self.config.stream:
-                    completion = None
-                    async for event in self._stream_and_yield(
-                        system_prompt,
-                        transformed,
-                        turn_tools,
+                    # Check for steering messages
+                    if self.get_steering_messages:
+                        steering = self.get_steering_messages()
+                        if steering:
+                            context.messages.extend(steering)
+
+                    # Apply context transforms
+                    transformed = apply_transforms(context.messages, self.config.context_transformers)
+                    completion_tools = turn_tools
+                    if local_research_first_for_turn and successful_prefetches > 0:
+                        completion_tools = self._filter_out_web_tools(turn_tools)
+
+                    # Call provider
+                    yield message_start(
                         run_id=active_run_id,
                         parent_run_id=parent_run_id,
                         task_id=task_id,
-                    ):
-                        if isinstance(event, AgentEvent):
-                            yield event
-                        else:
-                            # It's the CompletionResponse
-                            completion = event
-                    assert completion is not None
-                else:
-                    completion = await self.provider.complete(
-                        model=self.settings.llm_model,
-                        system=system_prompt,
-                        messages=transformed,
-                        tools=turn_tools or None,
                     )
 
-                assistant_msg = completion.message
-
-                # If no tool calls, check enforcement then break
-                if not assistant_msg.tool_calls:
-                    if (
-                        tools_required_for_turn
-                        and not used_tools_this_turn
-                        and tool_enforcement_attempts < 2
-                    ):
-                        tool_enforcement_attempts += 1
-                        if tool_enforcement_attempts == 1:
-                            system_prompt = self._build_enforced_tool_prompt(system_prompt)
-                        else:
-                            system_prompt = self._build_hard_tool_prompt(system_prompt, turn_tools)
-                        continue
-
-                    if tools_required_for_turn and not used_tools_this_turn:
-                        assistant_msg.content = (
-                            "I couldn't ground this response in live tool output, so I won't "
-                            "synthesize from memory. Please retry and I'll run the research "
-                            "tools first."
+                    if self.config.stream:
+                        completion = None
+                        async for event in self._stream_and_yield(
+                            system_prompt,
+                            transformed,
+                            completion_tools,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                        ):
+                            if isinstance(event, AgentEvent):
+                                yield event
+                            else:
+                                # It's the CompletionResponse
+                                completion = event
+                        assert completion is not None
+                    else:
+                        completion = await self.provider.complete(
+                            model=self.settings.llm_model,
+                            system=system_prompt,
+                            messages=transformed,
+                            tools=completion_tools or None,
                         )
 
-                    has_invalid_chunk_citations = self._has_invalid_chunk_citations(
-                        assistant_msg.content,
-                        allowed_chunk_ids=cited_chunk_ids_seen,
-                    )
-                    has_structured_citations = self._has_structured_citations(assistant_msg.content)
-                    citation_issue = has_invalid_chunk_citations or (
-                        citations_required_for_turn
-                        and used_research_tools_this_turn
-                        and not has_structured_citations
-                    )
+                    assistant_msg = completion.message
 
-                    # If cited chunk IDs don't match retrieved chunks, force one repair pass.
-                    if not citation_repair_attempted and citation_issue:
-                        citation_repair_attempted = True
-                        system_prompt = self._build_citation_repair_prompt(
-                            system_prompt,
+                    # If no tool calls, check enforcement then break
+                    if not assistant_msg.tool_calls:
+                        if (
+                            tools_required_for_turn
+                            and not used_tools_this_turn
+                            and tool_enforcement_attempts < 2
+                        ):
+                            tool_enforcement_attempts += 1
+                            if tool_enforcement_attempts == 1:
+                                system_prompt = self._build_enforced_tool_prompt(system_prompt)
+                            else:
+                                system_prompt = self._build_hard_tool_prompt(system_prompt, turn_tools)
+                            continue
+
+                        if tools_required_for_turn and not used_tools_this_turn:
+                            assistant_msg.content = (
+                                "I couldn't ground this response in live tool output, so I won't "
+                                "synthesize from memory. Please retry and I'll run the research "
+                                "tools first."
+                            )
+
+                        has_invalid_chunk_citations = self._has_invalid_chunk_citations(
+                            assistant_msg.content,
                             allowed_chunk_ids=cited_chunk_ids_seen,
                         )
-                        continue
-                    if citation_repair_attempted and citation_issue:
-                        fallback = self._build_evidence_fallback_response(
-                            user_message=active_user_message,
-                            evidence_rows=list(evidence_by_chunk.values()),
+                        has_structured_citations = self._has_structured_citations(assistant_msg.content)
+                        citation_issue = has_invalid_chunk_citations or (
+                            citations_required_for_turn
+                            and used_research_tools_this_turn
+                            and not has_structured_citations
                         )
-                        if fallback:
-                            assistant_msg.content = fallback
-                        else:
-                            assistant_msg.content = (
-                                "I couldn't produce citation-grounded output from the research "
-                                "tool results in this turn. Please retry and I will fetch sources "
-                                "again before summarizing."
+
+                        # If cited chunk IDs don't match retrieved chunks, force one repair pass.
+                        if not citation_repair_attempted and citation_issue:
+                            citation_repair_attempted = True
+                            system_prompt = self._build_citation_repair_prompt(
+                                system_prompt,
+                                allowed_chunk_ids=cited_chunk_ids_seen,
                             )
-                    if not assistant_msg.content.strip():
-                        assistant_msg.content = self._build_tool_loop_fallback_response(
-                            used_tools=used_tools_this_turn,
+                            continue
+                        if citation_repair_attempted and citation_issue:
+                            if local_research_first_for_turn and not evidence_by_chunk:
+                                assistant_msg.content = self._build_local_research_scope_miss_response(
+                                    user_message=active_user_message,
+                                    fallback_reason="local_research_prefetch_returned_no_hits",
+                                )
+                            else:
+                                fallback = self._build_evidence_fallback_response(
+                                    user_message=active_user_message,
+                                    evidence_rows=list(evidence_by_chunk.values()),
+                                )
+                                if fallback:
+                                    assistant_msg.content = fallback
+                                else:
+                                    assistant_msg.content = (
+                                        "I couldn't produce citation-grounded output from the research "
+                                        "tool results in this turn. Please retry and I will fetch sources "
+                                        "again before summarizing."
+                                    )
+                        if not assistant_msg.content.strip():
+                            assistant_msg.content = self._build_tool_loop_fallback_response(
+                                used_tools=used_tools_this_turn,
+                            )
+
+                        yield message_end(
+                            assistant_msg,
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
                         )
+                        context.add_assistant_message(assistant_msg)
+                        last_message = assistant_msg
+
+                        break
 
                     yield message_end(
                         assistant_msg,
@@ -2242,92 +2443,81 @@ class SophiaAgent:
                     context.add_assistant_message(assistant_msg)
                     last_message = assistant_msg
 
-                    break
-
-                yield message_end(
-                    assistant_msg,
-                    run_id=active_run_id,
-                    parent_run_id=parent_run_id,
-                    task_id=task_id,
-                )
-                context.add_assistant_message(assistant_msg)
-                last_message = assistant_msg
-
-                # Execute tool calls
-                tool_results: list[ToolResultMessage] = []
-                _RESEARCH_TOOL_NAMES = {
-                    "search_research",
-                    "get_research_chunk",
-                    "list_research_sources",
-                }
-                for tc in assistant_msg.tool_calls:
-                    used_tools_this_turn = True
-                    if tc.name in _RESEARCH_TOOL_NAMES:
-                        used_research_tools_this_turn = True
-                    yield tool_execution_start(
-                        tc,
-                        run_id=active_run_id,
-                        parent_run_id=parent_run_id,
-                        task_id=task_id,
-                    )
-                    if self.history is not None:
-                        self.history.record_tool_start(
-                            session_id=context.session_id,
+                    # Execute tool calls
+                    tool_results: list[ToolResultMessage] = []
+                    _RESEARCH_TOOL_NAMES = {
+                        "search_research",
+                        "get_research_chunk",
+                        "list_research_sources",
+                    }
+                    for tc in assistant_msg.tool_calls:
+                        used_tools_this_turn = True
+                        if tc.name in _RESEARCH_TOOL_NAMES:
+                            used_research_tools_this_turn = True
+                        yield tool_execution_start(
+                            tc,
                             run_id=active_run_id,
                             parent_run_id=parent_run_id,
                             task_id=task_id,
-                            turn=turn,
-                            tool_call=tc,
                         )
+                        if self.history is not None:
+                            self.history.record_tool_start(
+                                session_id=context.session_id,
+                                run_id=active_run_id,
+                                parent_run_id=parent_run_id,
+                                task_id=task_id,
+                                turn=turn,
+                                tool_call=tc,
+                            )
 
-                    result = await self._execute_tool(tc, allowed_tool_names)
-                    content = result.to_content()
-                    is_error = not result.success
-                    cited_chunk_ids_seen.update(
-                        self._extract_chunk_ids_from_tool_output(tc.name, content)
-                    )
-                    for row in self._extract_evidence_rows_from_tool_output(tc.name, content):
-                        chunk_id = str(row.get("chunk_id") or "").strip()
-                        if chunk_id and chunk_id not in evidence_by_chunk:
-                            evidence_by_chunk[chunk_id] = row
+                        result = await self._execute_tool(tc, allowed_tool_names)
+                        content = result.to_content()
+                        is_error = not result.success
+                        cited_chunk_ids_seen.update(
+                            self._extract_chunk_ids_from_tool_output(tc.name, content)
+                        )
+                        for row in self._extract_evidence_rows_from_tool_output(tc.name, content):
+                            chunk_id = str(row.get("chunk_id") or "").strip()
+                            if chunk_id and chunk_id not in evidence_by_chunk:
+                                evidence_by_chunk[chunk_id] = row
 
-                    yield tool_execution_end(
-                        tc,
-                        content,
-                        is_error,
-                        run_id=active_run_id,
-                        parent_run_id=parent_run_id,
-                        task_id=task_id,
-                    )
-                    if self.history is not None:
-                        self.history.record_tool_end(
-                            session_id=context.session_id,
+                        yield tool_execution_end(
+                            tc,
+                            content,
+                            is_error,
                             run_id=active_run_id,
                             parent_run_id=parent_run_id,
                             task_id=task_id,
-                            turn=turn,
-                            tool_call=tc,
-                            result=content,
-                            is_error=is_error,
+                        )
+                        if self.history is not None:
+                            self.history.record_tool_end(
+                                session_id=context.session_id,
+                                run_id=active_run_id,
+                                parent_run_id=parent_run_id,
+                                task_id=task_id,
+                                turn=turn,
+                                tool_call=tc,
+                                result=content,
+                                is_error=is_error,
+                            )
+
+                        tool_results.append(
+                            ToolResultMessage(
+                                tool_call_id=tc.id,
+                                content=content,
+                                is_error=is_error,
+                            )
                         )
 
-                    tool_results.append(
-                        ToolResultMessage(
-                            tool_call_id=tc.id,
-                            content=content,
-                            is_error=is_error,
-                        )
-                    )
+                        # Check steering between tool calls
+                        if self.get_steering_messages:
+                            steering = self.get_steering_messages()
+                            if steering:
+                                context.messages.extend(steering)
+                                break  # Skip remaining tools, re-enter inner loop
 
-                    # Check steering between tool calls
-                    if self.get_steering_messages:
-                        steering = self.get_steering_messages()
-                        if steering:
-                            context.messages.extend(steering)
-                            break  # Skip remaining tools, re-enter inner loop
-
-                # Add tool results to context
-                context.add_tool_results(tool_results)
+                    # Add tool results to context
+                    context.add_tool_results(tool_results)
 
             if (
                 last_message is not None
