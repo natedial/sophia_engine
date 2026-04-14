@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, AsyncGenerator, Callable
 
@@ -1250,6 +1250,71 @@ class SophiaAgent:
         return [tool for tool in tools if tool.name in profile.allowed_tools]
 
     @staticmethod
+    def _extract_time_window(
+        user_message: str,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[str, str] | None:
+        """Parse a natural-language temporal phrase into ISO date bounds.
+
+        Returns ``(date_from, date_to)`` as ``'YYYY-MM-DD'`` strings when a
+        recognized phrase is present, else ``None``. Used by the research
+        prefetch to honor scope constraints like ``"past 2 weeks"`` without
+        relying on the model to parse them independently.
+        """
+        if not user_message:
+            return None
+        reference = now or datetime.now(UTC)
+        today = reference.date()
+        lowered = user_message.lower()
+
+        numeric_match = re.search(
+            r"\b(?:past|last|previous)\s+(\d+)\s+(day|week|month)s?\b",
+            lowered,
+        )
+        if numeric_match:
+            quantity = int(numeric_match.group(1))
+            unit = numeric_match.group(2)
+            if unit == "day":
+                delta = timedelta(days=quantity)
+            elif unit == "week":
+                delta = timedelta(weeks=quantity)
+            else:
+                delta = timedelta(days=quantity * 30)
+            start = today - delta
+            return (start.isoformat(), today.isoformat())
+
+        bare_match = re.search(
+            r"\b(?:past|last|previous)\s+(day|week|month)\b",
+            lowered,
+        )
+        if bare_match:
+            unit = bare_match.group(1)
+            if unit == "day":
+                delta = timedelta(days=1)
+            elif unit == "week":
+                delta = timedelta(weeks=1)
+            else:
+                delta = timedelta(days=30)
+            start = today - delta
+            return (start.isoformat(), today.isoformat())
+
+        this_match = re.search(r"\bthis\s+(week|month)\b", lowered)
+        if this_match:
+            unit = this_match.group(1)
+            if unit == "week":
+                start = today - timedelta(days=today.weekday())
+            else:
+                start = today.replace(day=1)
+            return (start.isoformat(), today.isoformat())
+
+        if re.search(r"\b(?:ytd|year\s+to\s+date)\b", lowered):
+            start = today.replace(month=1, day=1)
+            return (start.isoformat(), today.isoformat())
+
+        return None
+
+    @staticmethod
     def _build_research_prefetch_input(
         user_message: str,
         *,
@@ -1921,8 +1986,12 @@ class SophiaAgent:
             parts.append(f"status={status}")
             delegated_execution = entry.get("delegated_execution")
             if isinstance(delegated_execution, dict):
-                requested_mode = str(delegated_execution.get("runtime_mode_requested") or "").strip()
-                effective_mode = str(delegated_execution.get("runtime_mode_effective") or "").strip()
+                requested_mode = str(
+                    delegated_execution.get("runtime_mode_requested") or ""
+                ).strip()
+                effective_mode = str(
+                    delegated_execution.get("runtime_mode_effective") or ""
+                ).strip()
                 backend = str(delegated_execution.get("backend") or "").strip()
                 if backend:
                     parts.append(f"backend={backend}")
@@ -1945,8 +2014,7 @@ class SophiaAgent:
             return None
         return (
             "Use this recent execution trace when the user asks what the agent used or whether Forge ran. "
-            "Do not deny use of a listed runtime or worker.\n"
-            + "\n".join(lines)
+            "Do not deny use of a listed runtime or worker.\n" + "\n".join(lines)
         )
 
     async def _run_subagent_task(
@@ -2417,9 +2485,8 @@ class SophiaAgent:
             # Deterministic bootstrap: prefetch evidence for citation-required
             # research prompts so the model starts with grounded context.
             if (
-                (citations_required_for_turn or local_research_first_for_turn)
-                and "search_research" in allowed_tool_names
-            ):
+                citations_required_for_turn or local_research_first_for_turn
+            ) and "search_research" in allowed_tool_names:
                 probe_queries = self._build_research_probe_queries(active_user_message)[:3]
                 for probe_index, probe_query in enumerate(probe_queries):
                     prefetch_attempts += 1
@@ -2529,8 +2596,7 @@ class SophiaAgent:
                         task_id=task_id,
                     )
                     if any(
-                        tool.name in {"search_web", "get_web_context"}
-                        for tool in turn_tools
+                        tool.name in {"search_web", "get_web_context"} for tool in turn_tools
                     ) and not self._looks_like_live_current_request(active_user_message):
                         local_research_scope_miss_response = (
                             self._build_local_research_scope_miss_response(
@@ -2558,7 +2624,6 @@ class SophiaAgent:
                 context.add_assistant_message(assistant_msg)
                 last_message = assistant_msg
             else:
-
                 # INNER LOOP: tool calls
                 while iterations < self.config.max_tool_iterations:
                     iterations += 1
@@ -2570,7 +2635,9 @@ class SophiaAgent:
                             context.messages.extend(steering)
 
                     # Apply context transforms
-                    transformed = apply_transforms(context.messages, self.config.context_transformers)
+                    transformed = apply_transforms(
+                        context.messages, self.config.context_transformers
+                    )
                     completion_tools = turn_tools
                     if local_research_first_for_turn and successful_prefetches > 0:
                         completion_tools = self._filter_out_web_tools(turn_tools)
@@ -2661,7 +2728,9 @@ class SophiaAgent:
                             if tool_enforcement_attempts == 1:
                                 system_prompt = self._build_enforced_tool_prompt(system_prompt)
                             else:
-                                system_prompt = self._build_hard_tool_prompt(system_prompt, turn_tools)
+                                system_prompt = self._build_hard_tool_prompt(
+                                    system_prompt, turn_tools
+                                )
                             continue
 
                         if tools_required_for_turn and not used_tools_this_turn:
@@ -2675,7 +2744,9 @@ class SophiaAgent:
                             assistant_msg.content,
                             allowed_chunk_ids=cited_chunk_ids_seen,
                         )
-                        has_structured_citations = self._has_structured_citations(assistant_msg.content)
+                        has_structured_citations = self._has_structured_citations(
+                            assistant_msg.content
+                        )
                         citation_issue = has_invalid_chunk_citations or (
                             citations_required_for_turn
                             and used_research_tools_this_turn
@@ -2692,9 +2763,11 @@ class SophiaAgent:
                             continue
                         if citation_repair_attempted and citation_issue:
                             if local_research_first_for_turn and not evidence_by_chunk:
-                                assistant_msg.content = self._build_local_research_scope_miss_response(
-                                    user_message=active_user_message,
-                                    fallback_reason="local_research_prefetch_returned_no_hits",
+                                assistant_msg.content = (
+                                    self._build_local_research_scope_miss_response(
+                                        user_message=active_user_message,
+                                        fallback_reason="local_research_prefetch_returned_no_hits",
+                                    )
                                 )
                             else:
                                 fallback = self._build_evidence_fallback_response(
