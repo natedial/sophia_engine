@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
-
-import pytest
+from datetime import UTC, datetime
 
 from sophia.agent import SophiaAgent
-
 
 FIXED_NOW = datetime(2026, 4, 14, 12, 0, 0, tzinfo=UTC)
 
