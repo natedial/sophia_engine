@@ -64,14 +64,22 @@ class HybridSearchEngine:
         db_path: str | Path,
         npz_path: str | Path | None = None,
         model_name: str = "all-MiniLM-L6-v2",
+        *,
+        semantic_enabled: bool = True,
+        semantic_local_files_only: bool = True,
+        model_cache_dir: str | None = None,
     ):
         self.db_path = Path(db_path)
         self.npz_path = Path(npz_path) if npz_path else None
         self.model_name = model_name
+        self.semantic_enabled = semantic_enabled
+        self.semantic_local_files_only = semantic_local_files_only
+        self.model_cache_dir = model_cache_dir
         self._model: EmbeddingModel | None = None
         self._embedding_chunk_ids: np.ndarray | None = None
         self._embedding_matrix: np.ndarray | None = None
         self._last_semantic_error: str | None = None
+        self._semantic_ready: bool | None = None
         self._load_embeddings()
 
     def search(
@@ -342,6 +350,8 @@ class HybridSearchEngine:
         allowed_chunk_ids: set[str] | None,
         limit: int,
     ) -> dict[str, float]:
+        if not self.semantic_enabled:
+            return {}
         if self._embedding_matrix is None or self._embedding_chunk_ids is None:
             return {}
         if self._embedding_matrix.size == 0:
@@ -351,8 +361,11 @@ class HybridSearchEngine:
             model = self._get_model()
             query_vector = model.embed([query])[0]
             similarities = self._embedding_matrix @ query_vector
+            self._semantic_ready = True
+            self._last_semantic_error = None
         except Exception as exc:
             message = " ".join(str(exc).split())
+            self._semantic_ready = False
             self._last_semantic_error = f"{type(exc).__name__}: {message[:180]}"
             return {}
 
@@ -387,6 +400,40 @@ class HybridSearchEngine:
     @property
     def last_semantic_error(self) -> str | None:
         return self._last_semantic_error
+
+    @property
+    def semantic_available(self) -> bool | None:
+        if not self.semantic_enabled:
+            return False
+        if self._embedding_matrix is None or self._embedding_chunk_ids is None:
+            return False
+        return self._semantic_ready
+
+    def verify_semantic_ready(self, *, strict: bool = False) -> bool:
+        if not self.semantic_enabled:
+            self._last_semantic_error = None
+            self._semantic_ready = False
+            return False
+        if self._embedding_matrix is None or self._embedding_chunk_ids is None:
+            self._last_semantic_error = "Semantic search disabled: embeddings not loaded"
+            self._semantic_ready = False
+            if strict:
+                raise RuntimeError(self._last_semantic_error)
+            return False
+
+        try:
+            self._get_model()
+        except Exception as exc:
+            message = " ".join(str(exc).split())
+            self._semantic_ready = False
+            self._last_semantic_error = f"{type(exc).__name__}: {message[:180]}"
+            if strict:
+                raise RuntimeError(self._last_semantic_error) from exc
+            return False
+
+        self._semantic_ready = True
+        self._last_semantic_error = None
+        return True
 
     def _load_chunk_metadata(self, chunk_ids: list[str]) -> dict[str, dict]:
         if not chunk_ids:
@@ -534,7 +581,7 @@ class HybridSearchEngine:
             if token in {"and", "or", "not", "near"}:
                 normalized.append(token.upper())
                 continue
-            normalized.append(token)
+            normalized.append(_format_fts_token(token))
         return " ".join(normalized)
 
     def _build_lexical_queries(self, query: str) -> tuple[str, str, str | None]:
@@ -548,8 +595,9 @@ class HybridSearchEngine:
             normalized = self._to_keyword_query(query)
             return normalized, normalized, None
 
-        text_query = " AND ".join(tokens)
-        keyword_query = " ".join(tokens)
+        formatted_tokens = [_format_fts_token(token) for token in tokens]
+        text_query = " AND ".join(formatted_tokens)
+        keyword_query = " ".join(formatted_tokens)
         phrase = _best_query_phrase(query)
         phrase_query = f'"{phrase}"' if phrase else None
         return text_query, keyword_query, phrase_query
@@ -557,7 +605,13 @@ class HybridSearchEngine:
     def _get_model(self) -> EmbeddingModel:
         if self._model is None:
             self._model = EmbeddingModel(
-                EmbeddingConfig(model_name=self.model_name, batch_size=16, local_files_only=True, quiet=True)
+                EmbeddingConfig(
+                    model_name=self.model_name,
+                    batch_size=16,
+                    local_files_only=self.semantic_local_files_only,
+                    cache_dir=self.model_cache_dir,
+                    quiet=True,
+                )
             )
         return self._model
 
@@ -586,7 +640,14 @@ def _normalize_bm25(rows: list[tuple[str, float]]) -> dict[str, float]:
 
 def _sanitize_fts_query(query: str) -> str:
     tokens = re.findall(r"\w[\w\-]*", query.lower())
-    return " ".join(tokens)
+    return " ".join(_format_fts_token(token) for token in tokens)
+
+
+def _format_fts_token(token: str) -> str:
+    if "-" in token:
+        escaped = token.replace('"', '""')
+        return f'"{escaped}"'
+    return token
 
 
 _FTS_BOOLEAN_TERMS = {"and", "or", "not", "near"}

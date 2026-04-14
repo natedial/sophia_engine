@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from sophia_forge.core.runtime import ForgeRuntime
 from sophia_forge.evals import EvalCaseExportRequest, EvalCaseReviewRequest, EvalReplayRequest
@@ -92,6 +92,15 @@ def build_router(runtime: ForgeRuntime) -> APIRouter:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
 
+    @router.get("/runs")
+    async def list_runs(
+        limit: int = 25,
+        status: str | None = None,
+    ):
+        return {
+            "runs": list(runtime.list_runs(limit=limit, status=status)),
+        }
+
     @router.get("/runs/{run_id}/request")
     async def get_run_request(run_id: str):
         try:
@@ -169,6 +178,31 @@ def build_router(runtime: ForgeRuntime) -> APIRouter:
                 artifact.model_dump(mode="json") for artifact in runtime.get_artifacts(run_id)
             ],
         }
+
+    @router.get("/runs/{run_id}/artifacts/{artifact_id}/content")
+    async def get_run_artifact_content(run_id: str, artifact_id: str):
+        try:
+            artifacts = runtime.get_artifacts(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        artifact = next((item for item in artifacts if item.artifact_id == artifact_id), None)
+        if artifact is None or not artifact.path:
+            raise HTTPException(status_code=404, detail="artifact not found") from None
+        artifact_path = Path(artifact.path)
+        if not artifact_path.exists() or not artifact_path.is_file():
+            raise HTTPException(status_code=404, detail="artifact file not found") from None
+        return FileResponse(
+            path=artifact_path,
+            media_type=artifact.content_type,
+            filename=artifact_path.name,
+        )
+
+    @router.post("/runs/{run_id}/promotion/publish")
+    async def publish_run_promotion(run_id: str):
+        try:
+            return runtime.publish_run_promotion(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="promotion artifact not found") from exc
 
     @router.get("/runs/{run_id}/verification")
     async def get_run_verification(run_id: str):

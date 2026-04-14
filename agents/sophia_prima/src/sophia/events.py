@@ -14,11 +14,13 @@ class EventType(str, Enum):
 
     AGENT_START = "agent_start"
     AGENT_END = "agent_end"
+    TRACE = "trace"
     TURN_START = "turn_start"
     TURN_END = "turn_end"
     MESSAGE_START = "message_start"
     MESSAGE_DELTA = "message_delta"
     MESSAGE_END = "message_end"
+    WORKFLOW_DECISION = "workflow_decision"
     RESEARCH_PLAN_CREATED = "research_plan_created"
     SKILL_ACTIVATED = "skill_activated"
     TOOL_EXECUTION_START = "tool_execution_start"
@@ -168,14 +170,76 @@ def message_delta(
 def message_end(
     message: Message,
     *,
+    placeholder: bool = False,
     run_id: str | None = None,
     parent_run_id: str | None = None,
     task_id: str | None = None,
 ) -> AgentEvent:
+    payload: dict[str, Any] = {"message": message}
+    if placeholder:
+        payload["placeholder"] = True
     return AgentEvent(
         type=EventType.MESSAGE_END,
         data=_inject_run_context(
-            {"message": message},
+            payload,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        ),
+    )
+
+
+def trace(
+    stage: str,
+    *,
+    status: str = "point",
+    ts: str | None = None,
+    elapsed_ms: float | None = None,
+    details: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    task_id: str | None = None,
+) -> AgentEvent:
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "status": status,
+    }
+    if ts is not None:
+        payload["ts"] = ts
+    if elapsed_ms is not None:
+        payload["elapsed_ms"] = elapsed_ms
+    if details:
+        payload["details"] = details
+    return AgentEvent(
+        type=EventType.TRACE,
+        data=_inject_run_context(
+            payload,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        ),
+    )
+
+
+def workflow_decision(
+    category: str,
+    reason: str,
+    *,
+    details: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    task_id: str | None = None,
+) -> AgentEvent:
+    payload: dict[str, Any] = {
+        "category": category,
+        "reason": reason,
+    }
+    if details:
+        payload["details"] = details
+    return AgentEvent(
+        type=EventType.WORKFLOW_DECISION,
+        data=_inject_run_context(
+            payload,
             run_id=run_id,
             parent_run_id=parent_run_id,
             task_id=task_id,

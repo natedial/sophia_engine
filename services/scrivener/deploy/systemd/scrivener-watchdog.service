@@ -1,0 +1,11 @@
+[Unit]
+Description=Scrivener watchdog email alerts
+After=docker.service network-online.target scrivener-compose.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scrivener
+EnvironmentFile=-/opt/scrivener/.env
+EnvironmentFile=-/opt/scrivener/.monitor.env
+ExecStart=/usr/bin/env python3 -m src.monitor.watchdog

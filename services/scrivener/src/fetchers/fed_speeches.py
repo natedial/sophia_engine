@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 
 from src.db import get_session
 from src.db.models import Speaker, Speech

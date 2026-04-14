@@ -280,6 +280,144 @@ def test_presentation_resolver_falls_back_to_svg_document_when_png_unavailable(
     assert "linearGradient" in rendered
 
 
+def test_presentation_resolver_converts_inline_csv_to_attachment(tmp_path: Path) -> None:
+    _write_presentation_files(tmp_path)
+    registry = PresentationRegistry(
+        core_path=tmp_path / "config" / "presentation" / "core.md",
+        channels_path=tmp_path / "config" / "presentation" / "channels",
+        rendering_path=tmp_path / "config" / "presentation" / "rendering",
+        skills_root=tmp_path / "skills",
+        max_loaded_chars=2000,
+    )
+    resolver = PresentationResolver(
+        registry=registry,
+        artifact_dir=tmp_path / ".sophia" / "presentation",
+    )
+
+    outbound = resolver.resolve_outbound(
+        outbound=OutboundMessage(
+            text=(
+                "Attached: CSV file with tomorrow's key releases.\n\n"
+                "Summary: 2 items attached.\n\n"
+                "Filename: releases_2026-03-31_key_releases.csv\n\n"
+                "Content:\n"
+                "name,priority\n"
+                "\"FOMC Press Release\",High\n"
+                "\"H.15 Selected Interest Rates\",High\n\n"
+                "If you want this exported as an actual CSV file attachment, I can push it now."
+            ),
+            session_id="session-1",
+            agent_id="sophia_prima",
+            channel="telegram",
+            account_id="default",
+            peer_id="chat-1",
+            run_id="run-csv",
+        ),
+        user_message="Send tomorrow's key releases as an attachment right now.",
+    )
+
+    assert outbound.delivery_mode == "document"
+    assert outbound.artifacts
+    assert outbound.artifacts[0].kind == "document"
+    assert outbound.artifacts[0].mime_type == "text/csv"
+    assert outbound.artifacts[0].path.endswith(".csv")
+    assert Path(outbound.artifacts[0].path).read_text(encoding="utf-8").startswith(
+        "name,priority\n"
+    )
+    assert "Filename:" not in outbound.text
+    assert "Content:" not in outbound.text
+
+
+def test_presentation_resolver_converts_standalone_csv_block_to_attachment(
+    tmp_path: Path,
+) -> None:
+    _write_presentation_files(tmp_path)
+    registry = PresentationRegistry(
+        core_path=tmp_path / "config" / "presentation" / "core.md",
+        channels_path=tmp_path / "config" / "presentation" / "channels",
+        rendering_path=tmp_path / "config" / "presentation" / "rendering",
+        skills_root=tmp_path / "skills",
+        max_loaded_chars=2000,
+    )
+    resolver = PresentationResolver(
+        registry=registry,
+        artifact_dir=tmp_path / ".sophia" / "presentation",
+    )
+
+    outbound = resolver.resolve_outbound(
+        outbound=OutboundMessage(
+            text=(
+                "Attached: tomorrow_key_releases_2026-03-31.csv.\n\n"
+                "tomorrow_key_releases_2026-03-31.csv\n"
+                "fred_release_id,name\n"
+                "101,FOMC Press Release\n"
+                "18,H.15 Selected Interest Rates\n\n"
+                "Source note: pulled from the platform release calendar."
+            ),
+            session_id="session-1",
+            agent_id="sophia_prima",
+            channel="telegram",
+            account_id="default",
+            peer_id="chat-1",
+            run_id="run-csv-standalone",
+        ),
+        user_message="Send tomorrow's key releases as an attachment right now.",
+    )
+
+    assert outbound.delivery_mode == "document"
+    assert outbound.artifacts
+    assert outbound.artifacts[0].mime_type == "text/csv"
+    assert Path(outbound.artifacts[0].path).read_text(encoding="utf-8").startswith(
+        "fred_release_id,name\n"
+    )
+    assert "tomorrow_key_releases_2026-03-31.csv\nfred_release_id" not in outbound.text
+
+
+def test_presentation_resolver_converts_csv_below_wrapper_to_attachment(
+    tmp_path: Path,
+) -> None:
+    _write_presentation_files(tmp_path)
+    registry = PresentationRegistry(
+        core_path=tmp_path / "config" / "presentation" / "core.md",
+        channels_path=tmp_path / "config" / "presentation" / "channels",
+        rendering_path=tmp_path / "config" / "presentation" / "rendering",
+        skills_root=tmp_path / "skills",
+        max_loaded_chars=2000,
+    )
+    resolver = PresentationResolver(
+        registry=registry,
+        artifact_dir=tmp_path / ".sophia" / "presentation",
+    )
+
+    outbound = resolver.resolve_outbound(
+        outbound=OutboundMessage(
+            text=(
+                "Attached: tomorrow_key_releases_2026-03-31.csv — desk-ready list.\n\n"
+                "CSV below (copy/save as tomorrow_key_releases_2026-03-31.csv):\n\n"
+                "Date,Priority,Release\n"
+                "2026-03-31,High,FOMC Press Release\n"
+                "2026-03-31,High,H.15 Selected Interest Rates\n\n"
+                "Source note: pulled from the release calendar."
+            ),
+            session_id="session-1",
+            agent_id="sophia_prima",
+            channel="telegram",
+            account_id="default",
+            peer_id="chat-1",
+            run_id="run-csv-wrapper",
+        ),
+        user_message="Send tomorrow's key releases as an attachment right now.",
+    )
+
+    assert outbound.delivery_mode == "document"
+    assert outbound.artifacts
+    assert outbound.artifacts[0].mime_type == "text/csv"
+    assert Path(outbound.artifacts[0].path).read_text(encoding="utf-8").startswith(
+        "Date,Priority,Release\n"
+    )
+    assert "CSV below" not in outbound.text
+
+
 @pytest.mark.asyncio
 async def test_agent_injects_presentation_guidance_for_telegram(tmp_path: Path) -> None:
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)

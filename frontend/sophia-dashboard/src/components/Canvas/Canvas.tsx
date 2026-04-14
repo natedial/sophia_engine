@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react'
-import GridLayout from 'react-grid-layout'
+import GridLayout, { WidthProvider, type Layout } from 'react-grid-layout'
 import { ChartCard } from './ChartCard'
 import { useCanvasStore } from '../../store/canvasStore'
 import { useWebSocket } from '../../hooks/useWebSocket'
@@ -7,6 +7,7 @@ import type { LayoutItem } from '../../types/canvas'
 
 import 'react-grid-layout/css/styles.css'
 
+const AutoWidthGridLayout = WidthProvider(GridLayout)
 const GRID_COLS = 12
 const ROW_HEIGHT = 80
 const MARGIN: [number, number] = [16, 16]
@@ -22,7 +23,7 @@ export function Canvas() {
 
   // Handle layout change
   const handleLayoutChange = useCallback(
-    (newLayout: GridLayout.Layout[]) => {
+    (newLayout: Layout[]) => {
       const layoutItems: LayoutItem[] = newLayout.map((item) => ({
         i: item.i,
         x: item.x,
@@ -59,12 +60,11 @@ export function Canvas() {
 
   return (
     <div className="canvas">
-      <GridLayout
+      <AutoWidthGridLayout
         className="canvas-grid"
         layout={layout}
         cols={GRID_COLS}
         rowHeight={ROW_HEIGHT}
-        width={window.innerWidth - 48} // Account for padding
         margin={MARGIN}
         onLayoutChange={handleLayoutChange}
         draggableHandle=".chart-card-header"
@@ -78,7 +78,7 @@ export function Canvas() {
             <ChartCard chart={chart} />
           </div>
         ))}
-      </GridLayout>
+      </AutoWidthGridLayout>
     </div>
   )
 }

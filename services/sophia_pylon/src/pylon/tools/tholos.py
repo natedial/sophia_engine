@@ -23,8 +23,10 @@ def _classify_http_error(status_code: int, response_text: str) -> tuple[ErrorTyp
         return ErrorType.INVALID_INPUT, f"Invalid request: {response_text}"
     elif status_code == 503:
         return ErrorType.SERVICE_UNAVAILABLE, f"Corpus not available: {response_text}"
+    elif status_code in {502, 504}:
+        return ErrorType.SERVICE_UNAVAILABLE, f"Upstream service error ({status_code}): {response_text}"
     elif status_code >= 500:
-        return ErrorType.SERVICE_UNAVAILABLE, f"Server error ({status_code}): {response_text}"
+        return ErrorType.UNKNOWN, f"Server error ({status_code}): {response_text}"
     else:
         return ErrorType.UNKNOWN, f"HTTP error {status_code}: {response_text}"
 

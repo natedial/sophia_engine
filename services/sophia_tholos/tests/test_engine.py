@@ -5,7 +5,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from sophia_tholos.search.engine import HybridSearchEngine, SearchResult, _rerank_search_results
+from sophia_tholos.search.engine import (
+    HybridSearchEngine,
+    SearchResult,
+    _format_fts_token,
+    _rerank_search_results,
+)
 
 
 def _build_test_db(db_path: Path) -> None:
@@ -132,6 +137,57 @@ def test_search_falls_back_to_created_at_when_source_date_missing(tmp_path: Path
 
     result_ids = [result.chunk_id for result in results]
     assert "chunk-fallback-created-at" in result_ids
+
+
+def test_search_handles_hyphenated_date_tokens_without_fts_crashing(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunks.sqlite"
+    _build_test_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO chunks (
+                chunk_id, run_id, source_path, source_date, page_number, chunk_index,
+                text, keywords_json, text_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "chunk-dated-query",
+                "run-4",
+                "supabase:4",
+                "2026-03-07",
+                1,
+                0,
+                "Jobs report preview for 2026-03-07 says payroll growth slowed materially.",
+                "[]",
+                "hash-4",
+                "2026-03-07 05:00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO chunks_fts (chunk_id, text) VALUES (?, ?)",
+            ("chunk-dated-query", "Jobs report preview for 2026-03-07 says payroll growth slowed materially."),
+        )
+        conn.execute(
+            "INSERT INTO keyword_fts (chunk_id, terms) VALUES (?, ?)",
+            ("chunk-dated-query", "jobs report 2026-03-07 payroll growth"),
+        )
+    engine = HybridSearchEngine(db_path=db_path, npz_path=None)
+
+    results = engine.search(
+        query="jobs report 2026-03-07",
+        limit=10,
+        keyword_weight=1.0,
+        semantic_weight=0.0,
+    )
+
+    assert results
+    assert any(result.chunk_id == "chunk-dated-query" for result in results)
+
+
+def test_format_fts_token_quotes_hyphenated_terms() -> None:
+    assert _format_fts_token("2026-04-03") == '"2026-04-03"'
+    assert _format_fts_token("week-ahead") == '"week-ahead"'
+    assert _format_fts_token("forecast") == "forecast"
 
 
 def test_reranker_promotes_phrase_and_query_coverage_matches() -> None:

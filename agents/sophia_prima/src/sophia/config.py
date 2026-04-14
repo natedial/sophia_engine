@@ -36,7 +36,10 @@ class Settings(BaseSettings):
     # LLM Configuration
     llm_provider: str = Field(
         default="openai",
-        description="LLM provider: anthropic, openai, groq",
+        description=(
+            "Legacy provider fallback for bare llm_model values. "
+            "Deprecated in favor of explicit provider:model."
+        ),
     )
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     openai_api_key: str = Field(default="", description="OpenAI API key")
@@ -49,10 +52,20 @@ class Settings(BaseSettings):
         default="https://api.groq.com",
         description="Base URL for Groq API (SDK appends /openai/v1 internally)",
     )
+    deepinfra_api_key: str = Field(default="", description="DeepInfra API key")
+    deepinfra_base_url: str = Field(
+        default="https://api.deepinfra.com/v1/openai",
+        description="Base URL for DeepInfra OpenAI-compatible API",
+    )
     google_api_key: str = Field(default="", description="Google AI API key")
     llm_model: str = Field(
         default="gpt-4.1-mini",
-        description="Model to use for chat completions",
+        description=(
+            "Model selector. Canonical format: 'provider:model' "
+            "(for example 'openai:gpt-4.1-mini' or "
+            "'deepinfra:MiniMaxAI/MiniMax-M2.5'). "
+            "Bare model names are supported for legacy configs and best-effort aliases."
+        ),
     )
     llm_request_timeout_sec: float = Field(
         default=180.0,
@@ -99,6 +112,24 @@ class Settings(BaseSettings):
     presentation_artifact_dir: Path = Field(
         default_factory=lambda: get_project_root() / ".sophia" / "presentation",
         description="Directory used for rendered presentation artifacts",
+    )
+    self_edit_proposals_enabled: bool = Field(
+        default=True,
+        description="Enable gated self-edit proposals for Sophia-owned guidance files",
+    )
+    self_edit_proposal_dir: Path = Field(
+        default_factory=lambda: get_project_root() / ".sophia" / "self_edit_proposals",
+        description="Directory used for durable self-edit proposal artifacts",
+    )
+    self_edit_target_globs: str = Field(
+        default="config/*.md,config/**/*.md,config/*.json,config/**/*.json,skills/**/SKILL.md",
+        description=(
+            "Comma-separated project-relative glob patterns allowed as self-edit proposal targets"
+        ),
+    )
+    self_edit_allow_new_files: bool = Field(
+        default=False,
+        description="Allow self-edit proposals to target new files that do not yet exist",
     )
     skills_max_loaded_chars: int = Field(
         default=12000,

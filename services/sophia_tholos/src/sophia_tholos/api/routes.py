@@ -32,6 +32,28 @@ async def health() -> HealthResponse:
         chunk_count=engine.chunk_count,
         npz_dims=list(dims) if dims else None,
         model_name=engine.model_name,
+        semantic_enabled=engine.semantic_enabled,
+        semantic_available=engine.semantic_available,
+        semantic_error=engine.last_semantic_error,
+    )
+
+
+@router.get("/ready", response_model=HealthResponse)
+async def ready() -> HealthResponse:
+    engine = get_engine()
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Corpus not loaded")
+
+    dims = engine.npz_dims
+    return HealthResponse(
+        status="ok",
+        corpus_available=True,
+        chunk_count=engine.chunk_count,
+        npz_dims=list(dims) if dims else None,
+        model_name=engine.model_name,
+        semantic_enabled=engine.semantic_enabled,
+        semantic_available=engine.semantic_available,
+        semantic_error=engine.last_semantic_error,
     )
 
 

@@ -65,7 +65,8 @@ src/
 
 - Node.js 18+
 - npm or yarn
-- Running sophia_canvas backend service
+- Running `sophia_canvas` for chart/canvas APIs
+- Running `sophia_gateway` for recent executions, agents, proposals, and presentation data
 
 ### Installation
 
@@ -88,8 +89,12 @@ cp .env.example .env
 |----------|-------------|----------|
 | `VITE_COGNITO_USER_POOL_ID` | AWS Cognito User Pool ID | No* |
 | `VITE_COGNITO_CLIENT_ID` | AWS Cognito App Client ID | No* |
+| `VITE_CANVAS_API_TARGET` | Canvas REST proxy target for local dev | No |
+| `VITE_CANVAS_WS_TARGET` | Canvas WebSocket proxy target for local dev | No |
+| `VITE_GATEWAY_API_TARGET` | Gateway REST proxy target for local dev | No |
 
 *When not set, authentication is disabled and the app runs in development mode with a mock user.
+Proxy targets default to `http://localhost:8003`, `ws://localhost:8003`, and `http://localhost:18080`.
 
 ### Development
 
@@ -98,6 +103,11 @@ npm run dev
 ```
 
 The development server runs on `http://localhost:3000` with hot module replacement.
+
+Local dev proxy routing:
+- `/api/v1/*` -> `sophia_gateway`
+- `/api/*` -> `sophia_canvas`
+- `/ws/*` -> `sophia_canvas`
 
 ### Production Build
 

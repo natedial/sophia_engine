@@ -16,6 +16,9 @@ def mock_engine():
     engine.chunk_count = 100
     engine.npz_dims = (100, 384)
     engine.model_name = "all-MiniLM-L6-v2"
+    engine.semantic_enabled = True
+    engine.semantic_available = True
+    engine.last_semantic_error = None
     engine.search.return_value = [
         SearchResult(
             chunk_id="c1",
@@ -76,12 +79,25 @@ class TestHealth:
         assert data["corpus_available"] is True
         assert data["chunk_count"] == 100
         assert data["npz_dims"] == [100, 384]
+        assert data["semantic_enabled"] is True
+        assert data["semantic_available"] is True
 
     def test_health_no_corpus(self, client_no_corpus):
         resp = client_no_corpus.get("/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["corpus_available"] is False
+
+    def test_ready_with_corpus(self, client):
+        resp = client.get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["corpus_available"] is True
+
+    def test_ready_no_corpus(self, client_no_corpus):
+        resp = client_no_corpus.get("/ready")
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Corpus not loaded"
 
 
 class TestSearch:

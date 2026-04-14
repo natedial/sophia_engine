@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -118,6 +120,14 @@ class TelegramChannelAdapter:
         )
 
         try:
+            select_live_ack = getattr(self.runtime, "_select_live_ack_text", None)
+            if getattr(self.runtime, "startup_error", None) is None and callable(select_live_ack):
+                ack_seed = (
+                    f"{self.account.account_id}:{inbound.peer_id}:{inbound.message_id or inbound.text}"
+                )
+                await update.effective_message.reply_text(
+                    select_live_ack(ack_seed)
+                )
             outbound = await self.runtime.handle_inbound(inbound)
         except Exception:
             logger.exception("telegram message handling failed")
@@ -136,7 +146,9 @@ class TelegramChannelAdapter:
                 len(outbound.artifacts),
             )
             for chunk in _chunk_telegram_text(outbound.text):
-                await update.effective_message.reply_text(chunk)
+                await update.effective_message.reply_text(
+                    _md_to_telegram_html(chunk), parse_mode="HTML"
+                )
             for artifact in outbound.artifacts:
                 await self._send_artifact(update, artifact)
             logger.info(
@@ -203,6 +215,45 @@ def load_telegram_accounts(
         return [TelegramAccountConfig(account_id="default", bot_token=token_fallback)]
 
     return []
+
+
+def _md_to_telegram_html(text: str) -> str:
+    """Convert standard markdown to the HTML subset supported by Telegram."""
+    # Protect fenced code blocks from transformation.
+    code_blocks: list[str] = []
+
+    def _save_code_block(m: re.Match) -> str:
+        code_blocks.append(html.escape(m.group(1).strip()))
+        return f"\x00PRE{len(code_blocks) - 1}\x00"
+
+    text = re.sub(r"```(?:[^\n]*)?\n?([\s\S]*?)```", _save_code_block, text)
+
+    # Protect inline code spans.
+    inline_codes: list[str] = []
+
+    def _save_inline_code(m: re.Match) -> str:
+        inline_codes.append(html.escape(m.group(1)))
+        return f"\x00CODE{len(inline_codes) - 1}\x00"
+
+    text = re.sub(r"`([^`\n]+)`", _save_inline_code, text)
+
+    # Escape HTML special chars in the remaining prose.
+    text = html.escape(text)
+
+    # Bold: **text** → <b>text</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Italic: _text_ (requires non-word char on either side to avoid mangling snake_case)
+    text = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"<i>\1</i>", text)
+    # Italic: *text* (single asterisk, not part of a bold span)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", text)
+
+    # Restore fenced code blocks and inline code.
+    for i, block in enumerate(code_blocks):
+        text = text.replace(f"\x00PRE{i}\x00", f"<pre>{block}</pre>")
+    for i, code in enumerate(inline_codes):
+        text = text.replace(f"\x00CODE{i}\x00", f"<code>{code}</code>")
+
+    return text
 
 
 def _chunk_telegram_text(text: str, *, max_chars: int = _TELEGRAM_MESSAGE_LIMIT) -> list[str]:

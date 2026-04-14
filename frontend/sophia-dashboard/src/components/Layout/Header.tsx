@@ -1,27 +1,37 @@
-import { useCanvasStore } from '../../store/canvasStore'
 import { UserMenu } from '../Auth'
 
-export function Header() {
-  const { canvasName, canvasId, isConnected } = useCanvasStore()
+interface HeaderProps {
+  sectionTitle: string
+  sectionSubtitle: string
+  statusLabel?: string
+  statusTone?: 'live' | 'neutral'
+  metaLabel?: string | null
+}
 
+export function Header({
+  sectionTitle,
+  sectionSubtitle,
+  statusLabel,
+  statusTone = 'neutral',
+  metaLabel,
+}: HeaderProps) {
   return (
     <header className="header">
       <div className="header-left">
-        <h1 className="header-title">Sophia</h1>
-        <span className="header-subtitle">{canvasName}</span>
+        <div>
+          <div className="header-eyebrow">Sophia Platform</div>
+          <h1 className="header-title">{sectionTitle}</h1>
+        </div>
+        <span className="header-subtitle">{sectionSubtitle}</span>
       </div>
       <div className="header-right">
-        <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
-          <span className="status-dot" />
-          <span className="status-text">
-            {isConnected ? 'Live' : 'Connecting...'}
-          </span>
-        </div>
-        {canvasId && (
-          <span className="canvas-id" title={canvasId}>
-            ID: {canvasId.slice(0, 8)}...
-          </span>
+        {statusLabel && (
+          <div className={`connection-status ${statusTone === 'live' ? 'connected' : ''}`}>
+            <span className="status-dot" />
+            <span className="status-text">{statusLabel}</span>
+          </div>
         )}
+        {metaLabel && <span className="canvas-id">{metaLabel}</span>}
         <UserMenu />
       </div>
     </header>

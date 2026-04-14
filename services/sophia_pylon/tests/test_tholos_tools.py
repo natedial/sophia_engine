@@ -6,6 +6,7 @@ import pytest
 
 from pylon.tools.tholos import (
     TholosToolExecutor,
+    _classify_http_error,
     _coerce_float,
     _coerce_int,
     _coerce_optional_int,
@@ -13,6 +14,7 @@ from pylon.tools.tholos import (
     _coerce_string_list,
     _coerce_tail_mode,
 )
+from pylon.tools.base import ErrorType
 
 
 class _FakeTholosClient:
@@ -80,6 +82,13 @@ def test_coerce_helpers_apply_bounds_and_defaults() -> None:
     assert _coerce_optional_str("   ") is None
     assert _coerce_string_list([" a ", "", "b", "a"], max_items=10) == ["a", "b"]
     assert _coerce_string_list("bad", max_items=10) is None
+
+
+def test_classify_http_error_does_not_mark_internal_query_errors_as_service_down() -> None:
+    error_type, message = _classify_http_error(500, "Internal Server Error")
+
+    assert error_type == ErrorType.UNKNOWN
+    assert "Server error (500)" in message
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ class EmbeddingConfig:
     normalize: bool = True
     batch_size: int = 32
     local_files_only: bool = False
+    cache_dir: str | None = None
     quiet: bool = False
 
 
@@ -37,9 +38,17 @@ class EmbeddingModel:
                 pass
         if config.quiet:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self._model = SentenceTransformer(config.model_name, local_files_only=config.local_files_only)
+                self._model = SentenceTransformer(
+                    config.model_name,
+                    local_files_only=config.local_files_only,
+                    cache_folder=config.cache_dir,
+                )
         else:
-            self._model = SentenceTransformer(config.model_name, local_files_only=config.local_files_only)
+            self._model = SentenceTransformer(
+                config.model_name,
+                local_files_only=config.local_files_only,
+                cache_folder=config.cache_dir,
+            )
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if not texts:

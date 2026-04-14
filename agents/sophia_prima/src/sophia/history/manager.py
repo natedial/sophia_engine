@@ -168,12 +168,16 @@ class LosslessHistoryManager:
         query: str,
         exclude_session_ids: set[str] | None = None,
         max_sessions: int = 3,
+        max_hits: int = 20,
+        max_results_per_session: int = 5,
     ) -> list[SessionSearchResult]:
         """Search past sessions via FTS5, return grouped excerpts."""
         return self.store.search_sessions(
             query=query,
             exclude_session_ids=exclude_session_ids,
             max_sessions=max_sessions,
+            max_hits=max_hits,
+            max_results_per_session=max_results_per_session,
         )
 
     async def search_sessions_summarized(
@@ -182,6 +186,8 @@ class LosslessHistoryManager:
         query: str,
         exclude_session_ids: set[str] | None = None,
         max_sessions: int = 3,
+        max_hits: int = 20,
+        max_results_per_session: int = 5,
         summarizer: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> list[SessionRecap]:
         """Search + summarize matching past sessions."""
@@ -189,6 +195,8 @@ class LosslessHistoryManager:
             query=query,
             exclude_session_ids=exclude_session_ids,
             max_sessions=max_sessions,
+            max_hits=max_hits,
+            max_results_per_session=max_results_per_session,
         )
 
         recaps: list[SessionRecap] = []

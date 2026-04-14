@@ -15,6 +15,12 @@ from sophia.agent import AgentConfig, SophiaAgent
 from sophia.context import ConversationContext
 from sophia.config import get_settings
 from sophia.events import AgentEvent, EventType
+from sophia.llm.registry import (
+    OPENAI_COMPATIBLE_PROVIDERS,
+    ResolvedLLMConfig,
+    normalized_llm_settings,
+    resolve_llm_config,
+)
 from sophia.llm.types import ToolCall
 
 
@@ -159,29 +165,27 @@ def _format_tool_call(tc: ToolCall) -> str:
     return f"{tc.name}()"
 
 
-def _create_provider(settings):
+def _create_provider(settings, resolved: ResolvedLLMConfig):
     """Create an LLM provider based on settings."""
-    provider_name = getattr(settings, "llm_provider", "openai").lower().strip()
-
-    if provider_name == "anthropic":
+    if resolved.provider == "anthropic":
         from sophia.llm.anthropic_provider import AnthropicProvider
-        return AnthropicProvider(api_key=settings.anthropic_api_key)
-    if provider_name == "openai":
+        return AnthropicProvider(api_key=resolved.api_key)
+    if resolved.provider in OPENAI_COMPATIBLE_PROVIDERS:
         from sophia.llm.openai_provider import OpenAIProvider
         return OpenAIProvider(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url or settings.openai_base_url,
         )
-    if provider_name == "groq":
+    if resolved.provider == "groq":
         from sophia.llm.groq_provider import GroqProvider
         return GroqProvider(
-            api_key=settings.groq_api_key,
-            base_url=settings.groq_base_url,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url or settings.groq_base_url,
         )
 
     raise ValueError(
-        f"Unsupported LLM provider: '{provider_name}'. "
-        "Supported providers: anthropic, openai, groq"
+        f"Unsupported LLM provider: '{resolved.provider}'. "
+        "Supported providers: anthropic, openai, groq, deepinfra"
     )
 
 
@@ -248,30 +252,15 @@ async def async_main() -> None:
 
     settings = get_settings()
 
-    # Validate API key for selected provider
-    provider_name = getattr(settings, "llm_provider", "openai").lower().strip()
-    if provider_name == "anthropic" and not settings.anthropic_api_key:
-        console.print(
-            "[red]Error: ANTHROPIC_API_KEY not set.[/red]\n"
-            "Please set it in your .env file or environment."
-        )
-        return
-    if provider_name == "openai" and not settings.openai_api_key:
-        console.print(
-            "[red]Error: OPENAI_API_KEY not set.[/red]\n"
-            "Please set it in your .env file or environment."
-        )
-        return
-    if provider_name == "groq" and not settings.groq_api_key:
-        console.print(
-            "[red]Error: GROQ_API_KEY not set.[/red]\n"
-            "Please set it in your .env file or environment."
-        )
+    try:
+        resolved = resolve_llm_config(settings, require_api_key=True)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
         return
 
     # Create provider
     try:
-        provider = _create_provider(settings)
+        provider = _create_provider(settings, resolved)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         return
@@ -287,7 +276,7 @@ async def async_main() -> None:
     # Create agent
     agent = SophiaAgent(
         provider=provider,
-        settings=settings,
+        settings=normalized_llm_settings(settings, require_api_key=False),
         pylon=pylon,
         preflight_result=preflight,
         canvas_id=canvas_id,

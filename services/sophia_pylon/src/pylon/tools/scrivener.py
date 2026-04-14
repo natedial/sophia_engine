@@ -289,6 +289,98 @@ SCRIVENER_TOOLS = [
         description="Get summary statistics about tracked economic releases.",
         parameters=[],
     ),
+    ToolDefinition(
+        name="get_forecasts",
+        description="Get source-specific economic forecast rows from uploaded research output. Use this when you need house views, forecast ranges, or source provenance for a scheduled release.",
+        parameters=[
+            ToolParameter(
+                name="indicator_key",
+                type=ToolParameterType.STRING,
+                description="Normalized indicator key such as us_nfp or us_cpi_headline_mom",
+                required=False,
+            ),
+            ToolParameter(
+                name="source",
+                type=ToolParameterType.STRING,
+                description="Research source or bank name",
+                required=False,
+            ),
+            ToolParameter(
+                name="country",
+                type=ToolParameterType.STRING,
+                description="Country code or name",
+                required=False,
+            ),
+            ToolParameter(
+                name="release_date",
+                type=ToolParameterType.STRING,
+                description="Exact release date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="release_date_from",
+                type=ToolParameterType.STRING,
+                description="Earliest release date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="release_date_to",
+                type=ToolParameterType.STRING,
+                description="Latest release date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="source_date_from",
+                type=ToolParameterType.STRING,
+                description="Earliest source publication date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="source_date_to",
+                type=ToolParameterType.STRING,
+                description="Latest source publication date in YYYY-MM-DD format",
+                required=False,
+            ),
+            ToolParameter(
+                name="review_status",
+                type=ToolParameterType.STRING,
+                description="Review status filter",
+                required=False,
+                enum=["pending", "approved", "rejected", "uploaded"],
+            ),
+            ToolParameter(
+                name="forecast_type",
+                type=ToolParameterType.STRING,
+                description="Forecast type such as point, range, or directional",
+                required=False,
+            ),
+            ToolParameter(
+                name="economic_event_id",
+                type=ToolParameterType.STRING,
+                description="Linked economic_events.id",
+                required=False,
+            ),
+            ToolParameter(
+                name="parsed_research_id",
+                type=ToolParameterType.INTEGER,
+                description="Original parsed_research.id when available",
+                required=False,
+            ),
+            ToolParameter(
+                name="event_name_contains",
+                type=ToolParameterType.STRING,
+                description="Case-insensitive substring match on event name",
+                required=False,
+            ),
+            ToolParameter(
+                name="limit",
+                type=ToolParameterType.INTEGER,
+                description="Maximum rows to return (default: 50)",
+                required=False,
+                default=50,
+            ),
+        ],
+    ),
     # -------------------------------------------------------------------------
     # Speeches (Fed Communications)
     # -------------------------------------------------------------------------
@@ -402,6 +494,23 @@ class ScrivenerToolExecutor:
                     )
                 case "get_releases_summary":
                     data = await self.client.get_releases_summary()
+                case "get_forecasts":
+                    data = await self.client.get_forecasts(
+                        indicator_key=parameters.get("indicator_key"),
+                        source=parameters.get("source"),
+                        country=parameters.get("country"),
+                        release_date=parameters.get("release_date"),
+                        release_date_from=parameters.get("release_date_from"),
+                        release_date_to=parameters.get("release_date_to"),
+                        source_date_from=parameters.get("source_date_from"),
+                        source_date_to=parameters.get("source_date_to"),
+                        review_status=parameters.get("review_status"),
+                        forecast_type=parameters.get("forecast_type"),
+                        economic_event_id=parameters.get("economic_event_id"),
+                        parsed_research_id=parameters.get("parsed_research_id"),
+                        event_name_contains=parameters.get("event_name_contains"),
+                        limit=parameters.get("limit", 50),
+                    )
                 # Speeches
                 case "get_speeches":
                     data = await self.client.get_speeches(

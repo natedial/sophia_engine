@@ -97,6 +97,7 @@ services:
       - "${DASHBOARD_PORT:-13000}:80"
     depends_on:
       - sophia_canvas
+      - sophia_gateway
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 15s
@@ -104,18 +105,29 @@ services:
       retries: 8
 
   sophia_tholos:
-    build: ../services/sophia_tholos
+    build:
+      context: ../services/sophia_tholos
+      args:
+        THOLOS_INSTALL_SEMANTIC: ${THOLOS_INSTALL_SEMANTIC:-true}
+        THOLOS_PRELOAD_MODEL: ${THOLOS_PRELOAD_MODEL:-false}
+        THOLOS_MODEL_NAME: ${THOLOS_MODEL_NAME:-all-MiniLM-L6-v2}
     ports:
       - "${THOLOS_PORT:-8004}:8004"
     environment:
       THOLOS_DB_PATH: /corpus/chunks.sqlite
       THOLOS_NPZ_PATH: /corpus/embeddings.npz
+      THOLOS_MODEL_NAME: ${THOLOS_MODEL_NAME:-all-MiniLM-L6-v2}
+      THOLOS_SEMANTIC_ENABLED: ${THOLOS_SEMANTIC_ENABLED:-true}
+      THOLOS_SEMANTIC_LOCAL_FILES_ONLY: ${THOLOS_SEMANTIC_LOCAL_FILES_ONLY:-true}
+      THOLOS_SEMANTIC_VERIFY_ON_STARTUP: ${THOLOS_SEMANTIC_VERIFY_ON_STARTUP:-false}
+      THOLOS_SEMANTIC_STRICT: ${THOLOS_SEMANTIC_STRICT:-false}
+      THOLOS_MODEL_CACHE_DIR: ${THOLOS_MODEL_CACHE_DIR:-/models/sentence-transformers}
     volumes:
       - ${RESEARCH_CORPUS_PATH:-../../research-store/distill_out}:/corpus:ro
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=3)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8004/ready', timeout=3)"
       interval: 10s
       timeout: 5s
       retries: 12

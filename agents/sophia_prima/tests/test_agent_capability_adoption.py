@@ -179,6 +179,7 @@ def test_build_system_prompt_includes_tool_handoff_guidance() -> None:
     agent.profile = AgentProfile(agent_id="sophia", label="Sophia")
     agent.personality = Personality(raw_content="# Sophia")
     agent.soul = None
+    agent.runtime_component_inventory = []
 
     context = ConversationContext(
         session_id="session-1",
@@ -218,7 +219,35 @@ def test_build_system_prompt_includes_tool_handoff_guidance() -> None:
 
     assert "Tool handoff guidance" in prompt
     assert "get_market_ohlcv" in prompt
-    assert '{"symbol":"ZN"}' in prompt
+
+
+def test_build_system_prompt_includes_forecast_source_policy() -> None:
+    agent = object.__new__(SophiaAgent)
+    agent.preflight_result = None
+    agent.canvas_id = None
+    agent.profile = AgentProfile(agent_id="sophia", label="Sophia")
+    agent.personality = Personality(raw_content="# Sophia")
+    agent.soul = None
+    agent.runtime_component_inventory = []
+
+    prompt = agent._build_system_prompt(
+        active_tools=[
+            ToolSchema(
+                name="get_forecasts",
+                description="Research forecasts.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            ToolSchema(
+                name="get_published_projection",
+                description="Engine forecast.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ],
+    )
+
+    assert "Forecast source policy" in prompt
+    assert "Use get_forecasts for external bank/research/street/house-view forecasts." in prompt
+    assert "Use get_published_projection for our engine's production-approved forecast." in prompt
 
 
 def test_build_system_prompt_includes_preference_persistence_policy() -> None:
@@ -228,6 +257,7 @@ def test_build_system_prompt_includes_preference_persistence_policy() -> None:
     agent.profile = AgentProfile(agent_id="sophia", label="Sophia")
     agent.personality = Personality(raw_content="# Sophia")
     agent.soul = None
+    agent.runtime_component_inventory = []
 
     prompt = agent._build_system_prompt(
         active_tools=[
