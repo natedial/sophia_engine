@@ -1322,27 +1322,37 @@ class SophiaAgent:
         *,
         query_override: str | None = None,
         recall_mode: bool = False,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         query = re.sub(r"\s+", " ", (query_override or user_message or "").strip())
-        if recall_mode:
-            return {
-                "query": query,
-                "limit": 8,
-                "keyword_weight": 0.45,
-                "semantic_weight": 0.55,
-                "min_lexical_score": 0.0,
-                "semantic_tail_mode": "keep",
-                "max_per_source": 2,
-            }
-        return {
+        base_params: dict[str, Any] = {
             "query": query,
             "limit": 8,
-            "keyword_weight": 0.65,
-            "semantic_weight": 0.35,
-            "min_lexical_score": 0.08,
-            "semantic_tail_mode": "demote",
             "max_per_source": 2,
         }
+        time_window = SophiaAgent._extract_time_window(user_message, now=now)
+        if time_window is not None:
+            base_params["date_from"] = time_window[0]
+            base_params["date_to"] = time_window[1]
+        if recall_mode:
+            base_params.update(
+                {
+                    "keyword_weight": 0.45,
+                    "semantic_weight": 0.55,
+                    "min_lexical_score": 0.0,
+                    "semantic_tail_mode": "keep",
+                }
+            )
+        else:
+            base_params.update(
+                {
+                    "keyword_weight": 0.65,
+                    "semantic_weight": 0.35,
+                    "min_lexical_score": 0.08,
+                    "semantic_tail_mode": "demote",
+                }
+            )
+        return base_params
 
     @staticmethod
     def _search_result_count(content: str) -> int:
