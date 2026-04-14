@@ -163,7 +163,9 @@ class PresentationResolver:
             png_path = self.artifact_dir / f"{stem}.png"
             if self.write_policy is not None:
                 self.write_policy.ensure_allowed(png_path, purpose="presentation_artifact")
-            if rasterize_svg_to_png(svg_path=svg_path, output_path=png_path) or render_markdown_table_png(
+            if rasterize_svg_to_png(
+                svg_path=svg_path, output_path=png_path
+            ) or render_markdown_table_png(
                 table_markdown=table_block,
                 output_path=png_path,
                 title=title,
@@ -333,13 +335,25 @@ def _extract_csv_filename(text: str) -> str | None:
 
 
 def _find_csv_start(lines: list[str]) -> int | None:
+    has_csv_filename = any(_extract_csv_filename(line) for line in lines)
+    min_rows = 2 if has_csv_filename else 3
     for index, line in enumerate(lines):
         if not _looks_like_csv_row(line):
             continue
-        next_index = _next_nonempty_index(lines, index + 1)
-        if next_index is None or not _looks_like_csv_row(lines[next_index]):
-            continue
-        return index
+        csv_rows = 1
+        row_idx = index + 1
+        while row_idx < len(lines):
+            next_line = lines[row_idx].strip()
+            if not next_line:
+                row_idx += 1
+                continue
+            if _looks_like_csv_row(next_line):
+                csv_rows += 1
+                row_idx += 1
+            else:
+                break
+        if csv_rows >= min_rows:
+            return index
     return None
 
 

@@ -232,7 +232,9 @@ class PromotionManager:
                 extra_payload={"changed_files": list(result.changed_files)},
             )
 
-        unrelated_changes = _unrelated_status_entries(repo_root=repo_root, changed_paths=changed_paths)
+        unrelated_changes = _unrelated_status_entries(
+            repo_root=repo_root, changed_paths=changed_paths
+        )
         if unrelated_changes:
             return self._persist_status(
                 run_id=run_id,
@@ -266,14 +268,12 @@ class PromotionManager:
                 message="Draft PR promotion requires a base_branch when the repository is detached.",
             )
 
-        commit_message = (
-            (policy.commit_message or "").strip()
-            or (result.summary.strip() if result.summary.strip() else f"Forge update for {run_id}")
+        commit_message = (policy.commit_message or "").strip() or (
+            result.summary.strip() if result.summary.strip() else f"Forge update for {run_id}"
         )
         pr_title = ((policy.pr_title or "").strip() or commit_message).strip()
-        pr_body = (
-            (policy.pr_body or "").strip()
-            or _default_pr_body(run_id=run_id, result=result, verification_pass=verification_pass)
+        pr_body = (policy.pr_body or "").strip() or _default_pr_body(
+            run_id=run_id, result=result, verification_pass=verification_pass
         )
 
         try:
@@ -300,7 +300,10 @@ class PromotionManager:
                 extra_payload={"branch_name": branch_name},
             )
 
-        remote_url = _git_output(repo_root, "remote", "get-url", self.settings.git_remote_name).strip() or None
+        remote_url = (
+            _git_output(repo_root, "remote", "get-url", self.settings.git_remote_name).strip()
+            or None
+        )
         draft = PullRequestDraft(
             repo_root=repo_root,
             remote_url=remote_url,
@@ -360,7 +363,9 @@ class PromotionManager:
             message = "Prepared a local branch and PR request artifact, but remote publication is not configured."
         else:
             status = "failed"
-            message = f"Prepared a local branch, but remote publication failed: {publish_result.message}"
+            message = (
+                f"Prepared a local branch, but remote publication failed: {publish_result.message}"
+            )
         status_outcome = self._persist_status(
             run_id=run_id,
             mode="draft_pr",
@@ -460,6 +465,19 @@ class PromotionManager:
                 )
             else:
                 try:
+                    current_commit = _git_run(repo_root, "rev-parse", branch_name).strip()
+                    if current_commit != commit_sha:
+                        return PromotionOutcome(
+                            mode="draft_pr",
+                            status="failed",
+                            message=(
+                                f"Branch '{branch_name}' HEAD ({current_commit[:7]}) does not "
+                                f"match the reviewed artifact's commit ({commit_sha[:7]}). "
+                                "The branch has changed since the draft was created. "
+                                "Please recreate the draft from current HEAD or reset the branch."
+                            ),
+                            payload=payload,
+                        )
                     _git_run(repo_root, "push", "-u", self.settings.git_remote_name, branch_name)
                     publish_result = self.git_host_publisher.publish_pull_request(draft_request)
                 except Exception as exc:
