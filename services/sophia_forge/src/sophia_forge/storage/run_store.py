@@ -612,6 +612,49 @@ class ForgeRunStore:
             )
         return self.get_run(run_id)
 
+    def list_runs(
+        self,
+        *,
+        limit: int = 25,
+        status: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        params: list[object] = []
+        where_sql = ""
+        if status is not None:
+            where_sql = "WHERE status = ?"
+            params.append(status)
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT run_id, client_name, status, task_text, backend, workspace_root,
+                       request_json, summary, error, artifact_ids_json, created_at, updated_at, completed_at
+                FROM forge_runs
+                {where_sql}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return tuple(
+            {
+                "run_id": row["run_id"],
+                "client_name": row["client_name"],
+                "status": row["status"],
+                "task": row["task_text"],
+                "backend": row["backend"],
+                "workspace_root": row["workspace_root"],
+                "summary": row["summary"] or "",
+                "error": row["error"],
+                "artifact_ids": tuple(json.loads(row["artifact_ids_json"] or "[]")),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "completed_at": row["completed_at"],
+                "promotion_mode": _extract_promotion_mode(row["request_json"]),
+            }
+            for row in rows
+        )
+
     def get_run(self, run_id: str) -> RunResult:
         with self._connect() as conn:
             row = conn.execute(
@@ -1027,6 +1070,22 @@ class ForgeRunStore:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _extract_promotion_mode(request_json: str | None) -> str | None:
+    if not request_json:
+        return None
+    try:
+        payload = json.loads(request_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    promotion_policy = payload.get("promotion_policy")
+    if not isinstance(promotion_policy, dict):
+        return None
+    mode = promotion_policy.get("mode")
+    return str(mode) if mode else None
 
 
 def _ensure_column(

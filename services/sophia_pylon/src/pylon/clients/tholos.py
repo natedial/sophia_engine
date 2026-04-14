@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import httpx
+
 from pylon.clients.base import BaseClient
 
 
@@ -16,10 +18,22 @@ class TholosClient(BaseClient):
         """Check if Tholos service is available."""
         try:
             client = await self._get_client()
-            response = await client.get("/health")
-            return response.status_code == 200
-        except Exception:
+            response = await client.get("/ready")
+            if response.status_code == 503:
+                raise RuntimeError("Corpus not loaded")
+            response.raise_for_status()
+            return True
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError):
             return False
+
+    async def get_status(self) -> dict[str, Any]:
+        """Fetch detailed readiness metadata."""
+        client = await self._get_client()
+        response = await client.get("/ready")
+        if response.status_code == 503:
+            raise RuntimeError("Corpus not loaded")
+        response.raise_for_status()
+        return response.json()
 
     async def search(
         self,

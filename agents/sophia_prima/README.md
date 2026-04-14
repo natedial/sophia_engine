@@ -38,6 +38,10 @@ LLM provider:
 - `AGENT_FS_WRITE_ALLOWLIST` (comma-separated writable roots, default `.sophia`)
 - `AGENT_FS_ENFORCE_READ_POLICY` (`true` default, deny-by-default read guard)
 - `AGENT_FS_READ_ALLOWLIST` (comma-separated readable roots, default `config,skills,.sophia`)
+- `SELF_EDIT_PROPOSALS_ENABLED` (`true` default)
+- `SELF_EDIT_PROPOSAL_DIR` (default `.sophia/self_edit_proposals`)
+- `SELF_EDIT_TARGET_GLOBS` (default `config/*.md,config/**/*.md,config/*.json,config/**/*.json,skills/**/SKILL.md`)
+- `SELF_EDIT_ALLOW_NEW_FILES` (`false` default)
 - `CODING_WORKER_ENABLED` (`false` default)
 - `CODING_WORKER_BACKEND` (`codex` default; `claude_code` optional)
 - `CODING_WORKER_WORKSPACE_ROOT` (repo/worktree root the worker may edit)
@@ -62,3 +66,24 @@ Telegram:
 - `TELEGRAM_BOT_TOKEN` (single account fallback)
 - `TELEGRAM_ACCOUNTS_JSON` (multi-account config)
 - `TELEGRAM_POLLING_ENABLED` (`true`/`false`)
+
+## Gated Self-Edit Flow
+
+Sophia can draft changes to her own guidance files without writing directly into the repo.
+
+Current behavior:
+- the agent can create self-edit proposals under `.sophia/self_edit_proposals/`
+- proposals may target only the configured `SELF_EDIT_TARGET_GLOBS`
+- repo-owned files under `config/` and `skills/` are not modified during proposal creation
+- a human must explicitly approve or reject each proposal
+- approved proposals can be promoted into a local git branch and commit through the review CLI
+
+Review commands:
+
+```bash
+sophia-self-edit list
+sophia-self-edit show <proposal_id>
+sophia-self-edit approve <proposal_id> --reason "looks good"
+sophia-self-edit reject <proposal_id> --reason "too broad"
+sophia-self-edit promote <proposal_id> --branch sophia/self-edit-example --commit-message "Promote approved self-edit"
+```

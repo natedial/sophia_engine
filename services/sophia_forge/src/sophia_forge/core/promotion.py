@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -387,6 +388,139 @@ class PromotionManager:
                 **status_outcome.payload,
                 "pr_request_artifact_id": pr_request_artifact.artifact_id,
             },
+        )
+
+    def publish_prepared_pr(
+        self,
+        *,
+        run_id: str,
+        pr_request_path: Path,
+        promotion_status_path: Path | None = None,
+    ) -> PromotionOutcome:
+        if not pr_request_path.exists():
+            return PromotionOutcome(
+                mode="draft_pr",
+                status="failed",
+                message="PR request artifact file not found.",
+            )
+
+        payload = json.loads(pr_request_path.read_text(encoding="utf-8"))
+        mode = str(payload.get("mode") or "")
+        if mode != "draft_pr":
+            return PromotionOutcome(
+                mode=mode or "unknown",
+                status="blocked",
+                message="Only draft_pr promotions can be published.",
+                payload=payload,
+            )
+
+        current_publish_status = str(payload.get("publish_status") or "")
+        if current_publish_status == "published":
+            return PromotionOutcome(
+                mode="draft_pr",
+                status="published",
+                message="Pull request is already published.",
+                payload=payload,
+            )
+
+        repo_root_text = str(payload.get("repo_root") or "").strip()
+        branch_name = str(payload.get("branch_name") or "").strip()
+        base_branch = str(payload.get("base_branch") or "").strip()
+        title = str(payload.get("pr_title") or "").strip()
+        body = str(payload.get("pr_body") or "").strip()
+        commit_sha = str(payload.get("commit_sha") or "").strip()
+        remote_url = str(payload.get("remote_url") or "").strip() or None
+        draft = bool(payload.get("draft", True))
+        if not repo_root_text or not branch_name or not base_branch or not title:
+            return PromotionOutcome(
+                mode="draft_pr",
+                status="failed",
+                message="Draft PR artifact is missing required publication fields.",
+                payload=payload,
+            )
+
+        repo_root = Path(repo_root_text).expanduser().resolve(strict=False)
+        draft_request = PullRequestDraft(
+            repo_root=repo_root,
+            remote_url=remote_url,
+            base_branch=base_branch,
+            branch_name=branch_name,
+            title=title,
+            body=body,
+            draft=draft,
+            commit_sha=commit_sha,
+        )
+
+        if self.git_host_publisher.provider_name != "disabled":
+            if not remote_url:
+                publish_result = PullRequestPublishResult(
+                    status="not_configured",
+                    provider=self.git_host_publisher.provider_name,
+                    message="Configured git-host publication requires a remote URL.",
+                )
+            else:
+                try:
+                    _git_run(repo_root, "push", "-u", self.settings.git_remote_name, branch_name)
+                    publish_result = self.git_host_publisher.publish_pull_request(draft_request)
+                except Exception as exc:
+                    publish_result = PullRequestPublishResult(
+                        status="failed",
+                        provider=self.git_host_publisher.provider_name,
+                        message=f"Failed to push branch before PR publication: {exc}",
+                    )
+        else:
+            publish_result = self.git_host_publisher.publish_pull_request(draft_request)
+
+        updated_payload = {
+            **payload,
+            "provider": publish_result.provider,
+            "publish_status": publish_result.status,
+            "publish_url": publish_result.url,
+            "publish_message": publish_result.message,
+            "publish_external_id": publish_result.external_id,
+        }
+        pr_request_path.write_text(
+            json.dumps(updated_payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        if publish_result.status == "published":
+            status = "published"
+            message = "Published draft pull request."
+        elif publish_result.status == "not_configured":
+            status = "prepared"
+            message = "Draft PR is prepared locally, but remote publication is not configured."
+        else:
+            status = "failed"
+            message = f"Draft PR publication failed: {publish_result.message}"
+
+        status_payload = {
+            "run_id": run_id,
+            "mode": "draft_pr",
+            "status": status,
+            "message": message,
+            "repo_root": str(repo_root),
+            "base_branch": base_branch,
+            "branch_name": branch_name,
+            "commit_sha": commit_sha,
+            "provider": publish_result.provider,
+            "publish_status": publish_result.status,
+            "publish_url": publish_result.url,
+            "publish_external_id": publish_result.external_id,
+            "pr_request_artifact_path": str(pr_request_path),
+        }
+        if promotion_status_path is not None:
+            promotion_status_path.parent.mkdir(parents=True, exist_ok=True)
+            promotion_status_path.write_text(
+                json.dumps(status_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+        return PromotionOutcome(
+            mode="draft_pr",
+            status=status,
+            message=message,
+            payload=status_payload,
         )
 
     def _persist_status(

@@ -270,6 +270,66 @@ def test_seed_lessons_are_included_in_memory_snapshot() -> None:
     assert any("Use exact calendar dates in answers." in text for text in lesson_texts)
 
 
+def test_remember_that_promotes_lesson_immediately() -> None:
+    manager = MemoryManager(config=MemoryManagerConfig(lesson_promotion_min_repeats=3))
+    manager.ingest_turn(
+        session_id="session-a",
+        user_message="Please remember that 'Fed day' is restricted to the FOMC meeting day.",
+        assistant_message="Understood.",
+    )
+
+    snapshot = manager.recall(
+        session_id="session-a",
+        query="Fed day",
+        messages=[],
+    )
+
+    lesson_texts = [rec.content for rec in snapshot.lessons]
+    assert any("fed day" in text.lower() for text in lesson_texts)
+
+
+def test_care_about_block_extracts_preference_memories() -> None:
+    manager = MemoryManager(config=MemoryManagerConfig())
+    manager.ingest_turn(
+        session_id="session-a",
+        user_message=(
+            "I generally care about:\n"
+            "FOMC statement & press conference\n"
+            "FOMC minutes\n"
+            "Fed policy maker speeches & appearances\n"
+            "Scheduled announcements of varying kinds on policy\n\n"
+            "I do not typically care about the release of Fed Funds Data, SOFR data, "
+            "OBFR data, H.4.1, H.15, as these occur daily."
+        ),
+        assistant_message="Noted.",
+    )
+
+    semantic_records = manager.store.list_records(
+        session_id="session-a",
+        levels={MemoryLevel.SEMANTIC},
+        limit=None,
+        newest_first=True,
+    )
+    semantic_contents = [rec.content for rec in semantic_records]
+
+    assert any(
+        "User preference: care about FOMC statement & press conference." == content
+        for content in semantic_contents
+    )
+    assert any(
+        "User preference: care about FOMC minutes." == content
+        for content in semantic_contents
+    )
+    assert any(
+        "User preference: care about Fed policy maker speeches & appearances." == content
+        for content in semantic_contents
+    )
+    assert any(
+        "User preference: do not care about the release of Fed Funds Data, SOFR data, OBFR data, H.4.1, H.15, as these occur daily." == content
+        for content in semantic_contents
+    )
+
+
 def test_explicit_directive_promotes_lesson_immediately() -> None:
     manager = MemoryManager(config=MemoryManagerConfig(lesson_promotion_min_repeats=3))
     manager.ingest_turn(

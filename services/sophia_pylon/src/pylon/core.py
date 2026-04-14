@@ -430,11 +430,26 @@ class Pylon:
 
         try:
             async with semaphore:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     executor.execute(tool_name, parameters),
                     timeout=max(0.1, self.config.tool_timeout_sec),
                 )
+                if (
+                    not result.success
+                    and result.error_type in {ErrorType.SERVICE_UNAVAILABLE, ErrorType.TIMEOUT}
+                ):
+                    self._service_status[service_name] = ServiceStatus(
+                        name=service_name,
+                        healthy=False,
+                        error=result.error or "Runtime tool failure",
+                    )
+                return result
         except TimeoutError:
+            self._service_status[service_name] = ServiceStatus(
+                name=service_name,
+                healthy=False,
+                error=f"Tool timeout after {self.config.tool_timeout_sec:.1f}s",
+            )
             return ToolResult.fail(
                 f"Tool '{tool_name}' timed out after {self.config.tool_timeout_sec:.1f}s",
                 ErrorType.TIMEOUT,

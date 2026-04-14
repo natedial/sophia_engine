@@ -1,7 +1,7 @@
 """Scheduled job definitions."""
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.config import get_settings
 from src.db import get_session
@@ -16,7 +16,7 @@ def daily_sweep_fred() -> dict:
     Runs at configured time (default 5pm ET) to refresh all data.
     """
     logger.info("Starting daily FRED sweep")
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
 
     try:
         from src.fetchers.fred import FredFetcher
@@ -48,14 +48,14 @@ def daily_sweep_fred() -> dict:
         return result
 
     finally:
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(UTC)
         _log_sweep("FRED", "daily_sweep", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
 def daily_sweep_bls() -> dict:
     """Daily sweep of all BLS core series."""
     logger.info("Starting daily BLS sweep")
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
 
     try:
         from src.fetchers.bls import BlsFetcher
@@ -85,14 +85,14 @@ def daily_sweep_bls() -> dict:
         return result
 
     finally:
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(UTC)
         _log_sweep("BLS", "daily_sweep", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
 def daily_sweep_treasury_announced() -> dict:
     """Daily sync of announced Treasury auctions from TreasuryDirect."""
     logger.info("Starting TreasuryDirect announced auctions sync")
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
 
     try:
         from src.fetchers.treasury import TreasuryFetcher
@@ -116,7 +116,7 @@ def daily_sweep_treasury_announced() -> dict:
         return result
 
     finally:
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(UTC)
         _log_sweep("TREASURY", "announced_auctions", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 
@@ -142,7 +142,7 @@ def fetch_series_on_release(source: str, series_ids: list[str], release_name: st
     Called when a scheduled release (CPI, NFP, etc.) is expected.
     """
     logger.info(f"Release trigger: {release_name} - fetching {len(series_ids)} series from {source}")
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
 
     try:
         if source.upper() == "FRED":
@@ -178,7 +178,7 @@ def fetch_series_on_release(source: str, series_ids: list[str], release_name: st
         return result
 
     finally:
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(UTC)
         _log_sweep(source, f"release_{release_name}", started_at, completed_at, locals().get("result", {}).get("status", "error"))
 
 

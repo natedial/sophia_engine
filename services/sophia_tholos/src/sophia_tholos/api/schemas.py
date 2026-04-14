@@ -94,6 +94,9 @@ class HealthResponse(BaseModel):
     chunk_count: int | None = None
     npz_dims: list[int] | None = None
     model_name: str | None = None
+    semantic_enabled: bool | None = None
+    semantic_available: bool | None = None
+    semantic_error: str | None = None
 
 
 def _parse_window_ts(value: str | None, *, end_of_day: bool) -> str | None:

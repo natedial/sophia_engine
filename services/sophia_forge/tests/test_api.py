@@ -293,6 +293,27 @@ def test_forge_api_prepares_local_draft_pr_artifacts(tmp_path) -> None:
         ).stdout.strip()
         assert head_message == "Updated the tool implementation."
 
+        runs_response = client.get("/v1/runs?limit=10")
+        assert runs_response.status_code == 200
+        runs = runs_response.json()["runs"]
+        assert runs[0]["run_id"] == run_id
+        assert runs[0]["promotion_mode"] == "draft_pr"
+
+        pr_content = client.get(
+            f"/v1/runs/{run_id}/artifacts/{pr_request['artifact_id']}/content"
+        )
+        assert pr_content.status_code == 200
+        assert json.loads(pr_content.text)["mode"] == "draft_pr"
+
+        publish_response = client.post(f"/v1/runs/{run_id}/promotion/publish")
+        assert publish_response.status_code == 200
+        publish_payload = publish_response.json()
+        assert publish_payload["mode"] == "draft_pr"
+        assert publish_payload["status"] == "prepared"
+
+        refreshed_pr = json.loads(Path(pr_request["path"]).read_text(encoding="utf-8"))
+        assert refreshed_pr["publish_status"] == "not_configured"
+
 
 def test_forge_api_creates_session_and_links_runs(tmp_path) -> None:
     runtime = ForgeRuntime(

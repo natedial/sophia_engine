@@ -46,6 +46,7 @@ dev = [
 sophia = "sophia.cli:main"
 sophia-gateway = "sophia.gateway.main:main"
 sophia-memory-index = "sophia.memory_index_worker:main"
+sophia-self-edit = "sophia.self_edit_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

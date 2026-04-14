@@ -197,6 +197,57 @@ class ScrivenerClient(BaseClient):
         response.raise_for_status()
         return response.json()
 
+    async def get_forecasts(
+        self,
+        *,
+        indicator_key: str | None = None,
+        source: str | None = None,
+        country: str | None = None,
+        release_date: str | None = None,
+        release_date_from: str | None = None,
+        release_date_to: str | None = None,
+        source_date_from: str | None = None,
+        source_date_to: str | None = None,
+        review_status: str | None = None,
+        forecast_type: str | None = None,
+        economic_event_id: str | None = None,
+        parsed_research_id: int | None = None,
+        event_name_contains: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get source-specific economic forecasts."""
+        client = await self._get_client()
+        params: dict[str, Any] = {"limit": limit}
+        if indicator_key:
+            params["indicator_key"] = indicator_key
+        if source:
+            params["source"] = source
+        if country:
+            params["country"] = country
+        if release_date:
+            params["release_date"] = release_date
+        if release_date_from:
+            params["release_date_from"] = release_date_from
+        if release_date_to:
+            params["release_date_to"] = release_date_to
+        if source_date_from:
+            params["source_date_from"] = source_date_from
+        if source_date_to:
+            params["source_date_to"] = source_date_to
+        if review_status:
+            params["review_status"] = review_status
+        if forecast_type:
+            params["forecast_type"] = forecast_type
+        if economic_event_id:
+            params["economic_event_id"] = economic_event_id
+        if parsed_research_id is not None:
+            params["parsed_research_id"] = parsed_research_id
+        if event_name_contains:
+            params["event_name_contains"] = event_name_contains
+        response = await client.get("/forecasts", params=params)
+        response.raise_for_status()
+        return response.json()
+
     # -------------------------------------------------------------------------
     # Speeches (Fed Communications)
     # -------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from sophia.agent import AgentConfig, SophiaAgent
 from sophia.config import Settings
 from sophia.context import ConversationContext
 from sophia.events import EventType
+from sophia.history.types import SessionSearchResult
 from sophia.llm.types import (
     CompletionResponse,
     Message,
@@ -293,13 +295,89 @@ class LiveWebFallbackProvider(DummyProvider):
                 usage=TokenUsage(input_tokens=1, output_tokens=1),
             )
         return CompletionResponse(
-            message=Message(
-                role=Role.ASSISTANT,
-                content="Bottom line: today's Logan remarks were retrieved from web sources.",
-            ),
+            message=Message(role=Role.ASSISTANT, content="Bottom line: today's Logan remarks were retrieved from web sources."),
             stop_reason=StopReason.END_TURN,
             usage=TokenUsage(input_tokens=1, output_tokens=1),
         )
+
+
+class ResearchThenUngroundedProvider(DummyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self.tools_seen: list[list[str]] = []
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Message],
+        tools=None,
+        max_tokens: int = 4096,
+    ) -> CompletionResponse:
+        self.system_prompts.append(system)
+        self.calls += 1
+        self.tools_seen.append([t.name for t in (tools or [])])
+        if self.calls == 1:
+            return CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-local-research",
+                            name="search_research",
+                            input={"query": "Nonfarm payrolls forecast April 3 2026 NFP forecast"},
+                        )
+                    ],
+                ),
+                stop_reason=StopReason.TOOL_USE,
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            )
+        return CompletionResponse(
+            message=Message(role=Role.ASSISTANT, content="Here are the forecasts."),
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+class FakeHistoryManager:
+    def __init__(self, results: list[SessionSearchResult]) -> None:
+        self.results = results
+        self.search_calls: list[dict[str, object]] = []
+
+    def record_turn_input(self, **kwargs) -> None:
+        return None
+
+    def record_turn_output(self, **kwargs) -> None:
+        return None
+
+    def record_tool_start(self, **kwargs) -> None:
+        return None
+
+    def record_tool_end(self, **kwargs) -> None:
+        return None
+
+    def search_sessions(
+        self,
+        *,
+        query: str,
+        exclude_session_ids: set[str] | None = None,
+        max_sessions: int = 3,
+        max_hits: int = 20,
+        max_results_per_session: int = 5,
+    ) -> list[SessionSearchResult]:
+        self.search_calls.append(
+            {
+                "query": query,
+                "exclude_session_ids": exclude_session_ids,
+                "max_sessions": max_sessions,
+                "max_hits": max_hits,
+                "max_results_per_session": max_results_per_session,
+            }
+        )
+        return self.results
 
 
 class FailingIngestMemoryManager:
@@ -401,6 +479,7 @@ async def test_agent_surfaces_reply_even_if_memory_ingest_fails(tmp_path: Path) 
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -632,6 +711,117 @@ async def test_agent_injects_resource_memory_guidance_into_system_prompt(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_agent_injects_relevant_past_sessions_and_excludes_current_session(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        history_session_recall_enabled=True,
+        history_session_recall_top_k=1,
+        history_session_recall_max_excerpts_per_session=1,
+        history_session_recall_max_excerpt_chars=120,
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylon(),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    agent.history = FakeHistoryManager(
+        [
+            SessionSearchResult(
+                session_id="prior-session",
+                earliest=datetime(2026, 3, 18, 14, 0, tzinfo=timezone.utc),
+                latest=datetime(2026, 3, 18, 14, 30, tzinfo=timezone.utc),
+                excerpts=[
+                    "Fed hawk-dove balance shifted after the last SEP because Waller sounded more cautious."
+                ],
+                match_count=2,
+            )
+        ]
+    )
+    context = ConversationContext(session_id="current-session")
+
+    _ = [
+        event
+        async for event in agent.run(
+            "Can you compare the FOMC's current hawk-dove mix with what we discussed before?",
+            context,
+        )
+    ]
+
+    assert provider.system_prompts
+    assert "Relevant past sessions" in provider.system_prompts[0]
+    assert "Fed hawk-dove balance shifted" in provider.system_prompts[0]
+    assert agent.history.search_calls
+    assert agent.history.search_calls[0]["exclude_session_ids"] == {"current-session"}
+
+
+@pytest.mark.asyncio
+async def test_agent_skips_session_recall_for_casual_chat(tmp_path: Path) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        history_session_recall_enabled=True,
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylon(),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    agent.history = FakeHistoryManager(
+        [
+            SessionSearchResult(
+                session_id="prior-session",
+                earliest=datetime(2026, 3, 18, 14, 0, tzinfo=timezone.utc),
+                latest=datetime(2026, 3, 18, 14, 30, tzinfo=timezone.utc),
+                excerpts=["This should never be surfaced for a joke request."],
+                match_count=1,
+            )
+        ]
+    )
+    context = ConversationContext(session_id="casual-session")
+
+    _ = [event async for event in agent.run("tell me a short joke", context)]
+
+    assert provider.system_prompts
+    assert "Relevant past sessions" not in provider.system_prompts[0]
+    assert agent.history.search_calls == []
+
+
+@pytest.mark.asyncio
 async def test_agent_injects_research_retrieval_policy_when_tholos_tools_present(
     tmp_path: Path,
 ) -> None:
@@ -647,6 +837,7 @@ async def test_agent_injects_research_retrieval_policy_when_tholos_tools_present
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -686,6 +877,7 @@ async def test_agent_injects_readwise_policy_when_readwise_tools_present(
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -710,6 +902,104 @@ async def test_agent_injects_readwise_policy_when_readwise_tools_present(
     assert "readwise_list_commands" in provider.system_prompts[0]
     assert "readwise_run_command" in provider.system_prompts[0]
     assert "reader-search-documents" in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_injects_release_calendar_policy_when_release_tools_present(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        presentation_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylonWithTools(["get_releases_today", "get_releases_week"]),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+    )
+    context = ConversationContext(session_id="test-session-release-policy")
+
+    _ = [event async for event in agent.run("what's on today's release calendar?", context)]
+
+    assert provider.system_prompts
+    assert "Release calendar policy" in provider.system_prompts[0]
+    assert "Never summarize a cluster of Federal Reserve-related rows as 'Fed day'" in provider.system_prompts[0]
+    assert "calendar alone does not confirm it" in provider.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_injects_runtime_component_inventory_when_available(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        presentation_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = DummyProvider()
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=DummyPylon(),
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False),
+        runtime_component_inventory=[
+            {
+                "component_id": "sophia_prima",
+                "label": "Sophia Prima",
+                "category": "llm",
+                "provider": "openai",
+                "model_name": "gpt-4.1-mini",
+                "tools": [],
+            },
+            {
+                "component_id": "tholos",
+                "label": "Tholos",
+                "category": "embedding",
+                "provider": None,
+                "model_name": "all-MiniLM-L6-v2",
+                "tools": ["search_research"],
+            },
+        ],
+    )
+    context = ConversationContext(session_id="test-session-component-inventory")
+
+    _ = [event async for event in agent.run("what model stack is active?", context)]
+
+    assert provider.system_prompts
+    assert "Runtime model inventory" in provider.system_prompts[0]
+    assert "Sophia Prima: llm, provider=openai, model=gpt-4.1-mini" in provider.system_prompts[0]
+    assert "Tholos: embedding, model=all-MiniLM-L6-v2, tools=1" in provider.system_prompts[0]
 
 
 def test_should_enforce_tools_for_research_queries() -> None:
@@ -738,6 +1028,47 @@ def test_should_enforce_tools_for_research_queries() -> None:
         tools,
     )
     assert not SophiaAgent._should_enforce_tools("Tell me a short joke.", tools)
+
+
+def test_should_enforce_tools_for_delivery_and_follow_up_queries() -> None:
+    tools = [
+        ToolSchema(
+            name="create_custom_chart",
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+
+    assert SophiaAgent._should_enforce_tools(
+        "Render PNGs and send now please.",
+        tools,
+    )
+    assert SophiaAgent._should_enforce_tools(
+        "Attach the chart as an image.",
+        tools,
+    )
+
+    recent_messages = [
+        Message(
+            role=Role.ASSISTANT,
+            content=(
+                "Two clean options right now. If you want PNGs, reply with "
+                '"B - send (separate), 1200px".'
+            ),
+        ),
+        Message(role=Role.USER, content="B"),
+    ]
+
+    assert SophiaAgent._should_enforce_tools(
+        "B",
+        tools,
+        recent_messages=recent_messages,
+    )
+    assert SophiaAgent._should_enforce_tools(
+        "send now please",
+        tools,
+        recent_messages=recent_messages,
+    )
 
 
 def test_requires_explicit_citations_and_structured_format() -> None:
@@ -802,6 +1133,10 @@ def test_should_prioritize_local_research_for_forecast_style_queries() -> None:
     )
     assert not SophiaAgent._should_prioritize_local_research(
         "What's our engine forecast for core CPI?",
+        tools,
+    )
+    assert not SophiaAgent._should_prioritize_local_research(
+        "Analyze today's Lorie Logan speech and give me the main takeaways.",
         tools,
     )
 
@@ -1159,6 +1494,7 @@ async def test_agent_prefetches_research_for_forecast_range_turns(
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -1204,6 +1540,7 @@ async def test_agent_hides_web_tools_on_first_pass_when_local_research_hits(
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -1249,6 +1586,7 @@ async def test_agent_requests_confirmation_before_web_when_local_research_prefet
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -1297,6 +1635,7 @@ async def test_agent_switches_to_web_for_live_current_request_when_local_researc
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -1359,6 +1698,7 @@ async def test_agent_emits_local_research_web_fallback_reason_when_prefetch_is_e
         soul_path=soul_file,
         lessons_path=tmp_path / "config" / "LESSONS.md",
         skills_enabled=False,
+        presentation_enabled=False,
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
@@ -1399,6 +1739,73 @@ async def test_agent_emits_local_research_web_fallback_reason_when_prefetch_is_e
     message_events = [event for event in events if event.type == EventType.MESSAGE_END]
     assert message_events
     assert "I paused before using external sources" in message_events[-1].data["message"].content
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_surface_speculative_prefetch_chunks_as_final_evidence(
+    tmp_path: Path,
+) -> None:
+    personality_file = tmp_path / "config" / "personality.md"
+    personality_file.parent.mkdir(parents=True)
+    personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
+
+    soul_file = tmp_path / "config" / "soul.md"
+    soul_file.write_text("Soul text", encoding="utf-8")
+
+    settings = Settings(
+        personality_path=personality_file,
+        soul_path=soul_file,
+        lessons_path=tmp_path / "config" / "LESSONS.md",
+        skills_enabled=False,
+        presentation_enabled=False,
+        openai_api_key="test-key",
+        llm_model="test-model",
+        memory_store_backend="memory",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+    )
+    provider = ResearchThenUngroundedProvider()
+    pylon = SequencedPylonWithTools(
+        ["search_research", "search_web", "get_web_context", "get_releases_upcoming", "search_series"],
+        tool_results=[
+            DummyToolResult(payload={"results": [], "count": 0, "query": "nfp"}),
+            DummyToolResult(payload={"results": [], "count": 0, "query": "forecast upcoming"}),
+            DummyToolResult(
+                payload={
+                    "results": [
+                        {
+                            "chunk_id": "generic-forecast-chunk",
+                            "source_path": "supabase:999",
+                            "page_number": 11,
+                            "text": "Global Equity 10-Year Return Forecast table of contents.",
+                            "hybrid_score": 1.0,
+                            "lexical_score": 1.0,
+                        }
+                    ],
+                    "count": 1,
+                    "query": "forecast",
+                }
+            ),
+            DummyToolResult(payload={"results": [], "count": 0, "query": "Nonfarm payrolls forecast"}),
+        ],
+    )
+    agent = SophiaAgent(
+        provider=provider,
+        settings=settings,
+        pylon=pylon,
+        preflight_result=None,
+        agent_config=AgentConfig(stream=False, max_tool_iterations=3),
+    )
+    context = ConversationContext(session_id="test-session-no-speculative-evidence")
+
+    final = await agent.chat(
+        "What's the range of NFP forecasts (low, high, median) for this upcoming Friday? Focus on reports from within the last 6 days, I'd suggest.",
+        context,
+    )
+
+    assert "Retrieved research evidence currently indicates:" not in final.content
+    assert "I paused before using external sources" in final.content
+    assert "couldn't find matching corpus hits in the current scope" in final.content
+    assert "generic-forecast-chunk" not in final.content
 
 
 @pytest.mark.asyncio

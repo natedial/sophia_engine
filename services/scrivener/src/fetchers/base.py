@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert
@@ -148,7 +148,7 @@ class BaseFetcher(ABC):
 
             # Update series last_updated timestamp
             session.query(Series).filter_by(id=series_id).update(
-                {"last_updated": datetime.utcnow()}
+                {"last_updated": datetime.now(UTC)}
             )
 
         return len(observations)
@@ -168,7 +168,7 @@ class BaseFetcher(ABC):
 
         logger.info(f"Fetching {self.source_name}:{external_id} from {start_date} to {end_date}")
 
-        started_at = datetime.utcnow()
+        started_at = datetime.now(UTC)
 
         try:
             info = self.fetch_series_info(external_id)
@@ -199,7 +199,7 @@ class BaseFetcher(ABC):
                 "error": str(e),
             }
 
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(UTC)
 
         try:
             self._log_fetch(

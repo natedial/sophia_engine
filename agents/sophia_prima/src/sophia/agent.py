@@ -125,6 +125,7 @@ class SophiaAgent:
         get_follow_up_messages: FollowUpCallback | None = None,
         canvas_id: str | None = None,
         profile: AgentProfile | None = None,
+        runtime_component_inventory: list[dict[str, Any]] | None = None,
     ) -> None:
         self.provider = provider
         self.settings = settings or get_settings()
@@ -200,7 +201,12 @@ class SophiaAgent:
                 ),
                 seed_lessons=self.seed_lessons,
             )
-        self._local_tools = create_local_tools(self.memory)
+        self._local_tools = create_local_tools(
+            self.memory,
+            settings=self.settings,
+            read_policy=self.read_policy,
+            write_policy=self.write_policy,
+        )
         if self.settings.history_enabled:
             self.read_policy.ensure_allowed(
                 self.settings.history_store_path,
@@ -216,6 +222,7 @@ class SophiaAgent:
             )
         self.get_steering_messages = get_steering_messages
         self.get_follow_up_messages = get_follow_up_messages
+        self.runtime_component_inventory = runtime_component_inventory or []
         self.personality = self._load_personality()
         self.soul = self._load_soul()
         self.presentation = (
@@ -405,6 +412,10 @@ class SophiaAgent:
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
+        runtime_inventory_context = self._render_runtime_component_inventory()
+        if runtime_inventory_context:
+            dynamic_context["Runtime model inventory"] = runtime_inventory_context
+
         dynamic_context["Preference persistence policy"] = (
             "When the user gives a straightforward style or formatting preference "
             "(for example paragraph breaks, bullets, bold, italics, terseness, or tone):\n"
@@ -444,6 +455,29 @@ class SophiaAgent:
                     "convert cleanly to millions; do not present them as unlabeled raw counts.\n"
                     "6) If metadata and values conflict with the intended concept, do not use the "
                     "series. Explain the mismatch instead."
+                )
+            if {
+                "get_releases_upcoming",
+                "get_releases_today",
+                "get_releases_week",
+                "get_releases_summary",
+            } & set(tool_names):
+                dynamic_context["Release calendar policy"] = (
+                    "When using economic release calendar tools:\n"
+                    "1) Treat returned rows as schedule entries only, not confirmation of a live "
+                    "policy event.\n"
+                    "2) Never summarize a cluster of Federal Reserve-related rows as 'Fed day' or "
+                    "imply an FOMC meeting, rate decision, or press conference unless a tool or "
+                    "cited source explicitly confirms that event on an exact date.\n"
+                    "3) If a row is labeled 'FOMC Press Release', describe it as a calendar label "
+                    "from the release feed and anchor it to the exact date. If meeting status is "
+                    "material, say the calendar alone does not confirm it and verify separately.\n"
+                    "4) Prefer precise wording like 'Fed-origin data/reference-rate releases' over "
+                    "narrative shorthand.\n"
+                    "5) Separate facts (what the tools returned) from interpretation (why it might "
+                    "matter for markets).\n"
+                    "6) If the calendar output looks surprising or internally inconsistent, say so "
+                    "explicitly instead of smoothing it over."
                 )
             if "search_research" in tool_names:
                 dynamic_context["Research retrieval policy"] = (
@@ -502,6 +536,21 @@ class SophiaAgent:
                     "4) Respect readonly mode if the CLI reports it. Do not retry write commands "
                     "unless the user explicitly wants to change Readwise settings."
                 )
+            if "propose_self_edit" in tool_names:
+                dynamic_context["Self-edit policy"] = (
+                    "When the user asks Sophia to change her own guidance, formatting preferences, "
+                    "personality files, presentation rules, or skill instructions:\n"
+                    "1) Do not claim the repo file was edited directly.\n"
+                    "2) Read the relevant file(s), draft the full replacement content, and call "
+                    "propose_self_edit.\n"
+                    "3) Tell the user the returned proposal id and that human approval is required "
+                    "before promotion into the repo.\n"
+                    "4) Use this path only for Sophia-owned config or skill files, not general "
+                    "application code."
+                )
+            forecast_tool_policy = self._forecast_tool_policy(active_tools)
+            if forecast_tool_policy:
+                dynamic_context["Forecast source policy"] = forecast_tool_policy
             handoff_guidance = self._tool_handoff_guidance(context, active_tools)
             if handoff_guidance:
                 dynamic_context["Tool handoff guidance"] = handoff_guidance
@@ -587,6 +636,30 @@ class SophiaAgent:
         if self.soul:
             system_prompt = f"{system_prompt}\n\n{self.soul}"
         return system_prompt
+
+    def _render_runtime_component_inventory(self) -> str | None:
+        if not self.runtime_component_inventory:
+            return None
+
+        lines: list[str] = []
+        for component in self.runtime_component_inventory:
+            label = str(component.get("label") or component.get("component_id") or "component")
+            category = str(component.get("category") or "unknown")
+            provider = component.get("provider")
+            model_name = component.get("model_name")
+            tools = component.get("tools")
+
+            details: list[str] = [category]
+            if provider:
+                details.append(f"provider={provider}")
+            if model_name:
+                details.append(f"model={model_name}")
+            if isinstance(tools, list) and tools:
+                details.append(f"tools={len(tools)}")
+
+            lines.append(f"- {label}: " + ", ".join(details))
+
+        return "\n".join(lines)
 
     @staticmethod
     def _build_enforced_tool_prompt(system_prompt: str) -> str:
@@ -878,11 +951,19 @@ class SophiaAgent:
             )
 
     @staticmethod
-    def _should_enforce_tools(user_message: str, tools: list[ToolSchema]) -> bool:
+    def _should_enforce_tools(
+        user_message: str,
+        tools: list[ToolSchema],
+        *,
+        recent_messages: list[Message] | None = None,
+    ) -> bool:
         if not tools:
             return False
 
-        message = user_message.lower()
+        message = re.sub(r"\s+", " ", user_message).strip().lower()
+        if not message:
+            return False
+
         keywords = (
             "latest",
             "current",
@@ -940,8 +1021,37 @@ class SophiaAgent:
             "fed chair",
             "fed president",
             "fed governor",
+            "png",
+            "svg",
+            "image",
+            "images",
+            "chart",
+            "charts",
+            "table",
+            "tables",
+            "calendar",
+            "schedule",
+            "artifact",
+            "artifacts",
+            "attach",
+            "attachment",
+            "upload",
+            "deliver",
+            "export",
+            "render",
         )
         if any(kw in message for kw in keywords):
+            return True
+
+        if re.search(
+            r"\b(send|attach|upload|deliver|render|export|generate|create|make)\b"
+            r".{0,24}\b(png|svg|image|images|chart|charts|table|tables|calendar|"
+            r"schedule|file|files|artifact|artifacts|pdf|document|documents)\b",
+            message,
+        ):
+            return True
+
+        if SophiaAgent._is_execution_follow_up(message, recent_messages):
             return True
 
         if re.search(
@@ -984,6 +1094,49 @@ class SophiaAgent:
                 message,
             )
         )
+
+    @staticmethod
+    def _is_execution_follow_up(
+        message: str,
+        recent_messages: list[Message] | None,
+    ) -> bool:
+        if not recent_messages:
+            return False
+
+        if not re.fullmatch(
+            r"(?:[abc]|option\s+[abc]|try\s+[abc]|yes|yeah|yep|sure|ok(?:ay)?|"
+            r"go ahead|do it|proceed|send(?: now(?: please)?)?)",
+            message,
+        ):
+            return False
+
+        for previous in reversed(recent_messages):
+            if previous.role != Role.ASSISTANT or not previous.content.strip():
+                continue
+            prior_text = previous.content.lower()
+            return any(
+                keyword in prior_text
+                for keyword in (
+                    "png",
+                    "svg",
+                    "image",
+                    "attachment",
+                    "attach",
+                    "render",
+                    "export",
+                    "deliver",
+                    "send now",
+                    "chart",
+                    "table",
+                    "calendar",
+                    "csv",
+                    "vega",
+                    "pick one",
+                    "which option",
+                    "reply with",
+                )
+            )
+        return False
 
     @staticmethod
     def _latest_user_text(context: ConversationContext) -> str:
@@ -1635,6 +1788,9 @@ class SophiaAgent:
         ):
             return False
 
+        if cls._looks_like_live_current_request(user_message):
+            return False
+
         if cls._requires_explicit_citations(user_message):
             return True
 
@@ -1650,6 +1806,22 @@ class SophiaAgent:
                 r")\b",
                 message,
             )
+        )
+
+    @staticmethod
+    def _forecast_tool_policy(active_tools: list[ToolSchema] | None) -> str | None:
+        if not active_tools:
+            return None
+        tool_names = {tool.name for tool in active_tools}
+        if not {"get_forecasts", "get_published_projection"}.issubset(tool_names):
+            return None
+        return (
+            "When answering forecast questions with both research and engine forecast tools available:\n"
+            "1) Use get_forecasts for external bank/research/street/house-view forecasts.\n"
+            "2) Use get_published_projection for our engine's production-approved forecast.\n"
+            "3) If the user asks to compare our model with bank/street/research forecasts, call both tools and label the sections clearly.\n"
+            "4) If the user asks for a generic 'forecast' without making the source clear, ask a brief clarifying question before choosing a tool.\n"
+            "5) Never present research forecasts as our engine forecast, and never present our engine forecast as street or bank consensus."
         )
 
     @staticmethod
@@ -2047,7 +2219,15 @@ class SophiaAgent:
         )
 
         context.add_user_message(message)
+        capability_hydration_started = perf_counter()
         await self._hydrate_capability_handoffs(context)
+        yield self._trace_event(
+            "capability_hydration_completed",
+            started_at=capability_hydration_started,
+            run_id=active_run_id,
+            parent_run_id=parent_run_id,
+            task_id=task_id,
+        )
         available_tools = self._get_tool_schemas()
         subagent_context: str | None = None
         if self._should_delegate_subagents(message, available_tools):
@@ -2195,11 +2375,25 @@ class SophiaAgent:
                 research_plan_context=research_plan_context,
                 presentation_context=presentation_context,
             )
+            yield self._trace_event(
+                "prompt_context_ready",
+                details={
+                    "turn": turn,
+                    "tool_count": len(turn_tools),
+                    "skill_active": active_skill.skill.name if active_skill is not None else None,
+                    "presentation_channel": channel or None,
+                    "memory_chars": len(memory_context),
+                },
+                run_id=active_run_id,
+                parent_run_id=parent_run_id,
+                task_id=task_id,
+            )
             iterations = 0
             last_message: Message | None = None
             tools_required_for_turn = self._should_enforce_tools(
                 active_user_message,
                 turn_tools,
+                recent_messages=context.messages,
             ) and not bool(subagent_context)
             local_research_first_for_turn = self._should_prioritize_local_research(
                 active_user_message,
@@ -2364,6 +2558,7 @@ class SophiaAgent:
                 context.add_assistant_message(assistant_msg)
                 last_message = assistant_msg
             else:
+
                 # INNER LOOP: tool calls
                 while iterations < self.config.max_tool_iterations:
                     iterations += 1
@@ -2388,6 +2583,20 @@ class SophiaAgent:
                     )
 
                     if self.config.stream:
+                        provider_call_started = perf_counter()
+                        yield self._trace_event(
+                            "provider_stream_started",
+                            details={
+                                "turn": turn,
+                                "iteration": iterations,
+                                "tool_count": len(completion_tools),
+                                "message_count": len(transformed),
+                                "model": self.settings.llm_model,
+                            },
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                        )
                         completion = None
                         async for event in self._stream_and_yield(
                             system_prompt,
@@ -2404,12 +2613,40 @@ class SophiaAgent:
                                 completion = event
                         assert completion is not None
                     else:
+                        provider_call_started = perf_counter()
+                        yield self._trace_event(
+                            "provider_complete_started",
+                            details={
+                                "turn": turn,
+                                "iteration": iterations,
+                                "tool_count": len(completion_tools),
+                                "message_count": len(transformed),
+                                "model": self.settings.llm_model,
+                            },
+                            run_id=active_run_id,
+                            parent_run_id=parent_run_id,
+                            task_id=task_id,
+                        )
                         completion = await self.provider.complete(
                             model=self.settings.llm_model,
                             system=system_prompt,
                             messages=transformed,
                             tools=completion_tools or None,
                         )
+                    yield self._trace_event(
+                        "provider_completion_received",
+                        started_at=provider_call_started,
+                        details={
+                            "turn": turn,
+                            "iteration": iterations,
+                            "stop_reason": completion.stop_reason.value,
+                            "tool_call_count": len(completion.message.tool_calls),
+                            "content_chars": len(completion.message.content or ""),
+                        },
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
 
                     assistant_msg = completion.message
 
@@ -2585,11 +2822,24 @@ class SophiaAgent:
                     parent_run_id=parent_run_id,
                     task_id=task_id,
                 )
+                synthesis_started = perf_counter()
                 completion = await self.provider.complete(
                     model=self.settings.llm_model,
                     system=synthesis_prompt,
                     messages=transformed,
                     tools=None,
+                )
+                yield self._trace_event(
+                    "forced_synthesis_completed",
+                    started_at=synthesis_started,
+                    details={
+                        "turn": turn,
+                        "content_chars": len(completion.message.content or ""),
+                        "tool_call_count": len(completion.message.tool_calls),
+                    },
+                    run_id=active_run_id,
+                    parent_run_id=parent_run_id,
+                    task_id=task_id,
                 )
                 assistant_msg = completion.message
                 if assistant_msg.tool_calls or not assistant_msg.content.strip():
@@ -2636,6 +2886,15 @@ class SophiaAgent:
                             "turn": turn,
                             "error": str(exc),
                         },
+                        run_id=active_run_id,
+                        parent_run_id=parent_run_id,
+                        task_id=task_id,
+                    )
+                else:
+                    yield self._trace_event(
+                        "memory_ingest_completed",
+                        started_at=memory_ingest_started,
+                        details={"turn": turn},
                         run_id=active_run_id,
                         parent_run_id=parent_run_id,
                         task_id=task_id,

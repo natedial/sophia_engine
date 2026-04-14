@@ -242,6 +242,15 @@ class GatewayRunStore:
                 """,
                 (run_id,),
             ).fetchall()
+            skill_artifact_rows = conn.execute(
+                """
+                SELECT artifact_id, skill_name, run_id, session_id, agent_id, payload_json, created_at
+                FROM gateway_skill_artifacts
+                WHERE run_id=?
+                ORDER BY created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
 
         return {
             "run_id": row["run_id"],
@@ -271,6 +280,18 @@ class GatewayRunStore:
                     "created_at": event_row["created_at"],
                 }
                 for event_row in event_rows
+            ],
+            "skill_artifacts": [
+                {
+                    "artifact_id": artifact_row["artifact_id"],
+                    "skill_name": artifact_row["skill_name"],
+                    "run_id": artifact_row["run_id"],
+                    "session_id": artifact_row["session_id"],
+                    "agent_id": artifact_row["agent_id"],
+                    "payload": json.loads(artifact_row["payload_json"]),
+                    "created_at": artifact_row["created_at"],
+                }
+                for artifact_row in skill_artifact_rows
             ],
             "acquisition_jobs": [
                 {
@@ -304,6 +325,97 @@ class GatewayRunStore:
                 }
                 for artifact_row in acquisition_artifact_rows
             ],
+        }
+
+    def list_runs(
+        self,
+        *,
+        limit: int = 25,
+        agent_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent_id:
+            clauses.append("agent_id=?")
+            params.append(agent_id)
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT run_id, session_id, agent_id, channel, account_id, peer_id, user_id,
+                       message_text, status, final_text, error, created_at, updated_at, completed_at,
+                       failure_stage, provider_name, tool_name, service_name, outbound_text_len,
+                       (
+                           SELECT COUNT(*)
+                           FROM gateway_run_events
+                           WHERE gateway_run_events.run_id = gateway_runs.run_id
+                       ) AS event_count,
+                       (
+                           SELECT COUNT(*)
+                           FROM gateway_skill_artifacts
+                           WHERE gateway_skill_artifacts.run_id = gateway_runs.run_id
+                       ) AS skill_artifact_count
+                FROM gateway_runs
+                {where_sql}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        return [
+            {
+                "run_id": row["run_id"],
+                "session_id": row["session_id"],
+                "agent_id": row["agent_id"],
+                "channel": row["channel"],
+                "account_id": row["account_id"],
+                "peer_id": row["peer_id"],
+                "user_id": row["user_id"],
+                "message_text": row["message_text"],
+                "status": row["status"],
+                "final_text": row["final_text"],
+                "error": row["error"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "completed_at": row["completed_at"],
+                "failure_stage": row["failure_stage"],
+                "provider_name": row["provider_name"],
+                "tool_name": row["tool_name"],
+                "service_name": row["service_name"],
+                "outbound_text_len": row["outbound_text_len"],
+                "event_count": row["event_count"],
+                "skill_artifact_count": row["skill_artifact_count"],
+            }
+            for row in rows
+        ]
+
+    def get_skill_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT artifact_id, skill_name, run_id, session_id, agent_id, payload_json, created_at
+                FROM gateway_skill_artifacts
+                WHERE artifact_id=?
+                """,
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "artifact_id": row["artifact_id"],
+            "skill_name": row["skill_name"],
+            "run_id": row["run_id"],
+            "session_id": row["session_id"],
+            "agent_id": row["agent_id"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
         }
 
     def create_acquisition_job(

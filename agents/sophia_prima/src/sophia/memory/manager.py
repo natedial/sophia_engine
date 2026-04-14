@@ -362,13 +362,25 @@ class MemoryManager:
                 "User role/profile: {value}.",
             ),
             (
-                r"\bi (?:prefer|like|love|dislike|avoid|want|need)\s+([^.!\n]{3,120})",
+                r"\bi do not (?:typically\s+|generally\s+)?care about\s+([^\n]{3,200})",
+                "preference",
+                0.85,
+                "User preference: do not care about {value}.",
+            ),
+            (
+                r"\bi (?:generally\s+|typically\s+)?care about\s+([^\n]{3,200})",
+                "preference",
+                0.82,
+                "User preference: care about {value}.",
+            ),
+            (
+                r"\bi (?:prefer|like|love|dislike|avoid|want|need)\s+([^\n]{3,160})",
                 "preference",
                 0.8,
                 "User preference: {value}.",
             ),
             (
-                r"\bwe (?:decided|agreed|will|should)\s+([^.!\n]{3,160})",
+                r"\bwe (?:decided|agreed|will|should)\s+([^\n]{3,200})",
                 "decision",
                 0.85,
                 "Project decision: {value}.",
@@ -381,10 +393,12 @@ class MemoryManager:
 
         for pattern, tag, salience, template in patterns:
             for match in re.finditer(pattern, lowered, flags=re.IGNORECASE):
-                value = " ".join(match.group(1).split())
+                value = self._clean_clause(match.group(1)).rstrip(".!?")
                 if len(value) < 3:
                     continue
                 facts.append((template.format(value=value), {tag}, salience))
+
+        facts.extend(self._extract_preference_block_facts(lowered))
 
         deduped: list[tuple[str, set[str], float]] = []
         seen: set[str] = set()
@@ -395,6 +409,79 @@ class MemoryManager:
             seen.add(key)
             deduped.append((content, tags, salience))
         return deduped
+
+    def _extract_preference_block_facts(
+        self,
+        text: str,
+    ) -> list[tuple[str, set[str], float]]:
+        lines = [line.rstrip() for line in text.splitlines()]
+        if not lines:
+            return []
+
+        facts: list[tuple[str, set[str], float]] = []
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx].strip()
+            if not line:
+                idx += 1
+                continue
+
+            polarity: str | None = None
+            remainder = ""
+
+            negative = re.match(
+                r"^i do not (?:typically\s+|generally\s+)?care about:\s*(.*)$",
+                line,
+                flags=re.IGNORECASE,
+            )
+            positive = re.match(
+                r"^i (?:generally\s+|typically\s+)?care about:\s*(.*)$",
+                line,
+                flags=re.IGNORECASE,
+            )
+
+            if negative:
+                polarity = "do not care about"
+                remainder = negative.group(1).strip()
+            elif positive:
+                polarity = "care about"
+                remainder = positive.group(1).strip()
+
+            if polarity is None:
+                idx += 1
+                continue
+
+            items: list[str] = []
+            if remainder:
+                items.append(remainder)
+
+            next_idx = idx + 1
+            while next_idx < len(lines):
+                candidate = lines[next_idx].strip()
+                if not candidate:
+                    break
+                if re.match(r"^i\b", candidate, flags=re.IGNORECASE):
+                    break
+                cleaned = re.sub(r"^[\-\*\u2022\d\.\)\s]+", "", candidate).strip()
+                if cleaned:
+                    items.append(cleaned)
+                next_idx += 1
+
+            for item in items:
+                normalized = " ".join(item.split())
+                if len(normalized) < 3:
+                    continue
+                facts.append(
+                    (
+                        f"User preference: {polarity} {normalized}.",
+                        {"preference"},
+                        0.82 if polarity == "care about" else 0.85,
+                    )
+                )
+
+            idx = next_idx if next_idx > idx else idx + 1
+
+        return facts
 
     def _query_semantic_records(
         self,
@@ -553,7 +640,7 @@ class MemoryManager:
 
         explicit_patterns = [
             r"\bfrom now on[,:\s-]*(.+)",
-            r"\bremember (?:this|that)[:\s-]*(.+)",
+            r"\b(?:please\s+)?remember(?:\s+(?:this|that))?[:\s-]*(.+)",
             r"\balways\s+(.+)",
             r"\bnever\s+(.+)",
         ]

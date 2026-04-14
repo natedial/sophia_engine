@@ -250,6 +250,14 @@ class ForgeRuntime:
     def get_run(self, run_id: str) -> RunResult:
         return self.run_store.get_run(run_id)
 
+    def list_runs(
+        self,
+        *,
+        limit: int = 25,
+        status: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        return self.run_store.list_runs(limit=limit, status=status)
+
     def get_run_request(self, run_id: str) -> RunRequest:
         return self.run_store.get_run_request(run_id)
 
@@ -357,6 +365,43 @@ class ForgeRuntime:
 
     async def cancel_run(self, run_id: str) -> RunResult:
         return await self.scheduler.cancel(run_id)
+
+    def publish_run_promotion(self, run_id: str) -> dict[str, object]:
+        self.get_run(run_id)
+        artifacts = self.get_artifacts(run_id)
+        pr_request = next((item for item in artifacts if item.artifact_type == "pr_request"), None)
+        if pr_request is None or not pr_request.path:
+            raise KeyError(run_id)
+        promotion_status = next(
+            (item for item in artifacts if item.artifact_type == "promotion_status"),
+            None,
+        )
+        outcome = self.scheduler.promotion_manager.publish_prepared_pr(
+            run_id=run_id,
+            pr_request_path=Path(pr_request.path),
+            promotion_status_path=None if promotion_status is None or not promotion_status.path else Path(promotion_status.path),
+        )
+        self.run_store.append_event(
+            RunEvent(
+                run_id=run_id,
+                sequence=len(self.run_store.list_events(run_id)) + 1,
+                event_type="promotion_finished",
+                timestamp=_utc_now(),
+                payload={
+                    "stage": "republish",
+                    "mode": outcome.mode,
+                    "status": outcome.status,
+                    "message": outcome.message,
+                },
+            )
+        )
+        return {
+            "run_id": run_id,
+            "mode": outcome.mode,
+            "status": outcome.status,
+            "message": outcome.message,
+            "payload": outcome.payload,
+        }
 
 
 def _utc_now() -> str:

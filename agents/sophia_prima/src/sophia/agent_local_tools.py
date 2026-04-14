@@ -10,9 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sophia.config import Settings, get_settings
 from sophia.memory.manager import MemoryManager
 from sophia.memory.safety import normalize_for_comparison, validate_memory_content
 from sophia.memory.types import MemoryLevel
+from sophia.security.filesystem import ReadPolicy, WritePolicy
+from sophia.self_editing import SelfEditChangeRequest, build_self_edit_service
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +23,18 @@ logger = logging.getLogger(__name__)
 class AgentLocalTools:
     """Agent-local tool implementations for memory curation."""
 
-    def __init__(self, memory_manager: MemoryManager) -> None:
+    def __init__(
+        self,
+        memory_manager: MemoryManager,
+        *,
+        settings: Settings | None = None,
+        read_policy: ReadPolicy | None = None,
+        write_policy: WritePolicy | None = None,
+    ) -> None:
         self._memory = memory_manager
+        self._settings = settings
+        self._read_policy = read_policy
+        self._write_policy = write_policy
 
     def remember(
         self,
@@ -152,13 +165,52 @@ class AgentLocalTools:
 
         return "\n".join(lines)
 
+    def propose_self_edit(
+        self,
+        title: str,
+        rationale: str,
+        changes: list[dict[str, Any]],
+    ) -> str:
+        """Create a reviewable self-edit proposal instead of editing repo files directly."""
+        try:
+            service = build_self_edit_service(
+                settings=self._settings or get_settings(),
+                read_policy=self._read_policy,
+                write_policy=self._write_policy,
+            )
+            proposal = service.create_proposal(
+                title=title,
+                rationale=rationale,
+                changes=[SelfEditChangeRequest.model_validate(item) for item in changes],
+            )
+        except Exception as exc:
+            return f"Error: {exc}"
 
-def create_local_tools(memory_manager: MemoryManager) -> dict[str, Any]:
+        return (
+            "Created self-edit proposal "
+            f"{proposal.proposal_id} with {len(proposal.changes)} file change(s). "
+            f"Status={proposal.status}. Patch={proposal.patch_path}. "
+            "Repo files were not modified; human approval is required before promotion."
+        )
+
+
+def create_local_tools(
+    memory_manager: MemoryManager,
+    *,
+    settings: Settings | None = None,
+    read_policy: ReadPolicy | None = None,
+    write_policy: WritePolicy | None = None,
+) -> dict[str, Any]:
     """Create the agent-local tool definitions.
 
     Returns a dict mapping tool names to their schemas and handlers.
     """
-    tools = AgentLocalTools(memory_manager)
+    tools = AgentLocalTools(
+        memory_manager,
+        settings=settings,
+        read_policy=read_policy,
+        write_policy=write_policy,
+    )
 
     return {
         "remember": {
@@ -229,5 +281,49 @@ def create_local_tools(memory_manager: MemoryManager) -> dict[str, Any]:
                 },
             },
             "handler": tools.list_memory,
+        },
+        "propose_self_edit": {
+            "name": "propose_self_edit",
+            "description": (
+                "Create a reviewable self-edit proposal for Sophia-owned config or skill files. "
+                "This writes only proposal artifacts under .sophia and does not modify repo files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the proposed self-edit.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why Sophia should adopt this change.",
+                    },
+                    "changes": {
+                        "type": "array",
+                        "description": "One or more full-file replacements for allowed self-edit targets.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target_path": {
+                                    "type": "string",
+                                    "description": "Project-relative target file path.",
+                                },
+                                "updated_content": {
+                                    "type": "string",
+                                    "description": "Full replacement file contents.",
+                                },
+                                "summary": {
+                                    "type": "string",
+                                    "description": "Short summary of what changed in this file.",
+                                },
+                            },
+                            "required": ["target_path", "updated_content"],
+                        },
+                    },
+                },
+                "required": ["title", "rationale", "changes"],
+            },
+            "handler": tools.propose_self_edit,
         },
     }

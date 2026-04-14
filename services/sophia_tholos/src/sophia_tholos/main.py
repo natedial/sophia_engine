@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from sophia_tholos.api.routes import router
 from sophia_tholos.config import Settings
-from sophia_tholos.core.corpus import init_engine
+from sophia_tholos.core.corpus import get_engine, init_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,7 +29,13 @@ async def lifespan(app: FastAPI):
         db_path=settings.db_path,
         npz_path=settings.npz_path,
         model_name=settings.model_name,
+        semantic_enabled=settings.semantic_enabled,
+        semantic_local_files_only=settings.semantic_local_files_only,
+        model_cache_dir=settings.model_cache_dir,
     )
+    engine = get_engine()
+    if engine and settings.semantic_verify_on_startup:
+        engine.verify_semantic_ready(strict=settings.semantic_strict)
     yield
 
 
