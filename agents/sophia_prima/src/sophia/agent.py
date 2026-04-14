@@ -6,9 +6,10 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Any, AsyncGenerator, Callable
+from typing import Any
 
 from pylon import ErrorType, PreflightResult, Pylon, ToolResult
 
@@ -29,13 +30,14 @@ from sophia.events import (
     subagent_end,
     subagent_error,
     subagent_start,
-    trace,
     tool_execution_end,
     tool_execution_start,
+    trace,
     turn_end,
     turn_start,
     workflow_decision,
 )
+from sophia.forge_client import ForgeClient
 from sophia.history import LosslessHistoryManager
 from sophia.llm.base import ContentDelta, ModelProvider, StreamComplete
 from sophia.llm.types import (
@@ -50,7 +52,6 @@ from sophia.memory import MemoryManager, MemoryManagerConfig, create_memory_stor
 from sophia.personality.loader import Personality, load_personality
 from sophia.presentation import PresentationRegistry
 from sophia.presentation.models import PresentationPromptContext
-from sophia.forge_client import ForgeClient
 from sophia.skills.models import SkillMatch
 from sophia.skills.registry import SkillRegistry
 from sophia.subagents import SubagentOrchestrator, SubagentProfile, SubagentResult, SubagentTask
@@ -1514,25 +1515,91 @@ class SophiaAgent:
         )
         return "\n".join(lines)
 
+    async def _fetch_corpus_inventory_summary(self) -> str | None:
+        """Fetch a one-line corpus inventory string for scope-miss responses.
+
+        The shape of the ``list_research_sources`` payload is not strictly
+        typed across Tholos versions. This helper accepts the three most
+        likely shapes and returns ``None`` on any mismatch, so the caller can
+        gracefully omit the inventory line.
+
+        Accepted shapes:
+        - ``{"sources": [{"source_path": "...", "chunk_count": N}, ...]}``
+        - ``[{"source_path": "...", ...}, ...]`` (bare list)
+        - ``{"results": [{"source_path": "...", ...}, ...]}``
+        """
+        if self.pylon is None:
+            return None
+        try:
+            result = await self.pylon.execute_tool("list_research_sources", {})
+        except Exception:
+            return None
+        if not getattr(result, "success", False):
+            return None
+        try:
+            payload = json.loads(result.to_content())
+        except json.JSONDecodeError:
+            return None
+
+        sources: list[Any] | None = None
+        if isinstance(payload, list):
+            sources = payload
+        elif isinstance(payload, dict):
+            for key in ("sources", "results", "data"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    sources = value
+                    break
+        if not sources:
+            return None
+
+        total = len(sources)
+        labels: list[str] = []
+        for item in sources[:5]:
+            if not isinstance(item, dict):
+                continue
+            raw_path = item.get("source_path") or item.get("path") or item.get("name") or ""
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            label = raw_path.strip().split("/", 1)[0]
+            if label and label not in labels:
+                labels.append(label)
+            if len(labels) >= 3:
+                break
+
+        if labels:
+            example_str = ", ".join(labels)
+            return f"Corpus currently indexes {total} sources (e.g. {example_str})."
+        return f"Corpus currently indexes {total} sources."
+
     @staticmethod
     def _build_local_research_scope_miss_response(
         *,
         user_message: str,
         fallback_reason: str,
+        corpus_summary: str | None = None,
     ) -> str:
         request = re.sub(r"\s+", " ", (user_message or "").strip())
+        summary_line = ""
+        if corpus_summary:
+            summary_line = f"\nCorpus inventory: {corpus_summary}\n"
         if fallback_reason == "local_research_prefetch_failed":
             return (
                 "I paused before using external sources because this looks like a local-first "
-                "research request, but I couldn't complete the corpus check cleanly in this turn.\n\n"
-                f"Request: {request}\n\n"
-                "If you want, I can retry the corpus search, widen the corpus scope, or switch to web."
+                "research request, but I couldn't complete the corpus check cleanly in this "
+                "turn.\n\n"
+                f"Request: {request}\n"
+                f"{summary_line}"
+                "\nIf you want, I can retry the corpus search, widen the corpus scope, or "
+                "switch to web."
             )
         return (
             "I paused before using external sources because this looks like a local-first "
-            "research request, but I couldn't find matching corpus hits in the current scope.\n\n"
-            f"Request: {request}\n\n"
-            "If you want, I can widen the corpus scope or switch to web."
+            "research request, but I couldn't find matching corpus hits in the current "
+            "scope.\n\n"
+            f"Request: {request}\n"
+            f"{summary_line}"
+            "\nIf you want, I can widen the corpus scope or switch to web."
         )
 
     @staticmethod
@@ -2598,10 +2665,12 @@ class SophiaAgent:
                     if any(
                         tool.name in {"search_web", "get_web_context"} for tool in turn_tools
                     ) and not self._looks_like_live_current_request(active_user_message):
+                        corpus_summary = await self._fetch_corpus_inventory_summary()
                         local_research_scope_miss_response = (
                             self._build_local_research_scope_miss_response(
                                 user_message=active_user_message,
                                 fallback_reason=fallback_reason,
+                                corpus_summary=corpus_summary,
                             )
                         )
 
@@ -2763,10 +2832,12 @@ class SophiaAgent:
                             continue
                         if citation_repair_attempted and citation_issue:
                             if local_research_first_for_turn and not evidence_by_chunk:
+                                corpus_summary = await self._fetch_corpus_inventory_summary()
                                 assistant_msg.content = (
                                     self._build_local_research_scope_miss_response(
                                         user_message=active_user_message,
                                         fallback_reason="local_research_prefetch_returned_no_hits",
+                                        corpus_summary=corpus_summary,
                                     )
                                 )
                             else:
