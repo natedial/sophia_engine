@@ -412,6 +412,8 @@ class SophiaAgent:
     ) -> str:
         dynamic_context: dict[str, str] = {}
 
+        dynamic_context["Current date"] = datetime.now(UTC).strftime("%Y-%m-%d (%A)")
+
         runtime_inventory_context = self._render_runtime_component_inventory()
         if runtime_inventory_context:
             dynamic_context["Runtime model inventory"] = runtime_inventory_context
