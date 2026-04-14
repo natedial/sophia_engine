@@ -1619,21 +1619,9 @@ class SophiaAgent:
             if normalized not in keywords:
                 keywords.append(normalized)
 
-        priority_order = {
-            "ieepa": 0,
-            "tariff": 1,
-            "unconstitutional": 2,
-            "supreme": 3,
-            "court": 4,
-            "section": 5,
-        }
         keywords = sorted(
             keywords,
-            key=lambda token: (
-                priority_order.get(token, 100),
-                -len(token),
-                token,
-            ),
+            key=lambda token: (-len(token), token),
         )
 
         fallback_phrase = " ".join(keywords[:8]).strip()
