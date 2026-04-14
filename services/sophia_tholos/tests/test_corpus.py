@@ -17,7 +17,16 @@ def test_init_engine_falls_back_to_lexical_only_when_embeddings_fail(
     calls: list[tuple[Path, Path | None, str]] = []
 
     class _FakeEngine:
-        def __init__(self, *, db_path: Path, npz_path: Path | None, model_name: str) -> None:
+        def __init__(
+            self,
+            *,
+            db_path: Path,
+            npz_path: Path | None,
+            model_name: str,
+            semantic_enabled: bool = True,
+            semantic_local_files_only: bool = False,
+            model_cache_dir: Path | None = None,
+        ) -> None:
             calls.append((Path(db_path), Path(npz_path) if npz_path else None, model_name))
             if npz_path is not None:
                 raise RuntimeError("bad npz")
