@@ -18,11 +18,26 @@ class EpistoPlanContext:
     acquisition_decisions: tuple[dict[str, object], ...] = ()
 
 
+@dataclass(frozen=True)
+class CausalQueryResult:
+    """Result of a causal query."""
+
+    source: str
+    target: str
+    direct_effect: float
+    total_effect: float
+    confidence: float
+    explanation: str
+    n_mediators: int
+    n_confounders: int
+
+
 class EpistoPlannerAdapter:
     """Graceful Episto adapter that becomes a no-op when the package is unavailable."""
 
     def __init__(self, pylon=None) -> None:
         self._pylon = pylon
+        self._causal_service = None
         try:
             from sophia_episto.capability import SearchBackedCapabilityResolver
             from sophia_episto.intake import build_question_brief
@@ -44,6 +59,17 @@ class EpistoPlannerAdapter:
     @property
     def available(self) -> bool:
         return self._planner is not None and self._build_question_brief is not None
+
+    @property
+    def causal_available(self) -> bool:
+        if self._causal_service is None:
+            try:
+                from sophia_episto.causal_service import get_causal_service
+
+                self._causal_service = get_causal_service()
+            except ImportError:
+                return False
+        return True
 
     async def plan(self, question: str) -> EpistoPlanContext | None:
         if not self.available or self._planner is None or self._build_question_brief is None:
@@ -122,10 +148,7 @@ class EpistoPlannerAdapter:
         if acquisition_decisions:
             lines.append("Acquisition decisions:")
             for item in acquisition_decisions:
-                line = (
-                    f"- {item['indicator_family']}: {item['mode']}"
-                    f" [{item['handling_mode']}]"
-                )
+                line = f"- {item['indicator_family']}: {item['mode']} [{item['handling_mode']}]"
                 if item["source"]:
                     line += f" via {item['source']}"
                 if item["retention_target"]:
@@ -148,6 +171,46 @@ class EpistoPlannerAdapter:
             acquisition_decisions=acquisition_decisions,
         )
 
+    async def query_causal(self, source: str, target: str) -> CausalQueryResult | None:
+        """Query causal effect from source to target."""
+        if not self.causal_available:
+            return None
+
+        try:
+            result = self._causal_service.query(source, target)
+            return CausalQueryResult(
+                source=result["source"],
+                target=result["target"],
+                direct_effect=result["direct_effect"],
+                total_effect=result["total_effect"],
+                confidence=result["confidence"],
+                explanation=result["explanation"],
+                n_mediators=result["n_mediators"],
+                n_confounders=result["n_confounders"],
+            )
+        except Exception:
+            return None
+
+    async def explain_causal(self, node: str) -> dict | None:
+        """Explain causal relationships for a node."""
+        if not self.causal_available:
+            return None
+
+        try:
+            return self._causal_service.explain(node)
+        except Exception:
+            return None
+
+    async def get_causal_graph_state(self) -> dict | None:
+        """Get current causal graph state for dashboard."""
+        if not self.causal_available:
+            return None
+
+        try:
+            return self._causal_service.get_graph_state()
+        except Exception:
+            return None
+
     async def _search_local_series(self, query: str) -> list[dict]:
         if self._pylon is None:
             return []
@@ -161,4 +224,6 @@ class EpistoPlannerAdapter:
             parsed = json.loads(result.to_content())
         except json.JSONDecodeError:
             return []
-        return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+        return (
+            [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+        )
