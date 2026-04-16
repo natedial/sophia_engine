@@ -47,6 +47,7 @@ class TriggerType(str, Enum):
     DATA_REFRESH = "data_refresh"
     ECONOMIC_RELEASE = "economic_release"
     MANUAL = "manual"
+    HYPOTHESIS = "hypothesis"
 
 
 class RunStatus(str, Enum):

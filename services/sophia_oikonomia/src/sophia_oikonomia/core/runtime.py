@@ -172,7 +172,9 @@ class OikonomiaRuntime:
 
         if request.target_state == ModelState.CHAMPION:
             if not definition.production_slot:
-                raise ValueError(f"Model '{model_id}' needs a production_slot before champion promotion")
+                raise ValueError(
+                    f"Model '{model_id}' needs a production_slot before champion promotion"
+                )
 
             prior_champion = self.store.get_current_champion(definition.production_slot)
             if prior_champion and prior_champion.id != model_id:
@@ -367,7 +369,9 @@ class OikonomiaRuntime:
             return True
         return False
 
-    def _assert_promotion_allowed(self, definition: ModelDefinition, target_state: ModelState) -> None:
+    def _assert_promotion_allowed(
+        self, definition: ModelDefinition, target_state: ModelState
+    ) -> None:
         if target_state in {ModelState.RESEARCH, ModelState.ARCHIVED}:
             raise ValueError(f"Promotion target '{target_state.value}' is not supported")
         if definition.state == ModelState.RETIRED and target_state != ModelState.SHADOW:
@@ -398,6 +402,20 @@ class OikonomiaRuntime:
         if trigger.trigger_type == TriggerType.SCHEDULED:
             if definition.cadence.cron:
                 return [f"cron:{definition.cadence.cron}"]
+            return []
+
+        if trigger.trigger_type == TriggerType.HYPOTHESIS:
+            subscribes = definition.metadata.get("hypothesis_subscriptions", [])
+            if not subscribes:
+                return []
+            hypothesis_type = trigger.payload.get("hypothesis_type", "")
+            hypothesis_source = trigger.payload.get("source", "")
+            hypothesis_target = trigger.payload.get("target", "")
+            for sub in subscribes:
+                if sub == "*" or sub == hypothesis_type:
+                    return [f"hypothesis:{trigger.reason or 'default'}"]
+                if sub == hypothesis_source or sub == hypothesis_target:
+                    return [f"hypothesis:{trigger.reason or 'default'}"]
             return []
 
         matches: list[str] = []
