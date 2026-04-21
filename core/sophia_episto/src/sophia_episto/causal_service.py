@@ -136,12 +136,12 @@ class CausalWorldModelService:
         return {
             "source": source,
             "target": target,
-            "direct_effect": result.result.get("direct_effect", 0),
-            "total_effect": result.result.get("total_effect", 0),
+            "direct_strength": result.result.get("direct_strength", 0),
+            "path_influence": result.result.get("path_influence", 0),
             "confidence": result.confidence,
             "explanation": result.explanation,
             "n_mediators": result.result.get("n_mediators", 0),
-            "n_confounders": result.result.get("n_confounders", 0),
+            "n_shared_parents": result.result.get("n_shared_parents", 0),
         }
 
     def explain(self, node: str) -> dict[str, Any]:
@@ -183,8 +183,8 @@ class CausalWorldModelService:
             ],
             "node_count": len(self.graph.nodes),
             "edge_count": len(self.graph.edges),
-            "updated_at": self.graph._updated_at.isoformat()
-            if self.graph._updated_at
+            "updated_at": self.graph.updated_at.isoformat()
+            if self.graph.updated_at
             else None,
         }
 
