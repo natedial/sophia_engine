@@ -1,4 +1,4 @@
-"""Causal inference using do-calculus and belief propagation."""
+"""Heuristic causal inference (NOT Pearl-style do-calculus)."""
 
 from __future__ import annotations
 
@@ -20,13 +20,13 @@ class InferenceResult:
 
 
 class CausalInference:
-    """Handles causal inference operations on a CausalGraph.
+    """Heuristic inference over a CausalGraph.
 
-    Supports:
-    - do-calculus interventions
-    - Pearl's causal inference
-    - Belief propagation for approximate inference
-    - Path analysis (mediators, confounders)
+    This class does NOT implement do-calculus or Pearl-style counterfactuals.
+    It provides:
+    - Direct edge strength lookup
+    - Path-product influence sums
+    - Mediator/confounder structural enumeration (shape, not effect)
     """
 
     def __init__(self, graph: CausalGraph) -> None:

@@ -21,12 +21,15 @@ logger = logging.getLogger("sophia_episto.causal_service")
 
 
 class CausalWorldModelService:
-    """Service for managing the causal world model.
+    """Service for managing the heuristic causal belief graph.
 
     Provides:
-    - Scheduled batch execution (daily at 5 PM ET)
+    - Scheduled batch discovery (Granger + FDR) and belief blending
     - Integration point for Sophia Prima causal queries
-    - Hypothesis generation and testing
+    - Hypothesis generation from discovered edges
+    - Pearl-lite evaluation harness (bootstrap stability + DoWhy refutation on
+      flagship edges) that surfaces per-edge green/red signals without making
+      Pearl-identification claims across the full graph.
     """
 
     def __init__(

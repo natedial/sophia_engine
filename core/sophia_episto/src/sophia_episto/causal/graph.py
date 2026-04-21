@@ -11,10 +11,12 @@ from sophia_episto.causal.edge import CausalEdge, expert_priors
 
 
 class CausalGraph:
-    """Probabilistic causal graph with Bayesian inference.
+    """Heuristic belief graph with Bayesian-flavored edge blending.
 
-    Manages nodes, causal edges, and posterior distributions.
-    Supports belief propagation and do-calculus operations.
+    This is NOT a Pearl-style structural causal model. It manages nodes and
+    directed edges with per-edge `probability`, `confidence`, and `strength`,
+    and supports heuristic forward propagation. Use `CausalInference` for
+    path-analysis queries.
     """
 
     def __init__(
@@ -167,6 +169,60 @@ class CausalGraph:
                 result[affected_node] = affected_value
 
         return result
+
+    def forward_propagate(
+        self,
+        intervention: dict[str, float],
+        observation: dict[str, float],
+    ) -> dict[str, float]:
+        """Heuristic forward propagation from a set-value on intervention nodes.
+
+        This is NOT Pearl do-calculus. No graph surgery, no confounder
+        adjustment. It overlays `intervention` on `observation` and
+        path-multiplies edge probabilities to reach descendants.
+
+        Args:
+            intervention: Nodes to clamp to a value (acts like `do()` only in the
+                trivial sense that these nodes are overwritten).
+            observation: Baseline values for other nodes.
+
+        Returns:
+            Merged dict of propagated values.
+        """
+        result = observation.copy()
+        result.update(intervention)
+
+        for node, value in intervention.items():
+            effects = self.propagate_influence(node, value)
+            for affected_node, affected_value in effects.items():
+                if affected_node in intervention:
+                    continue
+                result[affected_node] = affected_value
+
+        return result
+
+    def propagate_influence(self, node: str, value: float) -> dict[str, float]:
+        """Propagate influence from a node through outgoing edges.
+
+        Returns the estimated effects on downstream nodes.
+        """
+        effects: dict[str, float] = {node: value}
+        visited: set[str] = {node}
+
+        queue = [node]
+        while queue:
+            current = queue.pop(0)
+            for edge in self.get_outgoing_edges(current):
+                if edge.target in visited:
+                    continue
+                visited.add(edge.target)
+
+                parent_effect = effects.get(current, 0.5)
+                effect = parent_effect * edge.probability
+                effects[edge.target] = effect
+                queue.append(edge.target)
+
+        return effects
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize graph to dictionary."""
