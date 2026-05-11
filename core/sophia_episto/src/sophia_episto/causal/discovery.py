@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger("sophia_episto.causal.discovery")
 
 
 @dataclass
@@ -47,45 +50,59 @@ class CausalDiscovery:
         """Test for Granger causality from source to target.
 
         Returns a DiscoveredEdge if Granger causality is detected, None otherwise.
+        Uses Arithmos GrangerCausality computation.
         """
         if source not in self.data or target not in self.data:
             return None
 
-        source_series = np.array(self.data[source])
-        target_series = np.array(self.data[target])
+        target_values = self.data[target]
+        source_values = self.data[source]
 
-        if len(target_series) <= max_lag + 1:
+        if len(target_values) <= max_lag + 1:
             return None
 
         try:
-            from statsmodels.tsa.vector_ar.var_model import VAR
+            import json
+            from datetime import datetime, timedelta
 
-            combined = np.column_stack([target_series, source_series])
-            model = VAR(combined)
+            from sophia_arithmos.computations.causality import GrangerCausality
+            from sophia_arithmos.core.types import Observation, OutputMode
 
-            lag_order = min(max_lag, len(combined) // 2)
-            if lag_order < 1:
-                return None
+            observations = [
+                Observation(
+                    id=str(i),
+                    timestamp=datetime(2024, 1, 1) + timedelta(days=i),
+                    value=v,
+                )
+                for i, v in enumerate(target_values)
+            ]
 
-            result = model.fit(lag_order)
+            params = {
+                "source": source,
+                "target": target,
+                "source_values": json.dumps(source_values),
+                "max_lag": max_lag,
+                "alpha": alpha,
+            }
 
-            test_stat = result.test_causality(0, 1)
-            p_value = test_stat.pvalue
+            result = GrangerCausality().execute(
+                observations, params, OutputMode.SUMMARY
+            )
+            summary = result.summary
 
-            if p_value < alpha:
-                strength = 1 - p_value
+            if summary.get("is_granger_causal"):
                 return DiscoveredEdge(
                     source=source,
                     target=target,
-                    statistic=test_stat.test_statistic,
-                    p_value=p_value,
-                    strength=strength,
+                    statistic=summary.get("test_statistic", 0),
+                    p_value=summary.get("p_value", 1.0),
+                    strength=summary.get("strength", 0),
                     method="granger",
-                    lag=lag_order,
+                    lag=summary.get("best_lag", max_lag),
                 )
 
-        except Exception:
-            pass
+        except (ImportError, ValueError) as exc:
+            logger.debug("granger test failed for %s -> %s: %s", source, target, exc)
 
         return None
 
@@ -169,13 +186,9 @@ class CausalDiscovery:
                 k: [v[i] for i in indices if i < len(v)] for k, v in self.data.items()
             }
 
-            original_data = self.data
-            self.data = regime_data
-
-            edges = self.discover_granger(variables)
+            discovery = CausalDiscovery(regime_data)
+            edges = discovery.discover_granger(variables)
             results[regime_name] = edges
-
-            self.data = original_data
 
         return results
 

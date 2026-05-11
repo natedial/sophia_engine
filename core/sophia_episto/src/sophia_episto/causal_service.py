@@ -81,37 +81,29 @@ class CausalWorldModelService:
             discovered = discovery.discover_granger(variables, max_lag=5, alpha=0.05)
 
             for edge in discovered:
-                existing = self.graph.get_edge(edge.source, edge.target)
-                if existing:
-                    existing.strength = edge.strength
-                    existing.p_value = edge.p_value
-                    results["edges_updated"] += 1
-                else:
-                    from sophia_episto.causal.edge import CausalEdge
+                from sophia_episto.causal.edge import CausalEdge
 
-                    new_edge = CausalEdge(
-                        source=edge.source,
-                        target=edge.target,
-                        probability=edge.strength,
-                        strength=edge.strength,
-                        confidence=0.5,
-                        mechanism=f"Discovered via Granger causality (p={edge.p_value:.3f})",
-                    )
-                    self.graph.add_edge(new_edge)
-                    results["edges_updated"] += 1
+                new_edge = CausalEdge(
+                    source=edge.source,
+                    target=edge.target,
+                    probability=edge.strength,
+                    strength=edge.strength,
+                    p_value=edge.p_value,
+                    confidence=0.5,
+                    mechanism=f"Discovered via Granger causality (p={edge.p_value:.3f})",
+                )
+                self.graph.add_edge(new_edge)
+                results["edges_updated"] += 1
 
-                    hypothesis = (
-                        self.hypothesis_generator.generate_from_discovered_edge(
-                            edge_id=f"{edge.source}-{edge.target}",
-                            source=edge.source,
-                            target=edge.target,
-                            strength=edge.strength,
-                            mechanism=new_edge.mechanism,
-                        )
-                    )
-                    results["hypotheses_generated"] += 1
+                self.hypothesis_generator.generate_from_discovered_edge(
+                    edge_id=f"{edge.source}-{edge.target}",
+                    source=edge.source,
+                    target=edge.target,
+                    strength=edge.strength,
+                    mechanism=new_edge.mechanism,
+                )
+                results["hypotheses_generated"] += 1
 
-        self.graph.update_posteriors()
         save_graph(self.graph)
 
         testing_hypotheses = self.hypothesis_generator.get_hypotheses_by_status(
@@ -133,8 +125,8 @@ class CausalWorldModelService:
         return {
             "source": source,
             "target": target,
-            "direct_effect": result.result.get("direct_effect", 0),
-            "total_effect": result.result.get("total_effect", 0),
+            "direct_strength": result.result.get("direct_strength", 0),
+            "path_influence": result.result.get("path_influence", 0),
             "confidence": result.confidence,
             "explanation": result.explanation,
             "n_mediators": result.result.get("n_mediators", 0),
@@ -180,8 +172,8 @@ class CausalWorldModelService:
             ],
             "node_count": len(self.graph.nodes),
             "edge_count": len(self.graph.edges),
-            "updated_at": self.graph._updated_at.isoformat()
-            if self.graph._updated_at
+            "updated_at": self.graph.updated_at.isoformat()
+            if self.graph.updated_at
             else None,
         }
 
@@ -196,14 +188,9 @@ class CausalWorldModelService:
 
         return [h.to_dict() for h in hypotheses]
 
-
-_service_instance: CausalWorldModelService | None = None
-
-
-def get_causal_service() -> CausalWorldModelService:
-    """Get the global causal service instance."""
-    global _service_instance
-    if _service_instance is None:
-        _service_instance = CausalWorldModelService()
-        _service_instance.initialize()
-    return _service_instance
+    @classmethod
+    def from_default_path(cls) -> CausalWorldModelService:
+        """Create a service instance loading graph from default path."""
+        service = cls()
+        service.initialize()
+        return service

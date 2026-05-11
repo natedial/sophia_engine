@@ -25,7 +25,7 @@ class CausalGraph:
         self.nodes: set[str] = nodes or set()
         self.edges: list[CausalEdge] = edges or []
         self._edge_map: dict[tuple[str, str], CausalEdge] = {}
-        self._updated_at: datetime | None = None
+        self.updated_at: datetime | None = None
 
         for edge in self.edges:
             self._add_edge_to_map(edge)
@@ -39,26 +39,39 @@ class CausalGraph:
         self.nodes.add(node_id)
 
     def add_edge(self, edge: CausalEdge) -> None:
-        """Add or update an edge in the graph."""
+        """Add or update an edge in the graph.
+
+        When merging new evidence into existing edge, updates the existing edge
+        in place (does not mutate the caller's edge object).
+        Only blends prior with evidence when new strength > 0.
+        """
         self.nodes.add(edge.source)
         self.nodes.add(edge.target)
 
         key = (edge.source, edge.target)
         if key in self._edge_map:
             existing = self._edge_map[key]
-            edge.probability = self._bayesian_update(
-                existing.probability,
-                edge.strength,
-                edge.confidence,
-            )
-            self.edges = [
-                e if (e.source, e.target) != key else edge for e in self.edges
-            ]
+            if edge.strength > 0:
+                existing.probability = self._blend_prior_with_evidence(
+                    existing.probability,
+                    edge.strength,
+                    existing.confidence,
+                )
+            existing.strength = edge.strength
+            if edge.confidence > existing.confidence:
+                existing.confidence = edge.confidence
+            if edge.mechanism:
+                existing.mechanism = edge.mechanism
+            if edge.conditions:
+                existing.conditions = edge.conditions
+            existing.regime_dependent = edge.regime_dependent
+            if edge.relationship_key:
+                existing.relationship_key = edge.relationship_key
         else:
             self.edges.append(edge)
+            self._edge_map[key] = edge
 
-        self._edge_map[key] = edge
-        self._updated_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
     def remove_edge(self, source: str, target: str) -> bool:
         """Remove an edge from the graph."""
@@ -66,7 +79,7 @@ class CausalGraph:
         if key in self._edge_map:
             self.edges = [e for e in self.edges if (e.source, e.target) != key]
             del self._edge_map[key]
-            self._updated_at = datetime.now(UTC)
+            self.updated_at = datetime.now(UTC)
             return True
         return False
 
@@ -90,24 +103,32 @@ class CausalGraph:
         """Get child nodes (effects) of a node."""
         return list({e.target for e in self.edges if e.source == node_id})
 
-    def _bayesian_update(
+    def _blend_prior_with_evidence(
         self,
         prior: float,
-        likelihood: float,
+        strength: float,
         confidence: float,
     ) -> float:
-        """Update prior probability with likelihood using weighted averaging.
+        """Heuristic weighted blend of prior with empirical evidence.
 
-        This is a simplified Bayesian update that combines expert prior
-        confidence with empirical likelihood.
+        This is NOT a Bayesian posterior - it's a simple weighted average.
+        Idempotent when strength is unchanged (confidence=0 means no blend).
+
+        Args:
+            prior: Current probability (typically expert prior)
+            strength: New empirical evidence (0-1), only blended if > 0
+            confidence: Weight for the blend (0 = full evidence, 1 = full prior)
+
+        Returns:
+            Blended probability
         """
-        if confidence <= 0:
-            return likelihood
+        if strength <= 0:
+            return prior
         if confidence >= 1:
             return prior
 
         weight = confidence
-        return weight * prior + (1 - weight) * likelihood
+        return weight * prior + (1 - weight) * strength
 
     def update_posteriors(self) -> None:
         """Update all edge posteriors using Bayesian inference."""
@@ -117,12 +138,24 @@ class CausalGraph:
                 edge.strength,
                 edge.confidence,
             )
-        self._updated_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
-    def do_calculus(self, node: str, value: float) -> dict[str, float]:
-        """Perform do-calculus intervention: do(node = value).
+    def propagate_influence(
+        self,
+        node: str,
+        value: float,
+    ) -> dict[str, float]:
+        """Forward-propagate influence from a node to all descendants.
 
-        Returns the estimated effects on downstream nodes.
+        This is a heuristic path-weighted score, NOT a Pearl-style interventional
+        expectation. No graph surgery, no confounder adjustment.
+
+        Args:
+            node: Starting node for propagation
+            value: Initial value to propagate
+
+        Returns:
+            Dict mapping each reachable node to its estimated value
         """
         effects: dict[str, float] = {node: value}
         visited: set[str] = {node}
@@ -137,30 +170,38 @@ class CausalGraph:
 
                 parent_effect = effects.get(current, 0.5)
                 effect = parent_effect * edge.probability
-                effects[edge.target] = effect
+
+                if edge.target in effects:
+                    effects[edge.target] = max(effects[edge.target], effect)
+                else:
+                    effects[edge.target] = effect
+
                 queue.append(edge.target)
 
         return effects
 
-    def counterfactual(
+    def forward_simulate(
         self,
         intervention: dict[str, float],
         observation: dict[str, float],
     ) -> dict[str, float]:
-        """Compute counterfactual: what would happen if intervention occurred.
+        """Simulate forward propagation from intervention.
+
+        This overlays the intervention on the observation and propagates forward.
+        This is a heuristic simulation, NOT a Pearl counterfactual.
 
         Args:
             intervention: Nodes to intervene on (do(node) = value)
             observation: Current observed values
 
         Returns:
-            Estimated counterfactual values
+            Estimated simulated values
         """
         result = observation.copy()
         result.update(intervention)
 
         for node, value in intervention.items():
-            effects = self.do_calculus(node, value)
+            effects = self.propagate_influence(node, value)
             for affected_node, affected_value in effects.items():
                 if affected_node in intervention:
                     continue
@@ -173,7 +214,7 @@ class CausalGraph:
         return {
             "nodes": sorted(list(self.nodes)),
             "edges": [edge.to_dict() for edge in self.edges],
-            "updated_at": self._updated_at.isoformat() if self._updated_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
     @classmethod
@@ -183,7 +224,7 @@ class CausalGraph:
         edges = [CausalEdge.from_dict(e) for e in data.get("edges", [])]
         graph = cls(nodes=nodes, edges=edges)
         if data.get("updated_at"):
-            graph._updated_at = datetime.fromisoformat(data["updated_at"])
+            graph.updated_at = datetime.fromisoformat(data["updated_at"])
         return graph
 
 

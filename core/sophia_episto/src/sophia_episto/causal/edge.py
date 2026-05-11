@@ -33,6 +33,7 @@ class CausalEdge:
     probability: float = 0.5
     confidence: float = 0.0
     strength: float = 0.0
+    p_value: float | None = None
     mechanism: str = ""
     conditions: dict[str, Any] = field(default_factory=dict)
     regime_dependent: bool = False
@@ -54,6 +55,7 @@ class CausalEdge:
             "probability": self.probability,
             "confidence": self.confidence,
             "strength": self.strength,
+            "p_value": self.p_value,
             "mechanism": self.mechanism,
             "conditions": self.conditions,
             "regime_dependent": self.regime_dependent,
@@ -71,6 +73,7 @@ class CausalEdge:
             probability=data.get("probability", 0.5),
             confidence=data.get("confidence", 0.0),
             strength=data.get("strength", 0.0),
+            p_value=data.get("p_value"),
             mechanism=data.get("mechanism", ""),
             conditions=data.get("conditions", {}),
             regime_dependent=data.get("regime_dependent", False),

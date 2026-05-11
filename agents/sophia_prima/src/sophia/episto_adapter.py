@@ -24,8 +24,8 @@ class CausalQueryResult:
 
     source: str
     target: str
-    direct_effect: float
-    total_effect: float
+    direct_strength: float
+    path_influence: float
     confidence: float
     explanation: str
     n_mediators: int
@@ -64,9 +64,9 @@ class EpistoPlannerAdapter:
     def causal_available(self) -> bool:
         if self._causal_service is None:
             try:
-                from sophia_episto.causal_service import get_causal_service
+                from sophia_episto.causal_service import CausalWorldModelService
 
-                self._causal_service = get_causal_service()
+                self._causal_service = CausalWorldModelService.from_default_path()
             except ImportError:
                 return False
         return True
@@ -181,8 +181,8 @@ class EpistoPlannerAdapter:
             return CausalQueryResult(
                 source=result["source"],
                 target=result["target"],
-                direct_effect=result["direct_effect"],
-                total_effect=result["total_effect"],
+                direct_strength=result["direct_strength"],
+                path_influence=result["path_influence"],
                 confidence=result["confidence"],
                 explanation=result["explanation"],
                 n_mediators=result["n_mediators"],

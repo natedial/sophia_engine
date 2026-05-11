@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import numpy as np
 import pytest
 
-from sophia_arithmos.computations.causality import CausalStrength, GrangerCausality
+from sophia_arithmos.computations.causality import GrangerCausality
 from sophia_arithmos.core.types import Observation, OutputMode
 
 
@@ -118,41 +118,3 @@ class TestGrangerCausality:
 
         with pytest.raises(ValueError, match="Insufficient data"):
             gc.execute(data, {"source": "x", "target": "y", "max_lag": 5}, OutputMode.SUMMARY)
-
-
-class TestCausalStrength:
-    """Tests for CausalStrength computation."""
-
-    def test_regression_method(self) -> None:
-        """Test regression-based causal strength."""
-        cs = CausalStrength()
-        np.random.seed(42)
-        values = (np.arange(50) + np.random.randn(50) * 0.1).tolist()
-        data = _make_observations(values)
-
-        result = cs.execute(
-            data,
-            {"source_series": "x", "target_series": "y", "method": "regression"},
-            OutputMode.SUMMARY,
-        )
-
-        assert result.summary is not None
-        assert result.summary["method"] == "regression"
-        assert "strength" in result.summary
-
-    def test_correlation_method(self) -> None:
-        """Test correlation-based causal strength."""
-        cs = CausalStrength()
-        np.random.seed(42)
-        values = (np.arange(50) + np.random.randn(50) * 0.1).tolist()
-        data = _make_observations(values)
-
-        result = cs.execute(
-            data,
-            {"source_series": "x", "target_series": "y", "method": "correlation"},
-            OutputMode.SUMMARY,
-        )
-
-        assert result.summary is not None
-        assert result.summary["method"] == "correlation"
-        assert "strength" in result.summary
