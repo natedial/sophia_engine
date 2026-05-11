@@ -19,11 +19,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp[cli]>=1.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "pytest-httpx>=0.32.0",
 ]
+
+[project.scripts]
+sophia-pylon-mcp = "pylon.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

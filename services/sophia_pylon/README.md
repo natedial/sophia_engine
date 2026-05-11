@@ -1,13 +1,13 @@
 # Sophia Pylon
 
-Gateway layer for backend service integration. Pylon routes queries from consumers (like sophia_prima) to backend services for data and computation.
+Gateway layer for backend service integration. Pylon routes queries from consumers to backend services for data and computation, and can expose those tools over MCP for agent orchestrators such as Hermes.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Consumers                           │
-│  sophia_prima (agent)  │  scripts  │  other sophia_core     │
+│  Hermes / MCP agents   │  scripts  │  other sophia_core     │
 └────────────────────────────┬────────────────────────────────┘
                              │
                              ▼
@@ -36,7 +36,39 @@ pip install -e .
 
 ## Usage
 
-### For LLM Consumers (sophia_prima)
+### For MCP Consumers (Hermes)
+
+Install the MCP extra:
+
+```bash
+cd services/sophia_pylon
+pip install -e ".[mcp]"
+```
+
+Run the Streamable HTTP MCP server:
+
+```bash
+sophia-pylon-mcp --host 0.0.0.0 --port 8091 --path /mcp
+```
+
+Hermes MCP configuration:
+
+```yaml
+mcp_servers:
+  sophia:
+    url: "http://localhost:8091/mcp"
+    tools:
+      include:
+        - "*"
+```
+
+The MCP server exposes all `Pylon.get_tools()` definitions plus:
+
+| Tool | Description |
+|------|-------------|
+| `sophia_pylon_preflight` | Reports backend service health and available/unavailable tools |
+
+### For Python LLM Consumers
 
 ```python
 from pylon import Pylon, PylonConfig

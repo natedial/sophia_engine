@@ -1,10 +1,10 @@
 # Sophia Monorepo
 
-Unified workspace for the Sophia agent, gateway, and backend services.
+Unified workspace for Sophia engine services and MCP-exposed tools.
 
 ## Structure
 
-- `agents/` - User-facing agents (e.g. sophia_prima)
+- `agents/` - Legacy user-facing agents (e.g. sophia_prima)
 - `services/` - Backend services (scrivener, sophia_arithmos, sophia_kampe, sophia_pylon)
 - `core/` - Shared core packages (episto, onto, teleo)
 - `shared/` - Shared schemas, client helpers
@@ -17,8 +17,7 @@ Unified workspace for the Sophia agent, gateway, and backend services.
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-cd services/sophia_pylon && pip install -e .
-cd ../../agents/sophia_prima && pip install -e .
+cd services/sophia_pylon && pip install -e ".[mcp]"
 ```
 
 See `docs/runbook.md` for running the services.
@@ -34,18 +33,16 @@ Services:
 - `http://localhost:8001` sophia_arithmos
 - `http://localhost:8002` sophia_kampe
 - `http://localhost:8003` sophia_canvas
+- `http://localhost:8091/mcp` sophia_pylon_mcp
 - `http://localhost:13000` sophia_dashboard
-- `http://localhost:18080` sophia_gateway
 
 Useful commands:
 - `make logs`
 - `make ps`
 - `make down`
 
-Gateway notes:
-- `sophia_gateway` serves `GET /health`, `POST /v1/messages`, and `WS /ws`.
-- Set `OPENAI_API_KEY` in `infra/.env` to enable live agent responses.
-- Optional: set `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` to use Anthropic instead.
-- Optional: set `LLM_PROVIDER=groq` + `GROQ_API_KEY` to use Groq (OpenAI-compatible API).
-- Optional: set `PERSONALITY_PATH` and `SOUL_PATH` to override prompt component files.
-- Set `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_ACCOUNTS_JSON`) to enable Telegram polling.
+Agent notes:
+- Hermes or another MCP-capable agent should connect to `http://localhost:8091/mcp`.
+- The MCP server exposes Pylon tools plus `sophia_pylon_preflight`.
+- `agents/sophia_prima` remains available as legacy orchestration code.
+- To start the old Prima gateway, run compose with the `legacy-prima` profile.
