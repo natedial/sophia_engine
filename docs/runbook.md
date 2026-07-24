@@ -13,8 +13,7 @@ cd ../sophia_arithmos && pip install -e .
 cd ../sophia_kampe && pip install -e .
 cd ../sophia_oikonomia && pip install -e .
 cd ../sophia_sentry && pip install -e .
-cd ../sophia_pylon && pip install -e .
-cd ../../agents/sophia_prima && pip install -e .
+cd ../sophia_pylon && pip install -e ".[mcp]"
 ```
 
 ## Start Services (separate shells)
@@ -52,13 +51,12 @@ python -m sophia_sentry
 ```bash
 source .venv/bin/activate
 cd services/sophia_pylon
-# No standalone server; consumed by sophia_prima
+PYLON_MCP_HOST=127.0.0.1 PYLON_MCP_PORT=8091 sophia-pylon-mcp
 ```
 
 ```bash
 source .venv/bin/activate
-cd agents/sophia_prima
-python -m sophia.cli
+curl http://localhost:8091/health
 ```
 
 ## Docker Compose
@@ -79,40 +77,71 @@ Service URLs:
 - `http://localhost:8001` sophia_arithmos
 - `http://localhost:8002` sophia_kampe
 - `http://localhost:8006` sophia_oikonomia
-- `http://localhost:8007` sophia_sentry
 - `http://localhost:8003` sophia_canvas
 - `http://localhost:13000` sophia_dashboard
-- `http://localhost:18080` sophia_gateway
+- `http://localhost:8091/mcp` sophia_pylon_mcp
 
-Gateway endpoints:
+Pylon MCP endpoints:
 - `GET /health`
-- `POST /v1/messages` (channel-agnostic ingress)
-- `WS /ws` (connect handshake + typed frames)
+- `POST /mcp` (Streamable HTTP MCP)
 
-Gateway configuration:
-- Set `OPENAI_API_KEY` in `infra/.env` for real model responses.
-- Optional: set `LLM_PROVIDER=anthropic` plus `ANTHROPIC_API_KEY` to switch provider.
-- Optional: set `LLM_PROVIDER=groq` plus `GROQ_API_KEY` to switch provider.
-- `PERSONALITY_PATH` and `SOUL_PATH` control the agent prompt components loaded by gateway.
-- Set `TELEGRAM_BOT_TOKEN` (single bot) or `TELEGRAM_ACCOUNTS_JSON` (multi-bot).
-- Optional deterministic bindings via `GATEWAY_BINDINGS_JSON`.
-- Optional delegated coding: set `CODING_WORKER_ENABLED=true` and point
-  `CODING_WORKER_WORKSPACE_ROOT` at the repo/worktree you want the worker to edit.
-- Select `CODING_WORKER_BACKEND=codex` or `CODING_WORKER_BACKEND=claude_code`.
-- If `coding_worker` is enabled, widen `AGENT_FS_READ_ALLOWLIST` and
-  `AGENT_FS_WRITE_ALLOWLIST` to include that workspace root, or the worker will be denied by policy.
-- Legacy `DEV_WORKER_*` env names still map to the Codex backend.
-- Optional lossless debugging history: set `HISTORY_ENABLED=true` and point
-  `HISTORY_STORE_PATH` at a writable SQLite file.
-- If history is enabled, widen `AGENT_FS_READ_ALLOWLIST` and
-  `AGENT_FS_WRITE_ALLOWLIST` to include that history path.
+Pylon MCP configuration:
+- Hermes on the same machine: `http://localhost:8091/mcp`.
+- The host port binds to `127.0.0.1` by default through `PYLON_MCP_BIND_ADDRESS`.
+- Set `BRAVE_API_KEY` in `infra/.env` to enable live web tools.
+- Verify degraded services with the `sophia_pylon_preflight` MCP tool.
+- Do not expose the MCP port directly to the public internet. Prefer Tailscale (below); never router port-forward `8091`.
+
+### Tailscale: Hermes on another machine
+
+Use when Hermes runs on a different host on the same Tailscale network.
+
+1. In `infra/.env`, set:
+
+   ```bash
+   PYLON_MCP_BIND_ADDRESS=0.0.0.0
+   ```
+
+2. Recreate the MCP container so the publish address takes effect:
+
+   ```bash
+   make up
+   # or from infra/: docker compose up -d --force-recreate sophia_pylon_mcp
+   ```
+
+3. On the Sophia host, note the Tailscale address (`tailscale ip -4` or MagicDNS name).
+
+4. From the Hermes host, verify health over the tailnet:
+
+   ```bash
+   curl http://<sophia-magicdns-or-100.x>:8091/health
+   ```
+
+   Expected: `{"status":"ok","mcp_path":"/mcp"}`.
+
+5. Point Hermes at:
+
+   ```yaml
+   mcp_servers:
+     sophia:
+       url: "http://<sophia-magicdns-or-100.x>:8091/mcp"
+       tools:
+         include:
+           - "*"
+   ```
+
+6. Ask Hermes to call `sophia_pylon_preflight` before deeper jobs.
+
+Notes:
+- Binding `0.0.0.0` publishes on all host interfaces. Rely on Tailscale (and no public port-forward) as the access boundary for this profile.
+- Keep the default `127.0.0.1` bind for same-machine local testing.
 
 ## Deployment Options (AWS)
 
 Recommendation: For AWS choose the smallest viable path now and evolve as load grows.
 
 Option A: Single EC2 + systemd (fastest to ship)
-- Run each service as a systemd unit (scrivener, sophia_arithmos, sophia_kampe, sophia_oikonomia, sophia_sentry, sophia_prima).
+- Run each service as a systemd unit (scrivener, sophia_arithmos, sophia_kampe, sophia_oikonomia, sophia_pylon_mcp).
 - Put Nginx in front if you need a single public entrypoint.
 - Use CloudWatch Agent for logs/metrics.
 

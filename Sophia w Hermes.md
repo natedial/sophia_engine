@@ -5,18 +5,18 @@ This note captures where the Hermes cutover work left off and how to test it lat
 ## Current State
 
 - PR: https://github.com/natedial/sophia_engine/pull/2
-- Branch: `hermes-pylon-mcp-cutover`
+- Branch: `hermes-deploy`
 - Sophia now exposes Pylon tools through a Streamable HTTP MCP server.
 - Hermes is intended to own the agent loop, memory, session handling, and user-facing gateway.
 - Sophia remains responsible for backend services, tools, data access, computation, research, and canvas operations.
-- The old `sophia_gateway` / `sophia_prima` path is still present, but moved behind the `legacy-prima` Docker Compose profile.
+- The old `sophia_gateway` / `sophia_prima` path is intentionally out of scope for this launch test; Hermes owns orchestration.
 
 ## Local Sophia Startup
 
 From the repo root:
 
 ```bash
-git checkout hermes-pylon-mcp-cutover
+git checkout hermes-deploy
 make up
 ```
 
@@ -40,17 +40,6 @@ Expected:
 
 ## Hermes MCP Config
 
-Point Hermes at the Sophia MCP endpoint. If Hermes runs on a different machine, replace `localhost` with the host/IP where the Sophia stack is running.
-
-```yaml
-mcp_servers:
-  sophia:
-    url: "http://<sophia-host>:8091/mcp"
-    tools:
-      include:
-        - "*"
-```
-
 If Hermes runs on the same machine:
 
 ```yaml
@@ -61,6 +50,31 @@ mcp_servers:
       include:
         - "*"
 ```
+
+If Hermes runs on another machine over Tailscale (recommended remote profile):
+
+1. On the Sophia host, in `infra/.env`:
+
+   ```bash
+   PYLON_MCP_BIND_ADDRESS=0.0.0.0
+   ```
+
+2. Recreate the stack / MCP container (`make up` or force-recreate `sophia_pylon_mcp`).
+
+3. Point Hermes at the Sophia Tailscale MagicDNS name or `100.x` address:
+
+```yaml
+mcp_servers:
+  sophia:
+    url: "http://<sophia-magicdns-or-100.x>:8091/mcp"
+    tools:
+      include:
+        - "*"
+```
+
+4. From the Hermes host, confirm `curl http://<sophia-magicdns-or-100.x>:8091/health` before deeper tests.
+
+Do not router port-forward `8091`. This profile assumes a private Tailscale network as the access boundary.
 
 ## First Validation Pass
 
@@ -106,6 +120,55 @@ Start with a tight tool smoke test. The goal is to see whether Hermes naturally 
    Use Sophia tools to create a simple time-series chart for FEDFUNDS.
    ```
 
+## Next Readiness Pass
+
+The next step is an end-to-end Hermes readiness pass, not more repo cleanup.
+
+1. Run the full compose stack.
+
+   ```bash
+   cp infra/.env.example infra/.env
+   make up
+   make ps
+   ```
+
+2. Verify the MCP surface locally.
+
+   ```bash
+   curl http://localhost:8091/health
+   ```
+
+   Then connect Hermes or another MCP client to:
+
+   ```text
+   http://localhost:8091/mcp
+   ```
+
+3. Have Hermes call `sophia_pylon_preflight` first.
+
+   Treat this as the default diagnostic before deeper jobs. It should report which Sophia services are healthy, degraded, or unavailable.
+
+4. Smoke test representative jobs through Hermes.
+
+   - Fetch or summarize data through Scrivener.
+   - Run an Arithmos calculation.
+   - Search/query the Tholos corpus.
+   - Create or inspect Canvas state.
+   - Hit Oikonomia tools.
+   - Try a live web tool with `BRAVE_API_KEY` set.
+   - Try Readwise if `.readwise-cli.json` is mounted.
+
+5. Enable Tailscale reachability if Hermes is on another host.
+
+   Set `PYLON_MCP_BIND_ADDRESS=0.0.0.0` in `infra/.env`, recreate `sophia_pylon_mcp`, then verify health and `sophia_pylon_preflight` from the Hermes machine over Tailscale. See `docs/runbook.md` (Tailscale section). Do not publicly expose `8091`.
+
+6. Add launch guardrails.
+
+   - Add a short Hermes tool-use prompt telling it to call preflight first.
+   - Add a small MCP smoke test script.
+   - Add a runbook section for failed service dependencies.
+   - Keep the deployment warning explicit: do not expose unauthenticated MCP publicly.
+
 ## Key Considerations
 
 - This is a deliberate trade: Hermes owns orchestration; Sophia owns tools/core logic.
@@ -120,17 +183,11 @@ Start with a tight tool smoke test. The goal is to see whether Hermes naturally 
 - If any of those turn out to be essential, add them back as focused Sophia tools or lightweight MCP resources, not as a second agent loop.
 - Treat `sophia_pylon_preflight` as the first diagnostic any time Hermes seems confused. If services are unavailable, Hermes should be told to call preflight before attempting deeper workflows.
 - Tool names and schemas come from Pylon dynamically. Adding a new Sophia capability should usually mean adding a Pylon tool, not changing Hermes.
-- If Hermes runs on a home server and Sophia runs elsewhere, check firewall/NAT access to port `8091`.
-- The MCP endpoint is currently unauthenticated. Do not expose it directly to the public internet without a private network, reverse proxy auth, VPN, or equivalent access control.
+- If Hermes runs on another host, use the Tailscale profile (`PYLON_MCP_BIND_ADDRESS=0.0.0.0`) and Hermes URL `http://<sophia-magicdns-or-100.x>:8091/mcp`. Confirm health from the Hermes host before blaming tool failures.
+- The MCP endpoint is intended for local/Tailscale access. Default compose bind is `127.0.0.1`; the Tailscale profile binds `0.0.0.0` but must not be router port-forwarded or exposed on the public internet.
 - Readwise depends on the mounted CLI config. If Readwise tools fail, verify `.readwise-cli.json` is mounted and the path matches `READWISE_CLI_CONFIG_PATH`.
 - Tholos research depends on `RESEARCH_CORPUS_PATH`. If corpus tools are unavailable, check the mounted corpus path and run `sophia_pylon_preflight`.
 - Brave/live web tools require `BRAVE_API_KEY`.
-- The old Prima gateway can be started for rollback with the legacy profile:
-
-  ```bash
-  docker compose --env-file infra/.env -f infra/docker-compose.yml --profile legacy-prima up -d --build
-  ```
-
 ## What To Decide After Testing
 
 After the first Hermes run, decide based on behavior, not just connectivity:

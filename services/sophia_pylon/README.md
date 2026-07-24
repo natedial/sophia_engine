@@ -51,7 +51,7 @@ Run the Streamable HTTP MCP server:
 sophia-pylon-mcp --host 0.0.0.0 --port 8091 --path /mcp
 ```
 
-Hermes MCP configuration:
+Hermes MCP configuration (same machine):
 
 ```yaml
 mcp_servers:
@@ -61,6 +61,8 @@ mcp_servers:
       include:
         - "*"
 ```
+
+For Hermes on another Tailscale host, set `PYLON_MCP_BIND_ADDRESS=0.0.0.0` in `infra/.env` and use `http://<sophia-magicdns-or-100.x>:8091/mcp`. See `docs/runbook.md`.
 
 The MCP server exposes all `Pylon.get_tools()` definitions plus:
 
