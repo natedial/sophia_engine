@@ -576,6 +576,117 @@ def get_speeches_by_speaker(
         ]
 
 
+# --- Speaker Event Response Models ---
+
+class SpeakerEventRecord(BaseModel):
+    id: int
+    external_id: str
+    speaker_id: int | None
+    speaker_name: str | None
+    title: str
+    event_type: str
+    scheduled_start: str | None
+    scheduled_end: str | None
+    location: str | None
+    description: str | None
+    url: str | None
+    source: str
+    status: str
+    speech_id: int | None
+
+
+class SpeakerEventSyncResult(BaseModel):
+    status: str
+    ready: bool
+    events_fetched: int | None
+    events_kept: int | None
+    events_inserted: int | None
+    events_updated: int | None
+    events_cancelled: int | None
+    events_skipped: int | None
+    error_message: str | None = None
+
+
+# --- Speaker Event Endpoints ---
+
+@app.get("/speaker-events", response_model=list[SpeakerEventRecord])
+def list_speaker_events(
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+    speaker: Annotated[str | None, Query(description="Filter by speaker name")] = None,
+    event_type: Annotated[
+        str | None,
+        Query(description="Filter by type: speech, testimony, discussion, press_conference, fomc, other"),
+    ] = None,
+    status: Annotated[
+        str | None,
+        Query(description="Filter by status: scheduled, completed, cancelled, rescheduled"),
+    ] = "scheduled",
+    limit: Annotated[int, Query(le=1000)] = 100,
+):
+    """List Fed Board speaker / communications calendar events."""
+    from src.query import SpeakerEventQuery
+
+    return SpeakerEventQuery.list_events(
+        days=days,
+        speaker=speaker,
+        event_type=event_type,
+        status=status,
+        limit=limit,
+    )
+
+
+@app.get("/speaker-events/upcoming", response_model=list[SpeakerEventRecord])
+def get_upcoming_speaker_events(
+    days: Annotated[int, Query(ge=1, le=365)] = 14,
+    speaker: Annotated[str | None, Query(description="Filter by speaker name")] = None,
+    event_type: Annotated[str | None, Query(description="Filter by event type")] = None,
+    limit: Annotated[int, Query(le=1000)] = 100,
+):
+    """Get upcoming scheduled Fed speaker calendar events."""
+    from src.query import SpeakerEventQuery
+
+    return SpeakerEventQuery.get_upcoming(
+        days=days,
+        speaker=speaker,
+        event_type=event_type,
+        limit=limit,
+    )
+
+
+@app.get("/speaker-events/{event_id}", response_model=SpeakerEventRecord)
+def get_speaker_event(event_id: int):
+    """Get a speaker calendar event by ID."""
+    from src.query import SpeakerEventQuery
+
+    event = SpeakerEventQuery.get_by_id(event_id)
+    if not event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Speaker event {event_id} not found",
+        )
+    return event
+
+
+@app.post("/speaker-events/sync", response_model=SpeakerEventSyncResult)
+def sync_speaker_events():
+    """Sync Fed Board speaker calendar events from calendar.json."""
+    from src.fetchers.fed_calendar import FedCalendarFetcher
+
+    with FedCalendarFetcher() as fetcher:
+        result = fetcher.sync_speaker_calendar()
+
+    if not result.get("ready"):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Speaker calendar sync failed",
+                "sync": result,
+            },
+        )
+
+    return SpeakerEventSyncResult(**result)
+
+
 # --- Release Response Models ---
 
 class ReleaseRecord(BaseModel):

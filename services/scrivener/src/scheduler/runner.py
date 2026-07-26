@@ -51,6 +51,39 @@ class SchedulerRunner:
         )
         logger.info("Scheduled release calendar checker (6am & 6pm ET)")
 
+    def setup_speaker_calendar_sync(self) -> None:
+        """Sync Fed Board speaker calendar at 6am and 6pm ET."""
+        self.scheduler.add_job(
+            self._sync_speaker_calendar,
+            trigger=CronTrigger(hour="6,18", minute=5, timezone=self.tz),
+            id="speaker_calendar_sync",
+            name="Fed speaker calendar sync",
+            replace_existing=True,
+        )
+        logger.info("Scheduled Fed speaker calendar sync (6:05am & 6:05pm ET)")
+
+    def _sync_speaker_calendar(self) -> None:
+        """Fetch and upsert Fed Board speaker calendar events."""
+        from src.fetchers.fed_calendar import FedCalendarFetcher
+
+        try:
+            with FedCalendarFetcher() as fetcher:
+                result = fetcher.sync_speaker_calendar()
+            if result.get("ready"):
+                logger.info(
+                    "Speaker calendar sync ok: inserted=%s updated=%s cancelled=%s",
+                    result.get("events_inserted"),
+                    result.get("events_updated"),
+                    result.get("events_cancelled"),
+                )
+            else:
+                logger.error(
+                    "Speaker calendar sync failed: %s",
+                    result.get("error_message") or result.get("status"),
+                )
+        except Exception as exc:
+            logger.error("Speaker calendar sync raised: %s", exc)
+
     def _check_and_schedule_events(self) -> None:
         """Check release_dates for upcoming releases and schedule fetch jobs."""
         now = datetime.now(self.tz)
@@ -128,9 +161,11 @@ class SchedulerRunner:
         """Start the scheduler."""
         self.setup_daily_sweep()
         self.setup_calendar_checker()
+        self.setup_speaker_calendar_sync()
 
         # Run initial check
         self._check_and_schedule_events()
+        self._sync_speaker_calendar()
 
         job_count = len(self.scheduler.get_jobs())
         logger.info(f"Starting scheduler with {job_count} jobs...")

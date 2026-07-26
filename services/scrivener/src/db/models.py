@@ -358,6 +358,9 @@ class Speaker(Base):
 
     # Relationships
     speeches: Mapped[list["Speech"]] = relationship(back_populates="speaker")
+    speaker_events: Mapped[list["SpeakerEvent"]] = relationship(
+        back_populates="speaker"
+    )
 
 
 class Speech(Base):
@@ -388,6 +391,9 @@ class Speech(Base):
 
     # Relationships
     speaker: Mapped["Speaker"] = relationship(back_populates="speeches")
+    speaker_events: Mapped[list["SpeakerEvent"]] = relationship(
+        back_populates="speech"
+    )
 
     __table_args__ = (
         Index("idx_speeches_speaker_id", "speaker_id"),
@@ -395,6 +401,85 @@ class Speech(Base):
         Index("idx_speeches_date", "speech_date"),
         Index("idx_speeches_source", "source"),
         Index("idx_speeches_type", "speech_type"),
+    )
+
+
+class SpeakerEvent(Base):
+    """Upcoming / scheduled Fed Board communications calendar events."""
+
+    __tablename__ = "speaker_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    external_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    speaker_name: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    scheduled_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    scheduled_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    location: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, default="Federal Reserve Board"
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="scheduled")
+    speech_id: Mapped[int | None] = mapped_column(ForeignKey("speeches.id"))
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    speaker: Mapped["Speaker | None"] = relationship(back_populates="speaker_events")
+    speech: Mapped["Speech | None"] = relationship(back_populates="speaker_events")
+
+    __table_args__ = (
+        Index("idx_speaker_events_scheduled_start", "scheduled_start"),
+        Index("idx_speaker_events_speaker_name", "speaker_name"),
+        Index("idx_speaker_events_event_type", "event_type"),
+        Index("idx_speaker_events_status", "status"),
+        Index("idx_speaker_events_speaker_id", "speaker_id"),
+        {"sqlite_autoincrement": True},
+    )
+
+
+class SpeakerEventSyncRun(Base):
+    """Audit log for Fed speaker calendar sync attempts."""
+
+    __tablename__ = "speaker_event_sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    events_fetched: Mapped[int | None] = mapped_column(Integer)
+    events_kept: Mapped[int | None] = mapped_column(Integer)
+    events_inserted: Mapped[int | None] = mapped_column(Integer)
+    events_updated: Mapped[int | None] = mapped_column(Integer)
+    events_cancelled: Mapped[int | None] = mapped_column(Integer)
+    events_skipped: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_speaker_event_sync_runs_started", "started_at"),
+        Index("idx_speaker_event_sync_runs_status", "status"),
+        {"sqlite_autoincrement": True},
     )
 
 
