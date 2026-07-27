@@ -202,7 +202,8 @@ def scheduler(
 
     console.print("Starting Scrivener scheduler...", style="yellow")
     console.print(f"  Daily sweep: {get_settings().daily_sweep_hour:02d}:{get_settings().daily_sweep_minute:02d} ET")
-    console.print(f"  Calendar check: 6am & 6pm ET")
+    console.print("  Calendar check: 6am & 6pm ET")
+    console.print("  Speaker calendar sync: 6:05am & 6:05pm ET")
     console.print("\nPress Ctrl+C to stop\n", style="dim")
 
     runner = SchedulerRunner(blocking=not daemon)
@@ -751,6 +752,86 @@ def list_speeches(
 
         console.print(table)
         console.print(f"\nTotal: {len(speeches)} speeches", style="dim")
+
+
+@app.command("sync-speaker-events")
+def sync_speaker_events():
+    """Sync Fed Board speaker calendar events from calendar.json."""
+    from src.fetchers.fed_calendar import FedCalendarFetcher
+
+    console.print("Syncing Fed Board speaker calendar...", style="yellow")
+    with FedCalendarFetcher() as fetcher:
+        result = fetcher.sync_speaker_calendar()
+
+    style = "green" if result.get("ready") else "red"
+    console.print(f"\nSync status: {result['status']}", style=style)
+    console.print(
+        f"Fetched {result['events_fetched']} raw events; kept {result['events_kept']}",
+        style="green" if result.get("ready") else "yellow",
+    )
+    console.print(
+        f"Inserted {result['events_inserted']}, updated {result['events_updated']}, "
+        f"cancelled {result['events_cancelled']}, skipped {result['events_skipped']}",
+        style="green" if result.get("ready") else "yellow",
+    )
+    if result.get("error_message"):
+        console.print(f"Error: {result['error_message']}", style="red")
+        raise typer.Exit(code=1)
+
+
+@app.command("upcoming-speaker-events")
+def upcoming_speaker_events(
+    days: int = typer.Option(14, "--days", "-d", help="Days ahead to show"),
+    speaker: str = typer.Option(None, "--speaker", "-s", help="Filter by speaker name"),
+    event_type: str = typer.Option(
+        None,
+        "--type",
+        "-t",
+        help="Filter by type: speech, testimony, discussion, press_conference, fomc, other",
+    ),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max results"),
+):
+    """Show upcoming Fed Board speaker calendar events."""
+    from src.query import SpeakerEventQuery
+
+    events = SpeakerEventQuery.get_upcoming(
+        days=days,
+        speaker=speaker,
+        event_type=event_type,
+        limit=limit,
+    )
+    if not events:
+        console.print("No upcoming speaker events found", style="yellow")
+        console.print(
+            "Tip: Run 'sync-speaker-events' to populate the calendar",
+            style="dim",
+        )
+        return
+
+    table = Table(title=f"Upcoming Speaker Events ({days} days)")
+    table.add_column("When", style="cyan")
+    table.add_column("Type", style="dim")
+    table.add_column("Speaker", style="white")
+    table.add_column("Title", style="white", max_width=50)
+    table.add_column("Location", style="dim", max_width=30)
+
+    for event in events:
+        title = event["title"] or "-"
+        if len(title) > 50:
+            title = title[:47] + "..."
+        location = event["location"] or "-"
+        if len(location) > 30:
+            location = location[:27] + "..."
+        table.add_row(
+            event["scheduled_start"] or "-",
+            event["event_type"],
+            event["speaker_name"] or "-",
+            title,
+            location,
+        )
+
+    console.print(table)
+    console.print(f"\nTotal: {len(events)} events", style="dim")
 
 
 if __name__ == "__main__":

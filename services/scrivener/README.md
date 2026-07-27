@@ -7,8 +7,8 @@ Scrivener collects, normalizes, and serves economic and financial market data fr
 ## Features
 
 - **Multi-source data collection**: FRED (31 series), BLS (10+ series), Treasury auctions, Fed speeches
-- **Central bank communications**: Speeches, statements, and press conferences from Federal Reserve
-- **Automated scheduling**: Daily sweeps + calendar-driven fetches for economic releases
+- **Central bank communications**: Speeches, statements, press conferences, and Board speaker calendar events
+- **Automated scheduling**: Daily sweeps + calendar-driven fetches for economic releases and Fed speaker events
 - **Query layer**: SeriesQuery and AuctionQuery utilities for data access
 - **REST API**: FastAPI service with auto-generated docs
 - **CLI**: Full management interface for manual operations
@@ -152,6 +152,8 @@ The systemd unit reads both `/opt/scrivener/.env` and `/opt/scrivener/.monitor.e
 | `list-speakers` | List all speakers |
 | `fetch-speech <url>` | Fetch and store a speech |
 | `list-speeches` | List stored speeches |
+| `sync-speaker-events` | Sync Fed Board speaker calendar |
+| `upcoming-speaker-events` | Show upcoming Fed speaker events |
 
 ## API Endpoints
 
@@ -182,6 +184,12 @@ When running `scrivener serve`, the following endpoints are available:
 - `GET /speeches/{id}` - Get speech with full text
 - `GET /speeches/by-url` - Get speech by URL
 - `GET /speeches/speaker/{name}` - Get speeches by speaker
+
+### Speaker Events (Fed Board calendar)
+- `GET /speaker-events` - List calendar events with filters
+- `GET /speaker-events/upcoming` - Upcoming scheduled events
+- `GET /speaker-events/{id}` - Get event by ID
+- `POST /speaker-events/sync` - Sync from Board `calendar.json`
 
 ### Releases
 - `GET /releases` - List FRED releases
@@ -224,12 +232,18 @@ API documentation available at `/docs` when the server is running.
 - HTML and PDF extraction
 - Default speakers: Fed Board of Governors
 
+### Fed Speaker Calendar
+- Board of Governors JSON feed: `https://www.federalreserve.gov/json/calendar.json`
+- Keeps speeches, testimony, discussions, FOMC / press conferences
+- Skips statistical releases (owned by the FRED release calendar)
+
 ## Scheduler
 
-The scheduler runs two types of jobs:
+The scheduler runs these jobs:
 
 1. **Daily Sweep** (5pm ET): Fetches all core series from all sources
 2. **Calendar Check** (6am & 6pm ET): Checks `release_dates` and schedules fetches for upcoming releases
+3. **Speaker Calendar Sync** (6:05am & 6:05pm ET): Upserts Fed Board speaker events from `calendar.json`
 
 Event-triggered fetches run 1 minute after the scheduled release time.
 

@@ -502,6 +502,99 @@ Get speeches by a specific speaker.
 
 ---
 
+## Speaker Events
+
+Upcoming Federal Reserve Board communications from the official Board calendar JSON feed (`https://www.federalreserve.gov/json/calendar.json`). Stores speeches, testimony, discussions, FOMC meetings, and press conferences. Statistical releases are skipped (use the FRED release calendar).
+
+### GET /speaker-events
+
+List Fed Board speaker / communications calendar events.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | int | 30 | Lookahead window in days |
+| `speaker` | string | null | Filter by speaker name (partial match) |
+| `event_type` | string | null | `speech`, `testimony`, `discussion`, `press_conference`, `fomc`, `other` |
+| `status` | string | scheduled | `scheduled`, `completed`, `cancelled`, `rescheduled` |
+| `limit` | int | 100 | Max results (max: 1000) |
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "external_id": "fedcal:abc123",
+    "speaker_id": 2,
+    "speaker_name": "Philip N. Jefferson",
+    "title": "Speech - Vice Chair Philip N. Jefferson",
+    "event_type": "speech",
+    "scheduled_start": "2026-07-16T19:00:00-04:00",
+    "scheduled_end": null,
+    "location": "At Stanford, California",
+    "description": "Navigating Economic Shocks",
+    "url": "https://www.youtube.com/watch?v=example",
+    "source": "Federal Reserve Board",
+    "status": "scheduled",
+    "speech_id": null
+  }
+]
+```
+
+---
+
+### GET /speaker-events/upcoming
+
+Get upcoming scheduled Fed speaker calendar events.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | int | 14 | Days ahead |
+| `speaker` | string | null | Filter by speaker name |
+| `event_type` | string | null | Filter by event type |
+| `limit` | int | 100 | Max results |
+
+**Response:** Same shape as `GET /speaker-events`.
+
+---
+
+### GET /speaker-events/{event_id}
+
+Get a speaker calendar event by ID.
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event_id` | int | Speaker event ID |
+
+**Response:** Single event object (same fields as list items).
+
+---
+
+### POST /speaker-events/sync
+
+Sync Fed Board speaker calendar events from `calendar.json`.
+
+**Response:**
+```json
+{
+  "status": "complete",
+  "ready": true,
+  "events_fetched": 2500,
+  "events_kept": 780,
+  "events_inserted": 12,
+  "events_updated": 768,
+  "events_cancelled": 1,
+  "events_skipped": 1720,
+  "error_message": null
+}
+```
+
+Returns `503` when sync is not ready (fetch/parse failure).
+
+---
+
 ## Releases
 
 Economic data release calendar from FRED. Use these endpoints to query upcoming economic data releases.

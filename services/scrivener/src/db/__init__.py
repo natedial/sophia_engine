@@ -11,6 +11,10 @@ from src.db.models import (
     ReleaseCalendarSyncRun,
     Series,
     Source,
+    Speaker,
+    SpeakerEvent,
+    SpeakerEventSyncRun,
+    Speech,
     TreasuryAuction,
 )
 
@@ -26,5 +30,9 @@ __all__ = [
     "ReleaseCalendarSyncRun",
     "EconomicEvent",
     "EconomicEventForecast",
+    "Speaker",
+    "Speech",
+    "SpeakerEvent",
+    "SpeakerEventSyncRun",
     "TreasuryAuction",
 ]
