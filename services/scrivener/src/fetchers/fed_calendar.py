@@ -9,14 +9,19 @@ import hashlib
 import html
 import logging
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from threading import Lock
+from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import httpx
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.config import get_settings
 from src.db import get_session
+from src.db.connection import get_engine
 from src.db.models import Speaker, SpeakerEvent, SpeakerEventSyncRun
 
 logger = logging.getLogger(__name__)
@@ -24,6 +29,9 @@ logger = logging.getLogger(__name__)
 CALENDAR_JSON_URL = "https://www.federalreserve.gov/json/calendar.json"
 CALENDAR_PAGE_URL = "https://www.federalreserve.gov/newsevents/calendar.htm"
 DEFAULT_SOURCE = "Federal Reserve Board"
+SPEAKER_CALENDAR_SYNC_LOCK_KEY = 418_034
+_speaker_calendar_sync_lock = Lock()
+EVENT_UPSERT_CHUNK_SIZE = 200
 
 # Fed feed types we keep for communications calendars.
 KEEP_FEED_TYPES = frozenset(
@@ -308,23 +316,91 @@ class FedCalendarFetcher:
             kept.append(normalized)
         return kept, skipped
 
-    def _get_or_create_speaker_id(
-        self, session: Any, name: str | None
-    ) -> int | None:
-        if not name:
-            return None
-        speaker = session.query(Speaker).filter(Speaker.name == name).first()
-        if speaker:
-            return speaker.id
-        speaker = Speaker(
-            name=name,
-            title=None,
-            institution="Federal Reserve",
-            is_active=True,
-        )
-        session.add(speaker)
-        session.flush()
-        return speaker.id
+    @contextmanager
+    def _acquire_sync_lock(self) -> Iterator[dict[str, Any]]:
+        """Acquire a non-blocking single-flight lock for speaker calendar sync."""
+        local_lock_acquired = _speaker_calendar_sync_lock.acquire(blocking=False)
+        if not local_lock_acquired:
+            yield {"acquired": False, "reason": "local_lock_not_acquired"}
+            return
+
+        connection = None
+        advisory_lock_acquired = False
+        try:
+            engine = get_engine()
+            if engine.dialect.name == "postgresql":
+                connection = engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                )
+                advisory_lock_acquired = bool(
+                    connection.execute(
+                        text("SELECT pg_try_advisory_lock(:lock_key)"),
+                        {"lock_key": SPEAKER_CALENDAR_SYNC_LOCK_KEY},
+                    ).scalar()
+                )
+                if not advisory_lock_acquired:
+                    yield {
+                        "acquired": False,
+                        "reason": "postgres_advisory_lock_not_acquired",
+                    }
+                    return
+
+            yield {"acquired": True, "reason": None}
+        finally:
+            try:
+                if connection is not None and advisory_lock_acquired:
+                    connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_key)"),
+                        {"lock_key": SPEAKER_CALENDAR_SYNC_LOCK_KEY},
+                    )
+            finally:
+                if connection is not None:
+                    connection.close()
+                if local_lock_acquired:
+                    _speaker_calendar_sync_lock.release()
+
+    def _ensure_speakers(
+        self, session: Any, names: set[str]
+    ) -> dict[str, int]:
+        """Upsert speakers and return name -> id mapping."""
+        if not names:
+            return {}
+
+        dialect = session.bind.dialect.name if session.bind is not None else ""
+        rows = [
+            {
+                "name": name,
+                "title": None,
+                "institution": "Federal Reserve",
+                "is_active": True,
+            }
+            for name in sorted(names)
+        ]
+
+        if dialect == "postgresql":
+            stmt = pg_insert(Speaker).values(rows)
+            stmt = stmt.on_conflict_do_nothing(index_elements=[Speaker.name])
+            session.execute(stmt)
+            session.flush()
+        else:
+            existing_names = {
+                name
+                for (name,) in session.query(Speaker.name)
+                .filter(Speaker.name.in_(list(names)))
+                .all()
+            }
+            for row in rows:
+                if row["name"] not in existing_names:
+                    session.add(Speaker(**row))
+            session.flush()
+
+        mapping = {
+            speaker.name: speaker.id
+            for speaker in session.query(Speaker)
+            .filter(Speaker.name.in_(list(names)))
+            .all()
+        }
+        return mapping
 
     def _record_sync_run(self, **fields: Any) -> None:
         with get_session() as session:
@@ -342,80 +418,150 @@ class FedCalendarFetcher:
         events_skipped = 0
 
         try:
-            raw_events = self.fetch_calendar_events()
-            events_fetched = len(raw_events)
-            kept, events_skipped = self.normalize_events(raw_events)
-            events_kept = len(kept)
-            seen_external_ids = {event["external_id"] for event in kept}
-            now = datetime.now(timezone.utc)
-
-            with get_session() as session:
-                for event in kept:
-                    speaker_id = self._get_or_create_speaker_id(
-                        session, event["speaker_name"]
+            with self._acquire_sync_lock() as lock_state:
+                if not lock_state["acquired"]:
+                    reason = lock_state.get("reason") or "lock_not_acquired"
+                    logger.warning(
+                        "Skipping speaker calendar sync; lock not acquired: %s",
+                        reason,
                     )
-                    existing = (
-                        session.query(SpeakerEvent)
-                        .filter(SpeakerEvent.external_id == event["external_id"])
-                        .first()
-                    )
-                    if existing:
-                        existing.speaker_id = speaker_id
-                        existing.speaker_name = event["speaker_name"]
-                        existing.title = event["title"]
-                        existing.event_type = event["event_type"]
-                        existing.scheduled_start = event["scheduled_start"]
-                        existing.scheduled_end = event["scheduled_end"]
-                        existing.location = event["location"]
-                        existing.description = event["description"]
-                        existing.url = event["url"]
-                        existing.source = event["source"]
-                        # Restore previously cancelled rows if they reappear.
-                        if existing.status == "cancelled":
-                            existing.status = "scheduled"
-                        existing.raw_payload = event["raw_payload"]
-                        existing.last_seen_at = now
-                        existing.updated_at = now
-                        updated += 1
-                    else:
-                        session.add(
-                            SpeakerEvent(
-                                external_id=event["external_id"],
-                                speaker_id=speaker_id,
-                                speaker_name=event["speaker_name"],
-                                title=event["title"],
-                                event_type=event["event_type"],
-                                scheduled_start=event["scheduled_start"],
-                                scheduled_end=event["scheduled_end"],
-                                location=event["location"],
-                                description=event["description"],
-                                url=event["url"],
-                                source=event["source"],
-                                status="scheduled",
-                                raw_payload=event["raw_payload"],
-                                first_seen_at=now,
-                                last_seen_at=now,
-                            )
+                    result = {
+                        "status": "skipped",
+                        "ready": True,
+                        "events_fetched": 0,
+                        "events_kept": 0,
+                        "events_inserted": 0,
+                        "events_updated": 0,
+                        "events_cancelled": 0,
+                        "events_skipped": 0,
+                        "error_message": reason,
+                    }
+                    try:
+                        self._record_sync_run(
+                            started_at=started_at,
+                            completed_at=datetime.now(timezone.utc),
+                            **{
+                                k: v
+                                for k, v in result.items()
+                                if k
+                                in {
+                                    "status",
+                                    "ready",
+                                    "events_fetched",
+                                    "events_kept",
+                                    "events_inserted",
+                                    "events_updated",
+                                    "events_cancelled",
+                                    "events_skipped",
+                                    "error_message",
+                                }
+                            },
                         )
-                        inserted += 1
+                    except Exception as audit_exc:
+                        logger.warning(
+                            "Failed to record speaker calendar sync audit: %s",
+                            audit_exc,
+                        )
+                    return result
 
-                # Cancel future Board events missing from a complete snapshot.
-                future_events = (
-                    session.query(SpeakerEvent)
-                    .filter(
-                        SpeakerEvent.source == DEFAULT_SOURCE,
-                        SpeakerEvent.status == "scheduled",
-                        SpeakerEvent.scheduled_start >= now,
+                raw_events = self.fetch_calendar_events()
+                events_fetched = len(raw_events)
+                kept, events_skipped = self.normalize_events(raw_events)
+                events_kept = len(kept)
+                seen_external_ids = {event["external_id"] for event in kept}
+                now = datetime.now(timezone.utc)
+                speaker_names = {
+                    event["speaker_name"]
+                    for event in kept
+                    if event.get("speaker_name")
+                }
+
+                with get_session() as session:
+                    # Avoid Supabase's default low statement_timeout on bulk sync.
+                    if session.bind is not None and session.bind.dialect.name == "postgresql":
+                        session.execute(text("SET LOCAL statement_timeout = '120s'"))
+
+                    speaker_ids = self._ensure_speakers(session, speaker_names)
+                    session.commit()
+
+                    # Fresh timeout budget after the speaker commit.
+                    if session.bind is not None and session.bind.dialect.name == "postgresql":
+                        session.execute(text("SET LOCAL statement_timeout = '120s'"))
+
+                    external_ids = [event["external_id"] for event in kept]
+                    existing_by_id: dict[str, SpeakerEvent] = {}
+                    for offset in range(0, len(external_ids), EVENT_UPSERT_CHUNK_SIZE):
+                        chunk = external_ids[offset : offset + EVENT_UPSERT_CHUNK_SIZE]
+                        if not chunk:
+                            continue
+                        for row in (
+                            session.query(SpeakerEvent)
+                            .filter(SpeakerEvent.external_id.in_(chunk))
+                            .all()
+                        ):
+                            existing_by_id[row.external_id] = row
+
+                    for event in kept:
+                        speaker_name = event["speaker_name"]
+                        speaker_id = (
+                            speaker_ids.get(speaker_name) if speaker_name else None
+                        )
+                        existing = existing_by_id.get(event["external_id"])
+                        if existing:
+                            existing.speaker_id = speaker_id
+                            existing.speaker_name = speaker_name
+                            existing.title = event["title"]
+                            existing.event_type = event["event_type"]
+                            existing.scheduled_start = event["scheduled_start"]
+                            existing.scheduled_end = event["scheduled_end"]
+                            existing.location = event["location"]
+                            existing.description = event["description"]
+                            existing.url = event["url"]
+                            existing.source = event["source"]
+                            if existing.status == "cancelled":
+                                existing.status = "scheduled"
+                            existing.raw_payload = event["raw_payload"]
+                            existing.last_seen_at = now
+                            existing.updated_at = now
+                            updated += 1
+                        else:
+                            session.add(
+                                SpeakerEvent(
+                                    external_id=event["external_id"],
+                                    speaker_id=speaker_id,
+                                    speaker_name=speaker_name,
+                                    title=event["title"],
+                                    event_type=event["event_type"],
+                                    scheduled_start=event["scheduled_start"],
+                                    scheduled_end=event["scheduled_end"],
+                                    location=event["location"],
+                                    description=event["description"],
+                                    url=event["url"],
+                                    source=event["source"],
+                                    status="scheduled",
+                                    raw_payload=event["raw_payload"],
+                                    first_seen_at=now,
+                                    last_seen_at=now,
+                                )
+                            )
+                            inserted += 1
+
+                    future_events = (
+                        session.query(SpeakerEvent)
+                        .filter(
+                            SpeakerEvent.source == DEFAULT_SOURCE,
+                            SpeakerEvent.status == "scheduled",
+                            SpeakerEvent.scheduled_start >= now,
+                        )
+                        .all()
                     )
-                    .all()
-                )
-                for row in future_events:
-                    if row.external_id not in seen_external_ids:
-                        row.status = "cancelled"
-                        row.updated_at = now
-                        cancelled += 1
+                    for row in future_events:
+                        if row.external_id not in seen_external_ids:
+                            row.status = "cancelled"
+                            row.updated_at = now
+                            cancelled += 1
 
-                session.commit()
+                    session.commit()
 
             completed_at = datetime.now(timezone.utc)
             result = {
@@ -487,5 +633,7 @@ class FedCalendarFetcher:
                     error_message=str(exc),
                 )
             except Exception as audit_exc:
-                logger.warning("Failed to record speaker calendar sync audit: %s", audit_exc)
+                logger.warning(
+                    "Failed to record speaker calendar sync audit: %s", audit_exc
+                )
             return result
