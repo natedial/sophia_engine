@@ -57,10 +57,9 @@ async def compute(request: ComputeRequest) -> ComputeResponse:
     """Execute one or more computations on the provided data."""
     request_start = time.perf_counter()
     logger.info(
-        "POST /compute | data_points=%d | computation_count=%d | output=%s",
+        "POST /compute | data_points=%d | computation_count=%d",
         len(request.data),
         len(request.computations),
-        request.output,
     )
 
     # Validate request limits

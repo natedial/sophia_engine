@@ -71,3 +71,29 @@ def test_announced_auction_sync_hides_internal_error(monkeypatch) -> None:
 
     assert response.status_code == 502
     assert response.json()["detail"] == "Treasury auction sync failed"
+
+
+def test_announced_auction_sync_returns_only_safe_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        TreasuryFetcher,
+        "fetch_and_store_announced",
+        lambda self: {
+            "status": "success",
+            "records_fetched": 3,
+            "records_stored": 2,
+            "diagnostic": "internal connection details",
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/auctions/sync-announced",
+            headers={"X-Scrivener-API-Key": "test-scrivener-key"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "success",
+        "records_fetched": 3,
+        "records_stored": 2,
+    }

@@ -327,7 +327,11 @@ def sync_announced_auctions():
             status_code=502,
             detail="Treasury auction sync failed",
         )
-    return result
+    return {
+        "status": "success",
+        "records_fetched": int(result.get("records_fetched", 0)),
+        "records_stored": int(result.get("records_stored", 0)),
+    }
 
 
 @app.get("/auctions/summary", response_model=AuctionSummary)
