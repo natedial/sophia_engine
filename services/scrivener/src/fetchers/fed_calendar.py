@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Iterator
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -32,6 +33,13 @@ DEFAULT_SOURCE = "Federal Reserve Board"
 SPEAKER_CALENDAR_SYNC_LOCK_KEY = 418_034
 _speaker_calendar_sync_lock = Lock()
 EVENT_UPSERT_CHUNK_SIZE = 200
+
+
+def _safe_sync_error(exc: Exception) -> str:
+    """Describe a sync failure without returning URLs or database details."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__}:status={exc.response.status_code}"
+    return type(exc).__name__
 
 # Fed feed types we keep for communications calendars.
 KEEP_FEED_TYPES = frozenset(
@@ -228,8 +236,10 @@ def normalize_calendar_event(
     for key in ("link", "live"):
         candidate = raw.get(key)
         if isinstance(candidate, str) and candidate.strip():
-            url = candidate.strip()
-            break
+            parsed_url = urlparse(candidate.strip())
+            if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+                url = candidate.strip()
+                break
 
     return {
         "external_id": build_external_id(
@@ -453,7 +463,7 @@ class FedCalendarFetcher:
                     except Exception as audit_exc:
                         logger.warning(
                             "Failed to record speaker calendar sync audit: %s",
-                            audit_exc,
+                            type(audit_exc).__name__,
                         )
                     return result
 
@@ -584,7 +594,8 @@ class FedCalendarFetcher:
                 )
             except Exception as audit_exc:
                 logger.warning(
-                    "Failed to record speaker calendar sync audit: %s", audit_exc
+                    "Failed to record speaker calendar sync audit: %s",
+                    type(audit_exc).__name__,
                 )
             logger.info(
                 "Speaker calendar sync complete: fetched=%s kept=%s inserted=%s "
@@ -598,7 +609,8 @@ class FedCalendarFetcher:
             )
             return result
         except Exception as exc:
-            logger.exception("Speaker calendar sync failed: %s", exc)
+            safe_error = _safe_sync_error(exc)
+            logger.exception("Speaker calendar sync failed: %s", safe_error)
             completed_at = datetime.now(timezone.utc)
             result = {
                 "status": "error",
@@ -609,7 +621,7 @@ class FedCalendarFetcher:
                 "events_updated": updated,
                 "events_cancelled": cancelled,
                 "events_skipped": events_skipped,
-                "error_message": str(exc),
+                "error_message": safe_error,
             }
             try:
                 self._record_sync_run(
@@ -623,10 +635,11 @@ class FedCalendarFetcher:
                     events_updated=updated,
                     events_cancelled=cancelled,
                     events_skipped=events_skipped,
-                    error_message=str(exc),
+                    error_message=safe_error,
                 )
             except Exception as audit_exc:
                 logger.warning(
-                    "Failed to record speaker calendar sync audit: %s", audit_exc
+                    "Failed to record speaker calendar sync audit: %s",
+                    type(audit_exc).__name__,
                 )
             return result

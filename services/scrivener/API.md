@@ -575,6 +575,7 @@ Get a speaker calendar event by ID.
 ### POST /speaker-events/sync
 
 Sync Fed Board speaker calendar events from `calendar.json`.
+Requires `X-Scrivener-API-Key` matching the configured `SCRIVENER_API_KEY`.
 
 **Response:**
 ```json

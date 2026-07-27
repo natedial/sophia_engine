@@ -668,7 +668,11 @@ def get_speaker_event(event_id: int):
     return event
 
 
-@app.post("/speaker-events/sync", response_model=SpeakerEventSyncResult)
+@app.post(
+    "/speaker-events/sync",
+    response_model=SpeakerEventSyncResult,
+    dependencies=[Depends(require_write_api_key)],
+)
 def sync_speaker_events():
     """Sync Fed Board speaker calendar events from calendar.json."""
     from src.fetchers.fed_calendar import FedCalendarFetcher

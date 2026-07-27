@@ -36,3 +36,10 @@ def test_health_endpoint_remains_public() -> None:
         response = client.get("/health")
 
     assert response.status_code == 200
+
+
+def test_speaker_calendar_sync_requires_key() -> None:
+    with TestClient(app) as client:
+        response = client.post("/speaker-events/sync")
+
+    assert response.status_code == 401
