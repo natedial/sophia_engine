@@ -4,9 +4,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sophia}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - sophia_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,9 +23,10 @@ services:
       - |
         scrivener init-db && scrivener serve --host 0.0.0.0 --port 8000
     ports:
-      - "${SCRIVENER_PORT:-8000}:8000"
+      - "127.0.0.1:${SCRIVENER_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/sophia}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      SCRIVENER_API_KEY: ${SCRIVENER_API_KEY:?Set SCRIVENER_API_KEY in .env}
       FRED_API_KEY: ${FRED_API_KEY:-}
       BLS_API_KEY: ${BLS_API_KEY:-}
     depends_on:
@@ -42,7 +43,7 @@ services:
   sophia_arithmos:
     build: ../services/sophia_arithmos
     ports:
-      - "${ARITHMOS_PORT:-8001}:8001"
+      - "127.0.0.1:${ARITHMOS_PORT:-8001}:8001"
     healthcheck:
       test:
         - CMD-SHELL
@@ -54,7 +55,7 @@ services:
   sophia_kampe:
     build: ../services/sophia_kampe
     ports:
-      - "${KAMPE_PORT:-8002}:8002"
+      - "127.0.0.1:${KAMPE_PORT:-8002}:8002"
     environment:
       KAMPE_ARITHMOS__URL: http://sophia_arithmos:8001
     depends_on:
@@ -76,9 +77,9 @@ services:
       - |
         python -c "from sophia_canvas.db.models import Base; from sophia_canvas.db.connection import get_engine; Base.metadata.create_all(bind=get_engine())" && python -m sophia_canvas.main
     ports:
-      - "${CANVAS_PORT:-8003}:8003"
+      - "127.0.0.1:${CANVAS_PORT:-8003}:8003"
     environment:
-      CANVAS_DATABASE_URL: ${CANVAS_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/sophia}
+      CANVAS_DATABASE_URL: ${CANVAS_DATABASE_URL:?Set CANVAS_DATABASE_URL in .env}
       CANVAS_AUTH_ENABLED: ${CANVAS_AUTH_ENABLED:-false}
     depends_on:
       postgres:
@@ -94,7 +95,7 @@ services:
   sophia_dashboard:
     build: ../frontend/sophia-dashboard
     ports:
-      - "${DASHBOARD_PORT:-13000}:80"
+      - "127.0.0.1:${DASHBOARD_PORT:-13000}:80"
     depends_on:
       - sophia_canvas
       - sophia_gateway
@@ -112,7 +113,7 @@ services:
         THOLOS_PRELOAD_MODEL: ${THOLOS_PRELOAD_MODEL:-false}
         THOLOS_MODEL_NAME: ${THOLOS_MODEL_NAME:-all-MiniLM-L6-v2}
     ports:
-      - "${THOLOS_PORT:-8004}:8004"
+      - "127.0.0.1:${THOLOS_PORT:-8004}:8004"
     environment:
       THOLOS_DB_PATH: /corpus/chunks.sqlite
       THOLOS_NPZ_PATH: /corpus/embeddings.npz
@@ -137,9 +138,10 @@ services:
       context: ..
       dockerfile: agents/sophia_prima/Dockerfile
     ports:
-      - "${GATEWAY_PORT:-18080}:8080"
+      - "127.0.0.1:${GATEWAY_PORT:-18080}:8080"
     environment:
       SCRIVENER_BASE_URL: http://scrivener:8000
+      SCRIVENER_API_KEY: ${SCRIVENER_API_KEY:?Set SCRIVENER_API_KEY in .env}
       ARITHMOS_BASE_URL: http://sophia_arithmos:8001
       CANVAS_BASE_URL: http://sophia_canvas:8003
       THOLOS_BASE_URL: http://sophia_tholos:8004

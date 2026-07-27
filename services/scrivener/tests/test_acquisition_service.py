@@ -81,6 +81,7 @@ def test_acquisition_api_endpoints(monkeypatch) -> None:
     with TestClient(app) as client:
         resolve_response = client.post(
             "/ingestion/resolve",
+            headers={"X-Scrivener-API-Key": "test-scrivener-key"},
             json={"source": "FRED", "query": "real gdp", "max_candidates": 3},
         )
         assert resolve_response.status_code == 200
@@ -88,6 +89,7 @@ def test_acquisition_api_endpoints(monkeypatch) -> None:
 
         ingest_response = client.post(
             "/ingestion/series",
+            headers={"X-Scrivener-API-Key": "test-scrivener-key"},
             json={
                 "source": "FRED",
                 "query": "real gdp",

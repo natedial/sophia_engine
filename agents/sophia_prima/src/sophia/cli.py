@@ -193,6 +193,7 @@ async def setup_pylon(settings) -> tuple[Pylon, PreflightResult]:
     """Initialize Pylon gateway and run pre-flight checks."""
     config = PylonConfig(
         scrivener_url=settings.scrivener_base_url,
+        scrivener_api_key=settings.scrivener_api_key,
         arithmos_url=settings.arithmos_base_url,
         canvas_url=settings.canvas_base_url,
         tholos_url=settings.tholos_base_url,

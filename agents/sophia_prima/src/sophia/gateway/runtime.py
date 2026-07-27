@@ -830,6 +830,7 @@ class GatewayRuntime:
     def _build_pylon_config(self) -> PylonConfig:
         return PylonConfig(
             scrivener_url=self.settings.scrivener_base_url,
+            scrivener_api_key=self.settings.scrivener_api_key,
             arithmos_url=self.settings.arithmos_base_url,
             canvas_url=self.settings.canvas_base_url,
             tholos_url=self.settings.tholos_base_url,

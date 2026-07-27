@@ -15,6 +15,10 @@ COPY src /app/src
 COPY migrations /app/migrations
 
 RUN uv sync --frozen --no-dev
+RUN groupadd --system scrivener && useradd --system --gid scrivener --home-dir /app scrivener \
+    && chown -R scrivener:scrivener /app
+
+USER scrivener
 
 EXPOSE 8000
 

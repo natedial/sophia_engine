@@ -49,7 +49,11 @@ def test_release_sync_endpoint_returns_503_for_degraded_sync(monkeypatch) -> Non
     monkeypatch.setattr(fred_module, "FredFetcher", FakeFetcher)
 
     with TestClient(app) as client:
-        response = client.post("/releases/sync", params={"days_ahead": 90})
+        response = client.post(
+            "/releases/sync",
+            params={"days_ahead": 90},
+            headers={"X-Scrivener-API-Key": "test-scrivener-key"},
+        )
 
     assert response.status_code == 503
     payload = response.json()

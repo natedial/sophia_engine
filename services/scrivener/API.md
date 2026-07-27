@@ -575,6 +575,7 @@ Get a speaker calendar event by ID.
 ### POST /speaker-events/sync
 
 Sync Fed Board speaker calendar events from `calendar.json`.
+Requires `X-Scrivener-API-Key` matching the configured `SCRIVENER_API_KEY`.
 
 **Response:**
 ```json
@@ -812,6 +813,7 @@ Get upcoming release dates for a specific FRED release.
 ### POST /releases/sync
 
 Sync FRED releases and upcoming release dates from the FRED API.
+Requires `X-Scrivener-API-Key` matching the configured `SCRIVENER_API_KEY`.
 The response indicates whether the fetched snapshot was `complete` enough to reconcile destructively or whether Scrivener stayed in degraded, insert-only mode.
 Degraded syncs return HTTP `503` with the sync payload in the error detail.
 

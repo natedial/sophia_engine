@@ -139,7 +139,7 @@ def test_fetch_release_dates_marks_result_incomplete_when_pagination_breaks(monk
     assert result["complete"] is False
     assert result["fetched_count"] == 2
     assert result["expected_count"] == 3
-    assert result["degraded_reason"] == "request_failed:page 2 failed"
+    assert result["degraded_reason"] == "request_failed:RuntimeError"
 
 
 def test_fetch_release_dates_collects_all_release_windows(monkeypatch) -> None:

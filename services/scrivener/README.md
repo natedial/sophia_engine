@@ -159,6 +159,12 @@ The systemd unit reads both `/opt/scrivener/.env` and `/opt/scrivener/.monitor.e
 
 When running `scrivener serve`, the following endpoints are available:
 
+Set `SCRIVENER_API_KEY` to enable privileged operations. Requests to
+`POST /ingestion/resolve`, `POST /ingestion/series`, `POST /releases/sync`, and
+`POST /speaker-events/sync` must send the same value in the
+`X-Scrivener-API-Key` header. Those endpoints fail closed when no service key
+is configured.
+
 ### Series
 - `GET /series` - List all series
 - `GET /series/search?q=...` - Search series

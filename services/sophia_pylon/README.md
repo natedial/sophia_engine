@@ -44,6 +44,7 @@ from pylon import Pylon, PylonConfig
 # Initialize
 config = PylonConfig(
     scrivener_url="http://localhost:8000",
+    scrivener_api_key="your-scrivener-service-key",
     arithmos_url="http://localhost:8001",
     brave_api_key="your-brave-api-key",
 )

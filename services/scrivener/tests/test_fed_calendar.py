@@ -144,6 +144,11 @@ def test_normalize_calendar_event_parses_et_time_and_skips_invalid() -> None:
     assert normalize_calendar_event(_sample_events()[3], tz=TZ) is None  # Stat
     assert normalize_calendar_event(_sample_events()[4], tz=TZ) is None  # empty month
 
+    unsafe_url_event = dict(_sample_events()[0], live="javascript:alert(1)")
+    normalized = normalize_calendar_event(unsafe_url_event, tz=TZ)
+    assert normalized is not None
+    assert normalized["url"] is None
+
 
 def test_normalize_events_filters_and_dedupes() -> None:
     fetcher = _make_fetcher(None)
@@ -243,7 +248,7 @@ def test_sync_speaker_calendar_records_error(monkeypatch) -> None:
     result = fetcher.sync_speaker_calendar()
     assert result["ready"] is False
     assert result["status"] == "error"
-    assert "network down" in (result["error_message"] or "")
+    assert result["error_message"] == "RuntimeError"
 
     with session_scope() as session:
         audit = session.query(SpeakerEventSyncRun).one()
