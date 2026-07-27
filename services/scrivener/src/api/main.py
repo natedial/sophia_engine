@@ -312,13 +312,21 @@ def get_upcoming_auctions(
     return AuctionQuery.get_upcoming(security_type=security_type, limit=limit)
 
 
-@app.get("/auctions/sync-announced")
+@app.post(
+    "/auctions/sync-announced",
+    dependencies=[Depends(require_write_api_key)],
+)
 def sync_announced_auctions():
     """Fetch announced auctions from TreasuryDirect and store in database."""
     from src.fetchers.treasury import TreasuryFetcher
 
     fetcher = TreasuryFetcher()
     result = fetcher.fetch_and_store_announced()
+    if result.get("status") != "success":
+        raise HTTPException(
+            status_code=502,
+            detail="Treasury auction sync failed",
+        )
     return result
 
 

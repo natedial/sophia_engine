@@ -56,12 +56,10 @@ async def list_computation_types() -> ComputationTypesResponse:
 async def compute(request: ComputeRequest) -> ComputeResponse:
     """Execute one or more computations on the provided data."""
     request_start = time.perf_counter()
-    computation_types = [c.type for c in request.computations]
-
     logger.info(
-        "POST /compute | data_points=%d | computations=%s | output=%s",
+        "POST /compute | data_points=%d | computation_count=%d | output=%s",
         len(request.data),
-        computation_types,
+        len(request.computations),
         request.output,
     )
 
