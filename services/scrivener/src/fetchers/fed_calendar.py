@@ -440,22 +440,15 @@ class FedCalendarFetcher:
                         self._record_sync_run(
                             started_at=started_at,
                             completed_at=datetime.now(timezone.utc),
-                            **{
-                                k: v
-                                for k, v in result.items()
-                                if k
-                                in {
-                                    "status",
-                                    "ready",
-                                    "events_fetched",
-                                    "events_kept",
-                                    "events_inserted",
-                                    "events_updated",
-                                    "events_cancelled",
-                                    "events_skipped",
-                                    "error_message",
-                                }
-                            },
+                            status=result["status"],
+                            ready=result["ready"],
+                            events_fetched=0,
+                            events_kept=0,
+                            events_inserted=0,
+                            events_updated=0,
+                            events_cancelled=0,
+                            events_skipped=0,
+                            error_message=reason,
                         )
                     except Exception as audit_exc:
                         logger.warning(
