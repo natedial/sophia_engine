@@ -6,9 +6,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-
 from pylon.tools.base import ToolResult
+from sophia_forge.api.main import create_app as create_forge_app
+from sophia_forge.config import ForgeSettings
+from sophia_forge.core.runtime import ForgeRuntime
 
+import sophia.gateway.app as gateway_app_module
 from sophia.agent_profiles import AgentProfile
 from sophia.config import Settings
 from sophia.events import (
@@ -19,19 +22,15 @@ from sophia.events import (
     message_start,
     research_plan_created,
 )
-import sophia.gateway.app as gateway_app_module
 from sophia.gateway.agent_registry import load_agent_profiles
 from sophia.gateway.models import DeliveryArtifact, InboundMessage, OutboundMessage
-from sophia.gateway.runtime import GatewayRuntime
 from sophia.gateway.run_store import GatewayRunStore
+from sophia.gateway.runtime import GatewayRuntime
 from sophia.gateway.skills import GatewaySkillService
-from sophia_forge.api.main import create_app as create_forge_app
-from sophia_forge.config import ForgeSettings
-from sophia_forge.core.runtime import ForgeRuntime
-from sophia_forge_protocol.run_models import RunRequest, RunResult
-from sophia.self_editing import SelfEditChangeRequest, build_self_edit_service
 from sophia.llm.types import Message, Role, ToolSchema
+from sophia.self_editing import SelfEditChangeRequest, build_self_edit_service
 from sophia.subagents import SubagentOrchestrator, SubagentProfile
+from sophia_forge_protocol.run_models import RunRequest, RunResult
 
 
 class StreamingFakeAgent:
@@ -59,6 +58,33 @@ class StreamingFakeAgent:
             parent_run_id=parent_run_id,
             task_id=task_id,
         )
+
+
+@pytest.mark.parametrize(
+    ("value", "field_name"),
+    [
+        ("../admin", "run_id"),
+        ("run/../../admin", "run_id"),
+        ("%2e%2e%2fadmin", "artifact_id"),
+        ("https://example.com", "artifact_id"),
+    ],
+)
+def test_forge_path_segment_rejects_path_injection(
+    value: str,
+    field_name: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"invalid {field_name}"):
+        gateway_app_module._forge_path_segment(value, field_name=field_name)
+
+
+def test_forge_path_segment_accepts_generated_identifiers() -> None:
+    assert (
+        gateway_app_module._forge_path_segment(
+            "forge-run_2026.07-001",
+            field_name="run_id",
+        )
+        == "forge-run_2026.07-001"
+    )
 
 
 class AcquisitionFakePylon:

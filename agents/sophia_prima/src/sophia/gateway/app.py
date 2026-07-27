@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -17,13 +19,30 @@ from sophia import __version__
 from sophia.config import get_settings
 from sophia.events import AgentEvent
 from sophia.gateway.models import InboundMessage
-from sophia.gateway.runtime import GatewayRuntime
 from sophia.gateway.run_store import serialize_agent_event
-from sophia.presentation.models import PresentationRenderTheme
+from sophia.gateway.runtime import GatewayRuntime
 from sophia.gateway.skills import GatewaySkillService
+from sophia.presentation.models import PresentationRenderTheme
 from sophia.self_editing import SelfEditProposal, build_self_edit_service
 
 logger = logging.getLogger("sophia.gateway.app")
+
+_FORGE_IDENTIFIER_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$"
+)
+
+
+def _forge_path_segment(value: str, *, field_name: str) -> str:
+    """Validate and encode an identifier before including it in a Forge URL path."""
+    if not _FORGE_IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"invalid {field_name}")
+    return quote(value, safe="")
+
+
+def _forge_upstream_detail(exc: httpx.HTTPStatusError) -> tuple[int, str]:
+    """Return a safe client-facing Forge error without exposing upstream internals."""
+    status_code = exc.response.status_code if exc.response is not None else 502
+    return status_code, "Forge service request failed"
 
 
 class InboundMessageRequest(BaseModel):
@@ -414,11 +433,12 @@ def create_app() -> FastAPI:
                     contents[artifact_type] = json.loads(content.decode("utf-8"))
                 else:
                     contents[artifact_type] = content.decode("utf-8")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else 502
-            detail = exc.response.text if exc.response is not None else str(exc)
+            status_code, detail = _forge_upstream_detail(exc)
             raise HTTPException(status_code=status_code, detail=detail) from exc
         return {
             "run": run,
@@ -430,11 +450,12 @@ def create_app() -> FastAPI:
     async def publish_forge_promotion(run_id: str) -> dict[str, Any]:
         try:
             return await _publish_forge_promotion(settings=settings, run_id=run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else 502
-            detail = exc.response.text if exc.response is not None else str(exc)
+            status_code, detail = _forge_upstream_detail(exc)
             raise HTTPException(status_code=status_code, detail=detail) from exc
 
     @app.get("/v1/dashboard/forge/promotions/{run_id}/artifacts/{artifact_id}/content")
@@ -446,11 +467,12 @@ def create_app() -> FastAPI:
                 artifact_id=artifact_id,
             )
             artifacts = await _fetch_forge_artifacts(settings=settings, run_id=run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else 502
-            detail = exc.response.text if exc.response is not None else str(exc)
+            status_code, detail = _forge_upstream_detail(exc)
             raise HTTPException(status_code=status_code, detail=detail) from exc
 
         artifact = next(
@@ -819,7 +841,7 @@ async def _fetch_forge_runs(
             response = await client.get("/v1/runs", params={"limit": limit})
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"forge service unavailable: {exc}") from exc
+            raise RuntimeError("forge service unavailable") from exc
     payload = response.json()
     runs = payload.get("runs", [])
     return [item for item in runs if isinstance(item, dict)]
@@ -830,11 +852,12 @@ async def _fetch_forge_run(
     settings,
     run_id: str,
 ) -> dict[str, Any]:
+    safe_run_id = _forge_path_segment(run_id, field_name="run_id")
     async with httpx.AsyncClient(
         base_url=settings.forge_base_url.rstrip("/"),
         timeout=settings.forge_request_timeout_sec,
     ) as client:
-        response = await client.get(f"/v1/runs/{run_id}")
+        response = await client.get(f"/v1/runs/{safe_run_id}")
         response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
@@ -847,11 +870,12 @@ async def _fetch_forge_artifacts(
     settings,
     run_id: str,
 ) -> list[dict[str, Any]]:
+    safe_run_id = _forge_path_segment(run_id, field_name="run_id")
     async with httpx.AsyncClient(
         base_url=settings.forge_base_url.rstrip("/"),
         timeout=settings.forge_request_timeout_sec,
     ) as client:
-        response = await client.get(f"/v1/runs/{run_id}/artifacts")
+        response = await client.get(f"/v1/runs/{safe_run_id}/artifacts")
         response.raise_for_status()
     payload = response.json()
     artifacts = payload.get("artifacts", [])
@@ -864,11 +888,15 @@ async def _fetch_forge_artifact_content(
     run_id: str,
     artifact_id: str,
 ) -> bytes:
+    safe_run_id = _forge_path_segment(run_id, field_name="run_id")
+    safe_artifact_id = _forge_path_segment(artifact_id, field_name="artifact_id")
     async with httpx.AsyncClient(
         base_url=settings.forge_base_url.rstrip("/"),
         timeout=settings.forge_request_timeout_sec,
     ) as client:
-        response = await client.get(f"/v1/runs/{run_id}/artifacts/{artifact_id}/content")
+        response = await client.get(
+            f"/v1/runs/{safe_run_id}/artifacts/{safe_artifact_id}/content"
+        )
         response.raise_for_status()
     return response.content
 
@@ -878,17 +906,20 @@ async def _publish_forge_promotion(
     settings,
     run_id: str,
 ) -> dict[str, Any]:
+    safe_run_id = _forge_path_segment(run_id, field_name="run_id")
     async with httpx.AsyncClient(
         base_url=settings.forge_base_url.rstrip("/"),
         timeout=settings.forge_request_timeout_sec,
     ) as client:
         try:
-            response = await client.post(f"/v1/runs/{run_id}/promotion/publish")
+            response = await client.post(
+                f"/v1/runs/{safe_run_id}/promotion/publish"
+            )
             response.raise_for_status()
         except httpx.HTTPError as exc:
             if isinstance(exc, httpx.HTTPStatusError):
                 raise
-            raise RuntimeError(f"forge service unavailable: {exc}") from exc
+            raise RuntimeError("forge service unavailable") from exc
     payload = response.json()
     if not isinstance(payload, dict):
         raise RuntimeError("forge publish response was not a JSON object")
