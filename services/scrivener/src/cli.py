@@ -524,7 +524,7 @@ def upcoming(
 
 @app.command()
 def serve(
-    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to bind to"),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host to bind to"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to bind to"),
     reload: bool = typer.Option(False, "--reload", "-r", help="Enable auto-reload"),
 ):

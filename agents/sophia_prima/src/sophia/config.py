@@ -167,6 +167,10 @@ class Settings(BaseSettings):
         default="http://localhost:8000",
         description="Base URL for Scrivener data service",
     )
+    scrivener_api_key: str = Field(
+        default="",
+        description="Service key for privileged Scrivener operations",
+    )
     arithmos_base_url: str = Field(
         default="http://localhost:8001",
         description="Base URL for Arithmos compute service",

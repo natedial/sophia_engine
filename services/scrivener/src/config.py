@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     bls_api_key: str = ""
     alpha_vantage_api_key: str = ""
     nasdaq_data_link_api_key: str = ""
+    scrivener_api_key: str = ""
 
     # Scheduling
     daily_sweep_hour: int = Field(default=17, ge=0, le=23)

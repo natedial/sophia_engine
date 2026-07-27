@@ -29,6 +29,13 @@ RELEASE_CALENDAR_SYNC_LOCK_KEY = 418_033
 _release_calendar_sync_lock = Lock()
 
 
+def _safe_request_error(exc: Exception) -> str:
+    """Describe an upstream failure without leaking request URLs or query credentials."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__}:status={exc.response.status_code}"
+    return type(exc).__name__
+
+
 # Key FRED series for initial setup
 CORE_SERIES = {
     # GDP & Growth
@@ -404,12 +411,13 @@ class FredFetcher(BaseFetcher):
             except Exception as exc:
                 if not collected:
                     raise
-                incomplete_reason = f"request_failed:{exc}"
+                safe_error = _safe_request_error(exc)
+                incomplete_reason = f"request_failed:{safe_error}"
                 logger.warning(
                     "FRED pagination degraded for %s at offset=%s: %s",
                     endpoint,
                     offset,
-                    exc,
+                    safe_error,
                 )
                 break
 
@@ -524,16 +532,17 @@ class FredFetcher(BaseFetcher):
                 )
             except Exception as exc:
                 complete = False
+                safe_error = _safe_request_error(exc)
                 if degraded_reason is None:
                     degraded_reason = (
                         "request_failed:"
-                        f"{current_start.isoformat()}:{current_end.isoformat()}:{exc}"
+                        f"{current_start.isoformat()}:{current_end.isoformat()}:{safe_error}"
                     )
                 logger.warning(
                     "FRED release-date window failed for %s to %s: %s",
                     current_start,
                     current_end,
-                    exc,
+                    safe_error,
                 )
                 break
 
@@ -963,7 +972,7 @@ class FredFetcher(BaseFetcher):
                 }
                 return result
         except Exception as exc:
-            error_message = str(exc)
+            error_message = _safe_request_error(exc)
             result = {
                 "status": "error",
                 "ready": False,
@@ -988,4 +997,7 @@ class FredFetcher(BaseFetcher):
                         lock_acquired=lock_acquired,
                     )
                 except Exception as audit_exc:
-                    logger.warning("Failed to record release calendar sync audit: %s", audit_exc)
+                    logger.warning(
+                        "Failed to record release calendar sync audit: %s",
+                        type(audit_exc).__name__,
+                    )

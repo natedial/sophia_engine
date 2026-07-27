@@ -30,6 +30,7 @@ class PylonConfig:
     """Configuration for Pylon gateway."""
 
     scrivener_url: str = "http://localhost:8000"
+    scrivener_api_key: str = ""
     arithmos_url: str = "http://localhost:8001"
     canvas_url: str = "http://localhost:8003"
     tholos_url: str = "http://localhost:8004"
@@ -190,7 +191,15 @@ class Pylon:
         self.config = config or PylonConfig()
 
         # Initialize clients
-        self._scrivener_client = ScrivenerClient(base_url=self.config.scrivener_url)
+        scrivener_headers = (
+            {"X-Scrivener-API-Key": self.config.scrivener_api_key}
+            if self.config.scrivener_api_key
+            else None
+        )
+        self._scrivener_client = ScrivenerClient(
+            base_url=self.config.scrivener_url,
+            headers=scrivener_headers,
+        )
         self._arithmos_client = ArithmosClient(base_url=self.config.arithmos_url)
         self._canvas_client = CanvasClient(base_url=self.config.canvas_url)
         self._tholos_client = TholosClient(base_url=self.config.tholos_url)

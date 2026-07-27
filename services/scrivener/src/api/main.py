@@ -3,10 +3,11 @@
 from datetime import date, timedelta
 from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from src.acquisition import AcquisitionService
+from src.api.security import require_write_api_key
 from src.query import AuctionQuery, ForecastQuery, SeriesQuery
 
 app = FastAPI(
@@ -257,7 +258,7 @@ def get_multiple_latest(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/ingestion/resolve")
+@app.post("/ingestion/resolve", dependencies=[Depends(require_write_api_key)])
 def resolve_external_series(payload: SeriesAcquisitionRequest):
     """Resolve external source candidates for a query or explicit series id."""
     try:
@@ -268,7 +269,7 @@ def resolve_external_series(payload: SeriesAcquisitionRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/ingestion/series")
+@app.post("/ingestion/series", dependencies=[Depends(require_write_api_key)])
 def ingest_series(payload: SeriesAcquisitionRequest):
     """Fetch a series from an approved source and write it into Scrivener."""
     try:
@@ -914,7 +915,11 @@ def get_release_dates(
     ]
 
 
-@app.post("/releases/sync", response_model=ReleaseSyncResult)
+@app.post(
+    "/releases/sync",
+    response_model=ReleaseSyncResult,
+    dependencies=[Depends(require_write_api_key)],
+)
 def sync_releases(
     days_ahead: Annotated[int, Query(ge=1, le=365)] = 90,
 ):
