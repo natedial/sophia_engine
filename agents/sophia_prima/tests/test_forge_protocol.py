@@ -1,0 +1,401 @@
+from __future__ import annotations
+
+from sophia_forge_protocol.artifact_models import RunArtifact
+from sophia_forge_protocol.event_models import RunEvent
+from sophia_forge_protocol.run_models import (
+    CapabilityAdded,
+    ExecutionPolicy,
+    FailureClassCount,
+    CapabilityHandoff,
+    CapabilityHandoffUpdate,
+    ControlMessage,
+    PromotionPolicy,
+    RunCheckpoint,
+    RetentionSummary,
+    RunMetricsSummary,
+    RunRequest,
+    RunResult,
+    RunSession,
+    RunSessionCreateRequest,
+    SessionResumeRequest,
+    SessionControlRequest,
+    RetryPolicy,
+    StructuredRunOutput,
+    TaskTypeMetrics,
+    run_output_schema,
+)
+from sophia_forge_protocol.verification_models import VerificationPolicy, VerificationResult
+
+
+def test_run_result_defaults_success_from_status() -> None:
+    result = RunResult(status="completed", summary="Implemented the missing scaffold.")
+    assert result.success is True
+
+
+def test_run_result_allows_explicit_success_override() -> None:
+    result = RunResult(
+        success=False,
+        status="completed",
+        summary="Backend reported completed output but process failed.",
+        error="non-zero exit",
+    )
+    assert result.success is False
+
+
+def test_run_output_schema_tracks_required_structured_fields() -> None:
+    schema = run_output_schema()
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == [
+        "status",
+        "summary",
+        "changed_files",
+        "verification",
+        "follow_ups",
+    ]
+
+
+def test_structured_run_output_accepts_backend_payload_shape() -> None:
+    output = StructuredRunOutput.model_validate(
+        {
+            "status": "completed",
+            "summary": "Implemented the requested pipeline hook.",
+            "changed_files": ["services/foo/pipeline.py"],
+            "verification": ["pytest services/foo/tests/test_pipeline.py"],
+            "follow_ups": [],
+            "capabilities_added": [
+                {
+                    "capability_type": "tool",
+                    "tool_name": "get_market_ohlcv",
+                    "service_name": "scrivener",
+                    "registration_path": "services/sophia_pylon/src/pylon/core.py",
+                    "description": "Get OHLCV market data.",
+                    "when_to_use": "Use when the user asks for historical OHLCV data.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {"type": "string"},
+                        },
+                        "required": ["symbol"],
+                    },
+                    "usage_example": {"symbol": "ZN"},
+                }
+            ],
+        }
+    )
+    assert output.changed_files == ("services/foo/pipeline.py",)
+    assert output.capabilities_added[0].tool_name == "get_market_ohlcv"
+    assert output.capabilities_added[0].usage_example == {"symbol": "ZN"}
+
+
+def test_run_request_uses_verification_policy_defaults() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+        verification_policy=VerificationPolicy(),
+    )
+    assert request.verification_policy.mode == "auto"
+
+
+def test_run_request_uses_retry_policy_defaults() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+    )
+    assert request.retry_policy == RetryPolicy()
+    assert request.promotion_policy == PromotionPolicy()
+    assert request.session_id is None
+    assert request.long_running_mode is False
+
+
+def test_run_session_serializes_membership() -> None:
+    session = RunSession(
+        session_id="session_001",
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        status="active",
+        latest_run_id="forge_run_001",
+        run_ids=("forge_run_001",),
+        created_at="2026-03-21T12:00:00Z",
+        updated_at="2026-03-21T12:00:00Z",
+    )
+    assert session.run_ids == ("forge_run_001",)
+
+
+def test_run_session_create_request_defaults_metadata() -> None:
+    request = RunSessionCreateRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+    )
+    assert request.metadata == {}
+
+
+def test_session_control_request_defaults_metadata() -> None:
+    request = SessionControlRequest(
+        control_type="steer",
+        message="Prioritize the failing tests first.",
+    )
+    assert request.metadata == {}
+
+
+def test_control_message_serializes_status() -> None:
+    control = ControlMessage(
+        control_id="control_001",
+        session_id="session_001",
+        run_id="forge_run_001",
+        control_type="follow_up",
+        status="applied",
+        message="Add docs after the code lands.",
+        created_at="2026-03-21T12:00:00Z",
+        applied_at="2026-03-21T12:01:00Z",
+    )
+    assert control.status == "applied"
+
+
+def test_run_checkpoint_serializes_summary() -> None:
+    checkpoint = RunCheckpoint(
+        checkpoint_id="checkpoint_001",
+        session_id="session_001",
+        run_id="forge_run_001",
+        summary_artifact_id="forge_run_001_checkpoint_summary_900",
+        summary="Implemented the requested capability.",
+        created_at="2026-03-21T12:00:00Z",
+    )
+    assert checkpoint.summary_artifact_id.endswith("900")
+
+
+def test_session_resume_request_defaults_metadata() -> None:
+    request = SessionResumeRequest()
+    assert request.metadata == {}
+
+
+def test_run_request_syncs_top_level_roots_into_execution_policy() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        readable_roots=("/tmp/read",),
+        writable_roots=("/tmp/write",),
+        backend="codex",
+        timeout_sec=30.0,
+    )
+    assert request.execution_policy.readable_roots == ("/tmp/read",)
+    assert request.execution_policy.writable_roots == ("/tmp/write",)
+
+
+def test_run_request_syncs_execution_policy_roots_back_to_top_level() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+        execution_policy=ExecutionPolicy(
+            readable_roots=("/tmp/read",),
+            writable_roots=("/tmp/write",),
+        ),
+    )
+    assert request.readable_roots == ("/tmp/read",)
+    assert request.writable_roots == ("/tmp/write",)
+
+
+def test_execution_policy_supports_environment_and_secret_controls() -> None:
+    policy = ExecutionPolicy(
+        environment_strategy="ephemeral",
+        environment_cleanup_policy="cleanup_on_success",
+        secret_env_vars=("OPENAI_API_KEY",),
+    )
+
+    assert policy.environment_strategy == "ephemeral"
+    assert policy.environment_cleanup_policy == "cleanup_on_success"
+    assert policy.secret_env_vars == ("OPENAI_API_KEY",)
+
+
+def test_run_request_supports_promotion_policy() -> None:
+    request = RunRequest(
+        client_name="sophia_prima",
+        task="Implement the missing scheduler hook.",
+        workspace_root="/tmp/workspace",
+        backend="codex",
+        timeout_sec=30.0,
+        promotion_policy=PromotionPolicy(
+            mode="draft_pr",
+            base_branch="main",
+            branch_name="forge/scheduler-hook",
+            commit_message="Add scheduler hook",
+            pr_title="Add scheduler hook",
+            draft=True,
+            require_verification_pass=True,
+            require_review=True,
+        ),
+    )
+
+    assert request.promotion_policy.mode == "draft_pr"
+    assert request.promotion_policy.base_branch == "main"
+    assert request.promotion_policy.require_review is True
+
+
+def test_capability_handoff_update_serializes_entries() -> None:
+    update = CapabilityHandoffUpdate(
+        entries=(
+            CapabilityHandoff(
+                tool_name="get_market_ohlcv",
+                service_name="scrivener",
+                registration_path="services/sophia_pylon/src/pylon/core.py",
+                usage_example={"symbol": "ZN"},
+            ),
+        )
+    )
+
+    assert update.entries[0].tool_name == "get_market_ohlcv"
+
+
+def test_run_result_keeps_capabilities_added() -> None:
+    result = RunResult(
+        run_id="forge_run_001",
+        status="completed",
+        summary="Added a new tool.",
+        artifact_ids=("task_spec_001", "run_result_001"),
+        capabilities_added=(
+            CapabilityAdded(
+                tool_name="get_market_ohlcv",
+                service_name="scrivener",
+                registration_path="services/sophia_pylon/src/pylon/core.py",
+                description="Get OHLCV market data.",
+                when_to_use="Use when the user asks for historical OHLCV data.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"symbol": {"type": "string"}},
+                    "required": ["symbol"],
+                },
+                usage_example={"symbol": "ZN"},
+            ),
+        ),
+    )
+    assert result.capabilities_added[0].tool_name == "get_market_ohlcv"
+    assert result.artifact_ids == ("task_spec_001", "run_result_001")
+
+
+def test_capability_added_accepts_legacy_string_usage_example() -> None:
+    capability = CapabilityAdded(
+        tool_name="get_market_ohlcv",
+        service_name="scrivener",
+        registration_path="services/sophia_pylon/src/pylon/core.py",
+        usage_example='{"symbol":"ZN"}',
+    )
+
+    assert capability.usage_example == {"symbol": "ZN"}
+
+
+def test_run_event_uses_canonical_event_taxonomy() -> None:
+    event = RunEvent(
+        run_id="forge_run_001",
+        sequence=1,
+        event_type="run_started",
+        timestamp="2026-03-16T20:00:00Z",
+        payload={"backend": "codex"},
+    )
+
+    assert event.event_type == "run_started"
+
+
+def test_run_event_supports_promotion_events() -> None:
+    event = RunEvent(
+        run_id="forge_run_001",
+        sequence=9,
+        event_type="promotion_finished",
+        timestamp="2026-03-22T12:00:00Z",
+        payload={"mode": "patch", "status": "created"},
+    )
+
+    assert event.event_type == "promotion_finished"
+
+
+def test_run_artifact_supports_payload_metadata() -> None:
+    artifact = RunArtifact(
+        artifact_id="summary_001",
+        run_id="forge_run_001",
+        artifact_type="summary",
+        content_type="application/json",
+        path=".sophia/forge/runs/forge_run_001/summary.json",
+        payload={"status": "completed"},
+        created_at="2026-03-16T20:00:00Z",
+    )
+
+    assert artifact.payload == {"status": "completed"}
+
+
+def test_run_artifact_supports_patch_artifacts() -> None:
+    artifact = RunArtifact(
+        artifact_id="patch_001",
+        run_id="forge_run_001",
+        artifact_type="patch",
+        content_type="text/x-diff",
+        path=".sophia/forge/runs/forge_run_001/promotion/changes.patch",
+        payload={"mode": "patch"},
+        created_at="2026-03-22T12:00:00Z",
+    )
+
+    assert artifact.artifact_type == "patch"
+
+
+def test_run_artifact_supports_pr_request_artifacts() -> None:
+    artifact = RunArtifact(
+        artifact_id="pr_request_001",
+        run_id="forge_run_001",
+        artifact_type="pr_request",
+        content_type="application/json",
+        path=".sophia/forge/runs/forge_run_001/promotion/pull_request.json",
+        payload={"mode": "draft_pr"},
+        created_at="2026-03-22T12:00:00Z",
+    )
+
+    assert artifact.artifact_type == "pr_request"
+
+
+def test_verification_result_serializes_structured_outcome() -> None:
+    result = VerificationResult(
+        name="targeted_pytest",
+        status="passed",
+        command="uv run pytest services/foo/tests/test_pipeline.py",
+        required=True,
+        details="1 passed",
+    )
+
+    assert result.status == "passed"
+
+
+def test_run_metrics_summary_serializes_operational_counts() -> None:
+    summary = RunMetricsSummary(
+        total_runs=3,
+        completed_runs=2,
+        failed_runs=1,
+        success_rate=2 / 3,
+        retry_rate=1 / 3,
+        runs_with_verification=1,
+        verification_pass_rate=1.0,
+        common_failure_classes=(FailureClassCount(failure_class="backend_launch_failed", count=1),),
+        task_types=(TaskTypeMetrics(task_type="capability", total_runs=3, completed_runs=2),),
+    )
+
+    assert summary.common_failure_classes[0].failure_class == "backend_launch_failed"
+    assert summary.task_types[0].task_type == "capability"
+
+
+def test_retention_summary_serializes_cleanup_state() -> None:
+    summary = RetentionSummary(
+        dry_run=True,
+        workspaces={"category": "workspaces", "eligible_count": 1, "eligible_paths": ("/tmp/w1",)},
+        environments={"category": "environments"},
+        run_artifacts={"category": "run_artifacts"},
+        eval_artifacts={"category": "eval_artifacts"},
+    )
+
+    assert summary.workspaces.eligible_count == 1
+    assert summary.workspaces.eligible_paths == ("/tmp/w1",)
