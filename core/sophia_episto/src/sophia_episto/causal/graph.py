@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,10 +13,13 @@ from sophia_episto.causal.edge import CausalEdge, expert_priors
 
 
 class CausalGraph:
-    """Probabilistic causal graph with Bayesian inference.
+    """Heuristic belief graph with weighted-average edge blending.
 
-    Manages nodes, causal edges, and posterior distributions.
-    Supports belief propagation and do-calculus operations.
+    This is NOT a Pearl-style structural causal model. It manages nodes and
+    directed edges with per-edge `probability`, `confidence`, and `strength`,
+    and supports heuristic forward propagation. Use `CausalInference` for
+    path-analysis queries. Pearl-style refutation is applied only to flagship
+    edges via the evaluation harness — see `sophia_episto.causal.evaluation`.
     """
 
     def __init__(
@@ -25,7 +30,7 @@ class CausalGraph:
         self.nodes: set[str] = nodes or set()
         self.edges: list[CausalEdge] = edges or []
         self._edge_map: dict[tuple[str, str], CausalEdge] = {}
-        self._updated_at: datetime | None = None
+        self.updated_at: datetime | None = None
 
         for edge in self.edges:
             self._add_edge_to_map(edge)
@@ -46,7 +51,7 @@ class CausalGraph:
         key = (edge.source, edge.target)
         if key in self._edge_map:
             existing = self._edge_map[key]
-            edge.probability = self._bayesian_update(
+            edge.probability = self._blend_prior_with_evidence(
                 existing.probability,
                 edge.strength,
                 edge.confidence,
@@ -58,7 +63,7 @@ class CausalGraph:
             self.edges.append(edge)
 
         self._edge_map[key] = edge
-        self._updated_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
     def remove_edge(self, source: str, target: str) -> bool:
         """Remove an edge from the graph."""
@@ -66,7 +71,7 @@ class CausalGraph:
         if key in self._edge_map:
             self.edges = [e for e in self.edges if (e.source, e.target) != key]
             del self._edge_map[key]
-            self._updated_at = datetime.now(UTC)
+            self.updated_at = datetime.now(UTC)
             return True
         return False
 
@@ -90,16 +95,17 @@ class CausalGraph:
         """Get child nodes (effects) of a node."""
         return list({e.target for e in self.edges if e.source == node_id})
 
-    def _bayesian_update(
+    def _blend_prior_with_evidence(
         self,
         prior: float,
         likelihood: float,
         confidence: float,
     ) -> float:
-        """Update prior probability with likelihood using weighted averaging.
+        """Weighted average of an expert prior and empirical evidence.
 
-        This is a simplified Bayesian update that combines expert prior
-        confidence with empirical likelihood.
+        Not a Bayesian posterior — this is a confidence-weighted convex
+        combination. High confidence keeps the prior; low confidence lets
+        evidence dominate.
         """
         if confidence <= 0:
             return likelihood
@@ -110,19 +116,43 @@ class CausalGraph:
         return weight * prior + (1 - weight) * likelihood
 
     def update_posteriors(self) -> None:
-        """Update all edge posteriors using Bayesian inference."""
+        """Re-blend every edge against its latest strength/confidence."""
         for edge in self.edges:
-            edge.probability = self._bayesian_update(
+            edge.probability = self._blend_prior_with_evidence(
                 edge.probability,
                 edge.strength,
                 edge.confidence,
             )
-        self._updated_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
-    def do_calculus(self, node: str, value: float) -> dict[str, float]:
-        """Perform do-calculus intervention: do(node = value).
+    def forward_propagate(
+        self,
+        intervention: dict[str, float],
+        observation: dict[str, float],
+    ) -> dict[str, float]:
+        """Heuristic forward propagation from a set-value on intervention nodes.
 
-        Returns the estimated effects on downstream nodes.
+        This is NOT Pearl do-calculus. No graph surgery, no confounder
+        adjustment. It overlays `intervention` on `observation` and
+        path-multiplies edge probabilities to reach descendants.
+        """
+        result = observation.copy()
+        result.update(intervention)
+
+        for node, value in intervention.items():
+            effects = self.propagate_influence(node, value)
+            for affected_node, affected_value in effects.items():
+                if affected_node in intervention:
+                    continue
+                result[affected_node] = affected_value
+
+        return result
+
+    def propagate_influence(self, node: str, value: float) -> dict[str, float]:
+        """Propagate influence from a node through outgoing edges.
+
+        Path-multiplies edge probabilities to reach descendants. Heuristic,
+        not causal identification.
         """
         effects: dict[str, float] = {node: value}
         visited: set[str] = {node}
@@ -142,38 +172,12 @@ class CausalGraph:
 
         return effects
 
-    def counterfactual(
-        self,
-        intervention: dict[str, float],
-        observation: dict[str, float],
-    ) -> dict[str, float]:
-        """Compute counterfactual: what would happen if intervention occurred.
-
-        Args:
-            intervention: Nodes to intervene on (do(node) = value)
-            observation: Current observed values
-
-        Returns:
-            Estimated counterfactual values
-        """
-        result = observation.copy()
-        result.update(intervention)
-
-        for node, value in intervention.items():
-            effects = self.do_calculus(node, value)
-            for affected_node, affected_value in effects.items():
-                if affected_node in intervention:
-                    continue
-                result[affected_node] = affected_value
-
-        return result
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize graph to dictionary."""
         return {
             "nodes": sorted(list(self.nodes)),
             "edges": [edge.to_dict() for edge in self.edges],
-            "updated_at": self._updated_at.isoformat() if self._updated_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
     @classmethod
@@ -183,7 +187,7 @@ class CausalGraph:
         edges = [CausalEdge.from_dict(e) for e in data.get("edges", [])]
         graph = cls(nodes=nodes, edges=edges)
         if data.get("updated_at"):
-            graph._updated_at = datetime.fromisoformat(data["updated_at"])
+            graph.updated_at = datetime.fromisoformat(data["updated_at"])
         return graph
 
 
@@ -207,14 +211,10 @@ def create_initial_graph() -> CausalGraph:
 
 
 def save_graph(graph: CausalGraph, path: Path | None = None) -> Path:
-    """Save graph to JSON file.
+    """Save graph to JSON file using atomic write-then-rename.
 
-    Args:
-        graph: The causal graph to save
-        path: Optional custom path, defaults to data/causal_graph/graph.json
-
-    Returns:
-        Path where the graph was saved
+    A crash mid-write leaves the original file intact: new content lands in
+    a sibling temp file first and `os.replace` swaps it in atomically.
     """
     if path is None:
         path = (
@@ -223,21 +223,27 @@ def save_graph(graph: CausalGraph, path: Path | None = None) -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(path, "w") as f:
-        json.dump(graph.to_dict(), f, indent=2)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(graph.to_dict(), f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
     return path
 
 
 def load_graph(path: Path | None = None) -> CausalGraph | None:
-    """Load graph from JSON file.
-
-    Args:
-        path: Optional custom path, defaults to data/causal_graph/graph.json
-
-    Returns:
-        Loaded graph or None if file doesn't exist
-    """
+    """Load graph from JSON file."""
     if path is None:
         path = (
             Path(__file__).resolve().parents[5] / "data" / "causal_graph" / "graph.json"

@@ -24,12 +24,12 @@ class CausalQueryResult:
 
     source: str
     target: str
-    direct_effect: float
-    total_effect: float
+    direct_strength: float
+    path_influence: float
     confidence: float
     explanation: str
     n_mediators: int
-    n_confounders: int
+    n_shared_parents: int
 
 
 class EpistoPlannerAdapter:
@@ -181,12 +181,12 @@ class EpistoPlannerAdapter:
             return CausalQueryResult(
                 source=result["source"],
                 target=result["target"],
-                direct_effect=result["direct_effect"],
-                total_effect=result["total_effect"],
+                direct_strength=result["direct_strength"],
+                path_influence=result["path_influence"],
                 confidence=result["confidence"],
                 explanation=result["explanation"],
                 n_mediators=result["n_mediators"],
-                n_confounders=result["n_confounders"],
+                n_shared_parents=result["n_shared_parents"],
             )
         except Exception:
             return None

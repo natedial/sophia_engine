@@ -168,7 +168,15 @@ class GrangerCausality(Computation):
                 continue
 
         is_causal = best_pvalue < alpha
-        strength = max(0.0, 1.0 - best_pvalue) if best_pvalue < alpha else 0.0
+        # Strength = incremental predictive contribution, bounded [0,1].
+        # Only reported when the effect is statistically detected; else 0.
+        strength = 0.0
+        if is_causal and len(y) > best_lag + 5:
+            y_t = y[best_lag:]
+            y_lag = y[:-best_lag]
+            if y_lag.std(ddof=1) > 0 and y_t.std(ddof=1) > 0:
+                r = float(np.corrcoef(y_lag, y_t)[0, 1])
+                strength = max(0.0, min(1.0, r * r))
 
         return ComputationResult(
             series=None,
@@ -227,7 +235,16 @@ class GrangerCausality(Computation):
             p_value = 1.0
             is_causal = False
 
-        strength = 1.0 - p_value if p_value < alpha else 0.0
+        # Strength = partial R², the incremental variance in y explained by
+        # lagged x beyond y's own lags. Derived from the Granger F-stat:
+        #   partial_R² = F·df_num / (F·df_num + df_denom)
+        # Bounded [0, 1). Reported only when the effect is detected; else 0.
+        strength = 0.0
+        if is_causal and test_statistic > 0:
+            df_num = lag_order
+            df_denom = max(n_obs - 2 * lag_order - 1, 1)
+            f_df = test_statistic * df_num
+            strength = float(f_df / (f_df + df_denom))
 
         return ComputationResult(
             series=None,
@@ -267,158 +284,3 @@ def _f_cdf(f_stat: float, dfn: int, dfd: int) -> float:
         return x if x <= 1 else 1.0
 
 
-@registry.register
-class CausalStrength(Computation):
-    """Estimate causal strength between two series using multiple methods."""
-
-    name = "causal_strength"
-    description = "Estimate causal strength from source to target using multiple methods"
-    params = {
-        "source_series": ParamSpec(
-            type="string",
-            description="ID of the source series",
-            required=True,
-        ),
-        "target_series": ParamSpec(
-            type="string",
-            description="ID of the target series",
-            required=True,
-        ),
-        "method": ParamSpec(
-            type="string",
-            description="Method to use: 'regression', 'correlation', 'transfer_entropy'",
-            default="regression",
-            choices=["regression", "correlation", "transfer_entropy"],
-        ),
-    }
-    precision_type = PrecisionType.DEFAULT
-
-    def compute(
-        self,
-        data: list[Observation],
-        params: dict[str, Any],
-        output: OutputMode,
-    ) -> ComputationResult:
-        """Compute causal strength estimate."""
-        source_id = params["source_series"]
-        target_id = params["target_series"]
-        method = params.get("method", "regression")
-
-        if len(data) < 10:
-            raise ValueError(f"Insufficient data: need at least 10 observations")
-
-        values = np.array([obs.value for obs in data])
-
-        if method == "correlation":
-            return self._correlation_method(values, source_id, target_id)
-        elif method == "transfer_entropy":
-            return self._transfer_entropy_method(values, source_id, target_id)
-        else:
-            return self._regression_method(values, source_id, target_id)
-
-    def _regression_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Use regression to estimate causal strength."""
-        lag = 1
-        y = values[lag:]
-        X = values[:-lag].reshape(-1, 1)
-        X = np.column_stack([np.ones(len(X)), X])
-
-        try:
-            coeffs, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
-            y_pred = X @ coeffs
-            ss_res = np.sum((y - y_pred) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-            strength = abs(coeffs[1]) if len(coeffs) > 1 else 0.0
-            p_value = 0.05
-        except Exception:
-            r_squared = 0.0
-            strength = 0.0
-            p_value = 1.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "regression",
-                "strength": float(strength),
-                "r_squared": float(r_squared),
-                "coefficient": float(coeffs[1]) if len(coeffs) > 1 else 0.0,
-                "p_value": float(p_value),
-            },
-            metadata={"computation": "causal_strength"},
-        )
-
-    def _correlation_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Use correlation of lagged values."""
-        lag = 1
-        source = values[:-lag]
-        target = values[lag:]
-
-        correlation = np.corrcoef(source, target)[0, 1]
-        strength = abs(correlation) if not np.isnan(correlation) else 0.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "correlation",
-                "strength": float(strength),
-                "correlation": float(correlation) if not np.isnan(correlation) else 0.0,
-            },
-            metadata={"computation": "causal_strength", "lag": lag},
-        )
-
-    def _transfer_entropy_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Estimate transfer entropy (simplified version)."""
-        lag = 1
-        future = values[lag:]
-        present = values[:-lag]
-
-        bins = 5
-        hist_ystar = np.histogram2d(future, present, bins=bins)[0]
-        hist_y = np.histogram(present, bins=bins)[0]
-
-        p_y = hist_y / hist_y.sum()
-        p_ystar_y = hist_ystar / hist_ystar.sum(axis=1, keepdims=True)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            te = 0.0
-            for i in range(bins):
-                for j in range(bins):
-                    if p_ystar_y[i, j] > 0 and p_y[j] > 0:
-                        te += p_ystar_y[i, j] * np.log(p_ystar_y[i, j] / p_y[j])
-
-        strength = max(0.0, te) if not np.isnan(te) else 0.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "transfer_entropy",
-                "strength": float(strength),
-                "transfer_entropy": float(te) if not np.isnan(te) else 0.0,
-            },
-            metadata={"computation": "causal_strength", "lag": lag, "bins": bins},
-        )
