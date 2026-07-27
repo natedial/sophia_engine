@@ -1,7 +1,7 @@
 """Tests for Fed Board speaker calendar normalization and sync."""
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,11 @@ from src.fetchers.fed_calendar import (
     map_event_type,
     normalize_calendar_event,
 )
+
+
+@contextmanager
+def _always_acquire_lock():
+    yield {"acquired": True, "reason": None}
 
 
 TZ = ZoneInfo("America/New_York")
@@ -152,6 +157,11 @@ def test_normalize_events_filters_and_dedupes() -> None:
 def test_sync_speaker_calendar_upserts_and_cancels_missing(monkeypatch) -> None:
     session_scope = _make_session_scope()
     monkeypatch.setattr(fed_calendar_module, "get_session", session_scope)
+    monkeypatch.setattr(
+        FedCalendarFetcher,
+        "_acquire_sync_lock",
+        lambda self: _always_acquire_lock(),
+    )
 
     fetcher = _make_fetcher(session_scope)
     monkeypatch.setattr(fetcher, "fetch_calendar_events", lambda: _sample_events())
@@ -218,6 +228,11 @@ def test_sync_speaker_calendar_upserts_and_cancels_missing(monkeypatch) -> None:
 def test_sync_speaker_calendar_records_error(monkeypatch) -> None:
     session_scope = _make_session_scope()
     monkeypatch.setattr(fed_calendar_module, "get_session", session_scope)
+    monkeypatch.setattr(
+        FedCalendarFetcher,
+        "_acquire_sync_lock",
+        lambda self: _always_acquire_lock(),
+    )
 
     fetcher = _make_fetcher(session_scope)
 
@@ -234,3 +249,23 @@ def test_sync_speaker_calendar_records_error(monkeypatch) -> None:
         audit = session.query(SpeakerEventSyncRun).one()
         assert audit.ready is False
         assert audit.status == "error"
+
+
+def test_sync_speaker_calendar_skips_when_lock_held(monkeypatch) -> None:
+    session_scope = _make_session_scope()
+    monkeypatch.setattr(fed_calendar_module, "get_session", session_scope)
+
+    @contextmanager
+    def busy_lock():
+        yield {"acquired": False, "reason": "postgres_advisory_lock_not_acquired"}
+
+    monkeypatch.setattr(
+        FedCalendarFetcher,
+        "_acquire_sync_lock",
+        lambda self: busy_lock(),
+    )
+    fetcher = _make_fetcher(session_scope)
+    result = fetcher.sync_speaker_calendar()
+    assert result["status"] == "skipped"
+    assert result["ready"] is True
+    assert result["error_message"] == "postgres_advisory_lock_not_acquired"
