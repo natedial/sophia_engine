@@ -20,7 +20,7 @@
     "vega-lite": "^6.4.3",
     "vega-embed": "^7.1.0",
     "zustand": "^4.5.5",
-    "axios": "^1.7.7"
+    "axios": "^1.20.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
