@@ -1,4 +1,9 @@
-"""Causal world model service for scheduled execution and Sophia Prima integration."""
+"""Legacy heuristic graph batch. Not the research-case protocol.
+
+Causal cases, tests, and assessments go through `sophia_episto.research`.
+Prima must not call this service. Keep the module only for graph.json
+import/export until that path is retired.
+"""
 
 from __future__ import annotations
 

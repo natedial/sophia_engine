@@ -37,7 +37,6 @@ class EpistoPlannerAdapter:
 
     def __init__(self, pylon=None) -> None:
         self._pylon = pylon
-        self._causal_service = None
         try:
             from sophia_episto.capability import SearchBackedCapabilityResolver
             from sophia_episto.intake import build_question_brief
@@ -62,14 +61,8 @@ class EpistoPlannerAdapter:
 
     @property
     def causal_available(self) -> bool:
-        if self._causal_service is None:
-            try:
-                from sophia_episto.causal_service import get_causal_service
-
-                self._causal_service = get_causal_service()
-            except ImportError:
-                return False
-        return True
+        """Prima is not the causal runtime. Use `sophia-research`."""
+        return False
 
     async def plan(self, question: str) -> EpistoPlanContext | None:
         if not self.available or self._planner is None or self._build_question_brief is None:
@@ -172,44 +165,16 @@ class EpistoPlannerAdapter:
         )
 
     async def query_causal(self, source: str, target: str) -> CausalQueryResult | None:
-        """Query causal effect from source to target."""
-        if not self.causal_available:
-            return None
-
-        try:
-            result = self._causal_service.query(source, target)
-            return CausalQueryResult(
-                source=result["source"],
-                target=result["target"],
-                direct_strength=result["direct_strength"],
-                path_influence=result["path_influence"],
-                confidence=result["confidence"],
-                explanation=result["explanation"],
-                n_mediators=result["n_mediators"],
-                n_shared_parents=result["n_shared_parents"],
-            )
-        except Exception:
-            return None
+        """Causal answers are not served through Prima."""
+        return None
 
     async def explain_causal(self, node: str) -> dict | None:
-        """Explain causal relationships for a node."""
-        if not self.causal_available:
-            return None
-
-        try:
-            return self._causal_service.explain(node)
-        except Exception:
-            return None
+        """Causal explanations are not served through Prima."""
+        return None
 
     async def get_causal_graph_state(self) -> dict | None:
-        """Get current causal graph state for dashboard."""
-        if not self.causal_available:
-            return None
-
-        try:
-            return self._causal_service.get_graph_state()
-        except Exception:
-            return None
+        """Graph state is not served through Prima or the dashboard."""
+        return None
 
     async def _search_local_series(self, query: str) -> list[dict]:
         if self._pylon is None:
