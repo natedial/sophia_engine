@@ -1,0 +1,62 @@
+{
+  "documents": [
+    {
+      "source": "Goldman Sachs",
+      "publisher": "Goldman Sachs",
+      "research_id": 11,
+      "document_hash": "doc-gs-cpi-2026-09",
+      "source_date": "2026-09-15",
+      "payload_json": {
+        "analysis_version": "argmap-v1",
+        "captured_at": "2026-09-16T12:00:00Z",
+        "argument_map": [
+          {
+            "claim": "The CPI surprise raises the expected policy path through the reaction function.",
+            "claim_key": "claim:inflation_surprise:policy_path:up",
+            "claim_type": "causal",
+            "rationale": "A stable reaction function maps upside inflation surprises into a higher funds-rate path.",
+            "support_strength": "evidenced",
+            "conditions": ["conditional on a stable reaction function"],
+            "evidence": [
+              {
+                "text": "Core CPI printed 0.4pp above the Bloomberg median.",
+                "kind": "quote",
+                "ref_key": "page 3, paragraph 2",
+                "referent_key": "release:cpi-2026-09"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source": "Citi",
+      "publisher": "Citi",
+      "research_id": 19,
+      "document_hash": "doc-citi-cpi-2026-09",
+      "source_date": "2026-09-15",
+      "payload_json": {
+        "analysis_version": "argmap-v1",
+        "captured_at": "2026-09-16T14:00:00Z",
+        "argument_map": [
+          {
+            "claim": "The same CPI release is a growth shock that should lower the expected policy path.",
+            "claim_key": "claim:inflation_surprise:policy_path:down",
+            "claim_type": "causal",
+            "rationale": "Demand softening can dominate the reaction-function channel.",
+            "support_strength": "evidenced",
+            "conditions": ["conditional on weaker growth"],
+            "evidence": [
+              {
+                "text": "The same release is read as a growth shock, not a policy shock.",
+                "kind": "quote",
+                "ref_key": "page 1, paragraph 2",
+                "referent_key": "release:cpi-2026-09"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
