@@ -51,11 +51,17 @@ class CausalGraph:
         key = (edge.source, edge.target)
         if key in self._edge_map:
             existing = self._edge_map[key]
-            edge.probability = self._blend_prior_with_evidence(
-                existing.probability,
-                edge.strength,
-                edge.confidence,
+            has_new_evidence = (
+                edge.strength != 0 and edge.strength != existing.strength
             )
+            if has_new_evidence:
+                edge.probability = self._blend_prior_with_evidence(
+                    existing.probability,
+                    edge.strength,
+                    edge.confidence,
+                )
+            else:
+                edge.probability = existing.probability
             self.edges = [
                 e if (e.source, e.target) != key else edge for e in self.edges
             ]
@@ -116,13 +122,13 @@ class CausalGraph:
         return weight * prior + (1 - weight) * likelihood
 
     def update_posteriors(self) -> None:
-        """Re-blend every edge against its latest strength/confidence."""
-        for edge in self.edges:
-            edge.probability = self._blend_prior_with_evidence(
-                edge.probability,
-                edge.strength,
-                edge.confidence,
-            )
+        """No-op without new evidence.
+
+        The previous implementation re-blended each edge's current probability
+        toward its strength on every call. Empty updates decayed expert priors
+        (0.7 → 0.56 → 0.448). Canonical assessment updates now go through the
+        research ledger; this method must not invent evidence.
+        """
         self.updated_at = datetime.now(UTC)
 
     def forward_propagate(
