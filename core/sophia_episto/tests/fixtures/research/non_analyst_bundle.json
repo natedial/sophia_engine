@@ -1,0 +1,14 @@
+{
+  "namespace": "generic.notes",
+  "occurrence_id": "memo-2026-09-15:p2",
+  "document_revision": "memo-2026-09-15",
+  "snapshot_hash": "sha256:generic-memo-1",
+  "author": "Independent researcher",
+  "publisher": "Working paper",
+  "published_at": "2026-09-15T00:00:00Z",
+  "captured_at": "2026-09-16T12:00:00Z",
+  "locations": ["page 2, paragraph 1"],
+  "excerpt": "An inflation surprise can raise the expected policy path through the reaction function.",
+  "independence_group": "release:cpi-2026-09",
+  "qualifications": ["conditional on a stable reaction function"]
+}

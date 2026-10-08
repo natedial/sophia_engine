@@ -11,7 +11,11 @@ dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.11.0",
     "statsmodels>=0.14.0",
+    "pydantic>=2.5.0",
 ]
+
+[project.scripts]
+sophia-research = "sophia_episto.research.cli:main"
 
 [project.optional-dependencies]
 dev = [

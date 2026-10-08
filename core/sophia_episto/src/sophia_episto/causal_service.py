@@ -21,12 +21,15 @@ logger = logging.getLogger("sophia_episto.causal_service")
 
 
 class CausalWorldModelService:
-    """Service for managing the causal world model.
+    """Service for managing the heuristic causal belief graph.
 
     Provides:
-    - Scheduled batch execution (daily at 5 PM ET)
+    - Scheduled batch discovery (Granger + FDR) and belief blending
     - Integration point for Sophia Prima causal queries
-    - Hypothesis generation and testing
+    - Hypothesis generation from discovered edges
+    - Pearl-lite evaluation harness (bootstrap stability + DoWhy refutation on
+      flagship edges) that surfaces per-edge green/red signals without making
+      Pearl-identification claims across the full graph.
     """
 
     def __init__(
@@ -133,12 +136,12 @@ class CausalWorldModelService:
         return {
             "source": source,
             "target": target,
-            "direct_effect": result.result.get("direct_effect", 0),
-            "total_effect": result.result.get("total_effect", 0),
+            "direct_strength": result.result.get("direct_strength", 0),
+            "path_influence": result.result.get("path_influence", 0),
             "confidence": result.confidence,
             "explanation": result.explanation,
             "n_mediators": result.result.get("n_mediators", 0),
-            "n_confounders": result.result.get("n_confounders", 0),
+            "n_shared_parents": result.result.get("n_shared_parents", 0),
         }
 
     def explain(self, node: str) -> dict[str, Any]:
@@ -180,8 +183,8 @@ class CausalWorldModelService:
             ],
             "node_count": len(self.graph.nodes),
             "edge_count": len(self.graph.edges),
-            "updated_at": self.graph._updated_at.isoformat()
-            if self.graph._updated_at
+            "updated_at": self.graph.updated_at.isoformat()
+            if self.graph.updated_at
             else None,
         }
 

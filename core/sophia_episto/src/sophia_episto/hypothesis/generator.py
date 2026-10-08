@@ -52,11 +52,12 @@ class Hypothesis:
         self.updated_at = datetime.now(UTC)
 
     def mark_validated(self, evidence: dict[str, Any]) -> None:
-        """Mark hypothesis as validated with evidence."""
-        self.status = HypothesisStatus.VALIDATED
-        self.evidence.update(evidence)
-        self.confidence = 1.0
-        self.updated_at = datetime.now(UTC)
+        """Rejected shortcut. Validated status is engine-owned."""
+        raise RuntimeError(
+            "Validated status is engine-owned. Submit cited evidence via "
+            "propose_assessment; empty or persuasive evidence cannot grant "
+            "causal status or confidence=1.0."
+        )
 
     def mark_rejected(self, reason: str) -> None:
         """Mark hypothesis as rejected."""
