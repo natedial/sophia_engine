@@ -26,6 +26,7 @@ from sophia_episto.research.contracts import (
     MechanismHypothesis,
     QuestionType,
     ResearchCase,
+    ResultStatus,
     Sign,
     SourceClaimRef,
     Stance,
@@ -47,9 +48,14 @@ class ResearchEngine:
         db_path: Path,
         *,
         runner: MethodRunner | None = None,
+        oikonomia_db: Path | None = None,
     ) -> None:
         self.ledger = ResearchLedger(db_path)
-        self.runner = runner or default_runner()
+        self.runner = runner or default_runner(
+            Path(oikonomia_db) if oikonomia_db else Path(db_path).with_name(
+                Path(db_path).stem + "-oikonomia.sqlite"
+            )
+        )
 
     def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -248,10 +254,39 @@ class ResearchEngine:
         self._require_actor(payload)
         case, idempotency_key, replay = self._mutation_prelude(payload)
         if replay is not None:
+            queued = replay.get("result") or {}
+            if str(queued.get("status")) in {
+                ResultStatus.QUEUED.value,
+                ResultStatus.RUNNING.value,
+            }:
+                return self._resume_test(
+                    case,
+                    idempotency_key,
+                    EmpiricalResult.model_validate(queued),
+                    payload,
+                    allow_running_resume=True,
+                )
             return replay
 
         method = str(payload.get("method") or GRANGER_METHOD)
         question_type = QuestionType(payload.get("question_type") or QuestionType.PREDICTIVE)
+        if question_type in {
+            QuestionType.INTERVENTION,
+            QuestionType.COUNTERFACTUAL,
+            QuestionType.IDENTIFIED_CAUSAL,
+        }:
+            raise ProtocolError(
+                ProtocolErrorCode.UNSUPPORTED_QUESTION,
+                "No intervention or counterfactual answer is available",
+                details={
+                    "method": method,
+                    "question_type": question_type.value,
+                    "missing": [
+                        "identified_causal_model",
+                        "intervention_mechanism",
+                    ],
+                },
+            )
         snapshot = InputSnapshot.model_validate(payload.get("input") or {})
         hypothesis_id = payload.get("hypothesis_id")
         if hypothesis_id and self.ledger.get_hypothesis(str(hypothesis_id)) is None:
@@ -269,9 +304,17 @@ class ResearchEngine:
                 details={"method": method},
             )
 
-        fingerprint = _run_fingerprint(method, snapshot, hypothesis_id)
+        fingerprint = _run_fingerprint(method, snapshot, hypothesis_id, case.case_id)
         existing = self.ledger.get_result_by_fingerprint(fingerprint)
         if existing is not None:
+            if existing.status in {ResultStatus.QUEUED, ResultStatus.RUNNING}:
+                return self._resume_test(
+                    case,
+                    idempotency_key,
+                    existing,
+                    payload,
+                    allow_running_resume=False,
+                )
             response = {
                 "case_id": case.case_id,
                 "revision": case.revision,
@@ -285,19 +328,155 @@ class ResearchEngine:
             return response
 
         run_id = f"run-{uuid4().hex[:12]}"
-        result = self.runner.run(
+        queued = EmpiricalResult(
             run_id=run_id,
             case_id=case.case_id,
             hypothesis_id=str(hypothesis_id) if hypothesis_id else None,
             fingerprint=fingerprint,
             method=method,
-            question_type=question_type,
-            snapshot=snapshot,
+            method_version="pending",
+            question_type=question_type
+            if question_type
+            in {QuestionType.PREDICTIVE, QuestionType.ASSOCIATION}
+            else QuestionType.PREDICTIVE,
+            estimand="pending",
+            status=ResultStatus.QUEUED,
+            input_snapshot=snapshot,
+            assumptions=["execution_not_started"],
+            scope_limitations=["pending_run"],
+            identification_resolved=False,
         )
-        return self.ledger.transact_result(
+        queued_response = self.ledger.transact_queued_result(
             case,
             idempotency_key=idempotency_key,
-            result=result,
+            result=queued,
+        )
+        stored = EmpiricalResult.model_validate(queued_response["result"])
+        case = self.ledger.require_case(case.case_id)
+        return self._execute_queued_test(
+            case,
+            idempotency_key,
+            stored,
+            method=method,
+            question_type=question_type,
+            snapshot=snapshot,
+            hypothesis_id=str(hypothesis_id) if hypothesis_id else None,
+        )
+
+    def _resume_test(
+        self,
+        case: ResearchCase,
+        idempotency_key: str,
+        queued: EmpiricalResult,
+        payload: dict[str, Any],
+        *,
+        allow_running_resume: bool,
+    ) -> dict[str, Any]:
+        method = queued.method or str(payload.get("method") or GRANGER_METHOD)
+        question_type = queued.question_type
+        snapshot = queued.input_snapshot
+        hypothesis_id = queued.hypothesis_id
+        case = self.ledger.require_case(case.case_id)
+        return self._execute_queued_test(
+            case,
+            idempotency_key,
+            queued,
+            method=method,
+            question_type=question_type,
+            snapshot=snapshot,
+            hypothesis_id=hypothesis_id,
+            allow_running_resume=allow_running_resume,
+        )
+
+    def _result_response(
+        self,
+        case: ResearchCase,
+        result: EmpiricalResult,
+        *,
+        replayed: bool = False,
+        pending: bool = False,
+    ) -> dict[str, Any]:
+        response = {
+            "case_id": case.case_id,
+            "revision": case.revision,
+            "result": result.model_dump(mode="json"),
+        }
+        if replayed:
+            response["replayed"] = True
+        if pending:
+            response["pending"] = True
+        return response
+
+    def _execute_queued_test(
+        self,
+        case: ResearchCase,
+        idempotency_key: str,
+        queued: EmpiricalResult,
+        *,
+        method: str,
+        question_type: QuestionType,
+        snapshot: InputSnapshot,
+        hypothesis_id: str | None,
+        allow_running_resume: bool = False,
+    ) -> dict[str, Any]:
+        latest = self.ledger.get_result(queued.run_id) or queued
+        if latest.status in {
+            ResultStatus.SUCCEEDED,
+            ResultStatus.FAILED,
+            ResultStatus.UNAVAILABLE,
+        }:
+            return self._result_response(case, latest, replayed=True)
+
+        queued = latest
+        if queued.status == ResultStatus.QUEUED:
+            claimed = self.ledger.claim_queued_run(queued)
+            if not claimed:
+                latest = self.ledger.get_result(queued.run_id)
+                if latest is None:
+                    raise ProtocolError(
+                        ProtocolErrorCode.NOT_FOUND, "Queued run disappeared"
+                    )
+                if latest.status in {
+                    ResultStatus.SUCCEEDED,
+                    ResultStatus.FAILED,
+                    ResultStatus.UNAVAILABLE,
+                }:
+                    return self._result_response(case, latest, replayed=True)
+                return self._result_response(case, latest, pending=True)
+        elif queued.status == ResultStatus.RUNNING:
+            if not allow_running_resume:
+                return self._result_response(case, queued, pending=True)
+        else:
+            return self._result_response(case, queued, pending=True)
+
+        case = self.ledger.require_case(case.case_id)
+        try:
+            result = self.runner.run(
+                run_id=queued.run_id,
+                case_id=case.case_id,
+                hypothesis_id=hypothesis_id,
+                fingerprint=queued.fingerprint,
+                method=method,
+                question_type=question_type,
+                snapshot=snapshot,
+            )
+        except ProtocolError as exc:
+            failed = queued.model_copy(
+                update={
+                    "status": ResultStatus.UNAVAILABLE
+                    if exc.code == ProtocolErrorCode.METHOD_UNAVAILABLE
+                    else ResultStatus.FAILED,
+                    "failures": [exc.message],
+                    "method_version": queued.method_version,
+                }
+            )
+            if exc.code == ProtocolErrorCode.UNSUPPORTED_QUESTION:
+                raise
+            return self.ledger.complete_result(
+                case, idempotency_key=idempotency_key, result=failed
+            )
+        return self.ledger.complete_result(
+            case, idempotency_key=idempotency_key, result=result
         )
 
     def get_run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -442,7 +621,11 @@ class ResearchEngine:
                 for item in proposals
             ],
             "open_questions": case.unresolved_questions,
-            "pending_runs": [],
+            "pending_runs": [
+                item.model_dump(mode="json")
+                for item in results
+                if item.status in {ResultStatus.QUEUED, ResultStatus.RUNNING}
+            ],
             "as_of_vintage": as_of_vintage,
         }
 
@@ -522,10 +705,14 @@ def _contribution_id(claim: SourceClaimRef) -> str:
 
 
 def _run_fingerprint(
-    method: str, snapshot: InputSnapshot, hypothesis_id: str | None
+    method: str,
+    snapshot: InputSnapshot,
+    hypothesis_id: str | None,
+    case_id: str,
 ) -> str:
     payload = {
         "method": method,
+        "case_id": case_id,
         "hypothesis_id": hypothesis_id,
         "snapshot": snapshot.model_dump(mode="json"),
     }

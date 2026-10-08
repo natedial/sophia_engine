@@ -60,6 +60,8 @@ class QuestionType(str, Enum):
 
 
 class ResultStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     UNAVAILABLE = "unavailable"

@@ -15,6 +15,7 @@ from typing import Any
 from sophia_episto.research.contracts import (
     AgentProposal,
     EmpiricalResult,
+    ResultStatus,
     EvidenceAssessment,
     HypothesisAssessment,
     MechanismHypothesis,
@@ -32,8 +33,10 @@ class ResearchLedger:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
@@ -401,7 +404,7 @@ class ResearchLedger:
             )
             return response
 
-    def transact_result(
+    def transact_queued_result(
         self,
         case: ResearchCase,
         *,
@@ -409,19 +412,52 @@ class ResearchLedger:
         result: EmpiricalResult,
     ) -> dict[str, Any]:
         with self._lock, self._connect() as conn:
+            existing = conn.execute(
+                "SELECT payload_json FROM results WHERE fingerprint = ?",
+                (result.fingerprint,),
+            ).fetchone()
+            if existing is not None:
+                loaded = EmpiricalResult.model_validate_json(existing["payload_json"])
+                response = {
+                    "case_id": case.case_id,
+                    "revision": case.revision,
+                    "result": loaded.model_dump(mode="json"),
+                    "replayed": True,
+                }
+                self.put_idempotent(
+                    conn, case.case_id, idempotency_key, "request_test", response
+                )
+                return response
             case = self._bump(conn, case)
-            conn.execute(
-                "INSERT INTO results "
-                "(run_id, case_id, fingerprint, vintage, payload_json) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    result.run_id,
-                    result.case_id,
-                    result.fingerprint,
-                    result.input_snapshot.vintage,
-                    result.model_dump_json(),
-                ),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO results "
+                    "(run_id, case_id, fingerprint, vintage, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        result.run_id,
+                        result.case_id,
+                        result.fingerprint,
+                        result.input_snapshot.vintage,
+                        result.model_dump_json(),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                row = conn.execute(
+                    "SELECT payload_json FROM results WHERE fingerprint = ?",
+                    (result.fingerprint,),
+                ).fetchone()
+                loaded = EmpiricalResult.model_validate_json(row["payload_json"])
+                response = {
+                    "case_id": case.case_id,
+                    "revision": case.revision,
+                    "result": loaded.model_dump(mode="json"),
+                    "replayed": True,
+                }
+                self.put_idempotent(
+                    conn, case.case_id, idempotency_key, "request_test", response
+                )
+                return response
             response = {
                 "case_id": case.case_id,
                 "revision": case.revision,
@@ -431,6 +467,75 @@ class ResearchLedger:
                 conn, case.case_id, idempotency_key, "request_test", response
             )
             return response
+
+    def claim_queued_run(self, result: EmpiricalResult) -> bool:
+        """Atomically move a queued run to running. False if another client claimed it."""
+        running = result.model_copy(update={"status": ResultStatus.RUNNING})
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM results WHERE run_id = ?",
+                (result.run_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            current = EmpiricalResult.model_validate_json(row["payload_json"])
+            if current.status != ResultStatus.QUEUED:
+                return False
+            conn.execute(
+                "UPDATE results SET payload_json = ? WHERE run_id = ?",
+                (running.model_dump_json(), result.run_id),
+            )
+            return True
+
+    def complete_result(
+        self,
+        case: ResearchCase,
+        *,
+        idempotency_key: str,
+        result: EmpiricalResult,
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as conn:
+            case = self._bump(conn, case)
+            conn.execute(
+                "UPDATE results SET payload_json = ?, vintage = ? "
+                "WHERE run_id = ? AND case_id = ?",
+                (
+                    result.model_dump_json(),
+                    result.input_snapshot.vintage,
+                    result.run_id,
+                    result.case_id,
+                ),
+            )
+            response = {
+                "case_id": case.case_id,
+                "revision": case.revision,
+                "result": result.model_dump(mode="json"),
+            }
+            conn.execute(
+                "INSERT INTO idempotency "
+                "(case_id, idempotency_key, operation, response_json) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(case_id, idempotency_key) DO UPDATE SET "
+                "response_json = excluded.response_json",
+                (
+                    case.case_id,
+                    idempotency_key,
+                    "request_test",
+                    json.dumps(response),
+                ),
+            )
+            return response
+
+    def transact_result(
+        self,
+        case: ResearchCase,
+        *,
+        idempotency_key: str,
+        result: EmpiricalResult,
+    ) -> dict[str, Any]:
+        return self.transact_queued_result(
+            case, idempotency_key=idempotency_key, result=result
+        )
 
     def transact_assessment(
         self,

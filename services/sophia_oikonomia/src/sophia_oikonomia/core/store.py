@@ -28,8 +28,10 @@ class OikonomiaStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -70,6 +72,17 @@ class OikonomiaStore:
                     payload_json TEXT NOT NULL
                 );
                 """
+            )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(oikonomia_runs)").fetchall()
+            }
+            if "fingerprint" not in columns:
+                conn.execute("ALTER TABLE oikonomia_runs ADD COLUMN fingerprint TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_oikonomia_runs_fingerprint "
+                "ON oikonomia_runs(fingerprint) "
+                "WHERE fingerprint IS NOT NULL AND fingerprint != ''"
             )
 
     def reset(self) -> None:
@@ -172,23 +185,62 @@ class OikonomiaStore:
         return reviews[-1] if reviews else None
 
     def save_run(self, run: ModelRun) -> ModelRun:
+        payload = json.dumps(run.model_dump(mode="json"), sort_keys=True)
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO oikonomia_runs (
-                    run_id, model_id, status, created_at, completed_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run.id,
-                    run.model_id,
-                    run.status.value,
-                    run.created_at.isoformat(),
-                    run.completed_at.isoformat() if run.completed_at else None,
-                    json.dumps(run.model_dump(mode="json"), sort_keys=True),
-                ),
-            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO oikonomia_runs (
+                        run_id, model_id, status, created_at, completed_at,
+                        fingerprint, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        model_id = excluded.model_id,
+                        status = excluded.status,
+                        created_at = excluded.created_at,
+                        completed_at = excluded.completed_at,
+                        fingerprint = excluded.fingerprint,
+                        payload_json = excluded.payload_json
+                    """,
+                    (
+                        run.id,
+                        run.model_id,
+                        run.status.value,
+                        run.created_at.isoformat(),
+                        run.completed_at.isoformat() if run.completed_at else None,
+                        run.fingerprint,
+                        payload,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                row = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM oikonomia_runs
+                    WHERE fingerprint = ?
+                    """,
+                    (run.fingerprint or "",),
+                ).fetchone()
+                if row is None:
+                    raise
+                return ModelRun.model_validate(json.loads(row["payload_json"]))
         return run
+
+    def get_run_by_fingerprint(self, fingerprint: str) -> ModelRun | None:
+        if not fingerprint:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM oikonomia_runs
+                WHERE fingerprint = ?
+                """,
+                (fingerprint,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ModelRun.model_validate(json.loads(row["payload_json"]))
 
     def get_run(self, run_id: str) -> ModelRun | None:
         with self._connect() as conn:

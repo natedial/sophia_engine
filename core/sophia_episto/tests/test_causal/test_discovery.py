@@ -1,7 +1,10 @@
 """Tests for CausalDiscovery."""
 from __future__ import annotations
 
-import numpy as np
+import pytest
+
+numpy = pytest.importorskip("numpy")
+np = numpy
 
 from sophia_episto.causal.discovery import CausalDiscovery
 
