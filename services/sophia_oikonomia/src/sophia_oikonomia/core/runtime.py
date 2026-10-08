@@ -113,10 +113,16 @@ class OikonomiaRuntime:
         model_id: str,
         trigger: ModelTrigger,
         requested_by: str = "system",
+        fingerprint: str | None = None,
     ) -> ModelRun:
         definition = self.store.get_model(model_id)
         if definition is None:
             raise ValueError(f"Unknown model: {model_id}")
+
+        if fingerprint:
+            existing = self.store.get_run_by_fingerprint(fingerprint)
+            if existing is not None:
+                return existing
 
         snapshot = self._build_snapshot(definition, trigger)
 
@@ -125,6 +131,7 @@ class OikonomiaRuntime:
             model_id=model_id,
             trigger=trigger,
             input_snapshot=snapshot,
+            fingerprint=fingerprint,
             requested_by=requested_by,
         )
         return self.store.save_run(run)
@@ -199,10 +206,16 @@ class OikonomiaRuntime:
         return self.execute_run(run.id)
 
     def execute_run(self, run_id: str) -> ModelRun:
-        """Execute an existing run through its registered adapter."""
+        """Execute an existing run through its registered adapter.
+
+        Completed runs are returned as-is so retries after disconnect do not
+        duplicate work. QUEUED and RUNNING (interrupted) runs execute again.
+        """
         run = self.store.get_run(run_id)
         if run is None:
             raise ValueError(f"Unknown run: {run_id}")
+        if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.PUBLISHED}:
+            return run
 
         definition = self.store.get_model(run.model_id)
         if definition is None:

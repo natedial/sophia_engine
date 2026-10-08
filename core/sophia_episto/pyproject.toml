@@ -8,9 +8,6 @@ version = "0.1.0"
 description = "Economic planning, world-model, and research playbook substrate for Sophia"
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.24.0",
-    "scipy>=1.11.0",
-    "statsmodels>=0.14.0",
     "pydantic>=2.5.0",
 ]
 
@@ -18,6 +15,11 @@ dependencies = [
 sophia-research = "sophia_episto.research.cli:main"
 
 [project.optional-dependencies]
+legacy-causal = [
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "statsmodels>=0.14.0",
+]
 dev = [
     "pytest>=8.0.0",
 ]

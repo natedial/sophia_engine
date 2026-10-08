@@ -34,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--db", required=True, help="SQLite ledger path")
     parser.add_argument(
+        "--oikonomia-db",
+        help="Oikonomia SQLite path for test coordination (default: sibling of --db)",
+    )
+    parser.add_argument(
         "--payload",
         help="JSON payload file. Defaults to stdin for operations that need one.",
     )
@@ -41,7 +45,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     payload = _read_payload(args.payload, args.operation)
-    engine = ResearchEngine(Path(args.db))
+    engine = ResearchEngine(
+        Path(args.db),
+        oikonomia_db=Path(args.oikonomia_db) if args.oikonomia_db else None,
+    )
     try:
         if args.operation == "import_legacy_graph":
             result = import_legacy_graph(

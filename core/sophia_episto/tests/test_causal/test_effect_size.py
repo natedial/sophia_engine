@@ -1,8 +1,10 @@
 """Tests for effect-size estimators."""
 from __future__ import annotations
 
-import numpy as np
 import pytest
+
+numpy = pytest.importorskip("numpy")
+np = numpy
 
 from sophia_episto.causal.effect_size import (
     partial_r_squared,

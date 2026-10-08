@@ -1,7 +1,12 @@
-"""Injected method runners. Slice A executes Granger in-process via Arithmos."""
+"""Injected method runners.
+
+Default production coordination is Oikonomia. In-process Arithmos remains a
+test/fallback implementation and is not the CLI default.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from sophia_episto.research.contracts import (
@@ -209,10 +214,14 @@ class InProcessArithmosRunner:
             )
 
 
-def default_runner() -> MethodRunner:
-    if _arithmos_importable():
-        return InProcessArithmosRunner()
-    return UnavailableRunner()
+def default_runner(oikonomia_db: Path | None = None) -> MethodRunner:
+    try:
+        from sophia_episto.research.oikonomia_runner import OikonomiaMethodRunner
+
+        db_path = oikonomia_db or Path(".sophia/oikonomia/hypothesis-tests.db")
+        return OikonomiaMethodRunner(db_path)
+    except ImportError:
+        return UnavailableRunner()
 
 
 def _arithmos_importable() -> bool:

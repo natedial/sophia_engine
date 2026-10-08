@@ -247,6 +247,7 @@ class ModelRun(BaseModel):
     status: RunStatus = RunStatus.QUEUED
     trigger: ModelTrigger
     input_snapshot: InputSnapshotRef
+    fingerprint: str | None = None
     requested_by: str = "system"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
