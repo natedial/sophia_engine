@@ -3,7 +3,7 @@ ENV_FILE := infra/.env
 ENV_EXAMPLE := infra/.env.example
 COMPOSE := docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
-.PHONY: init up down logs ps build restart
+.PHONY: init up up-legacy down logs ps build restart
 
 init:
 	@test -f $(ENV_FILE) || cp $(ENV_EXAMPLE) $(ENV_FILE)
@@ -11,8 +11,11 @@ init:
 up: init
 	$(COMPOSE) up -d --build
 
+up-legacy: init
+	$(COMPOSE) --profile legacy-assistant up -d --build
+
 down: init
-	$(COMPOSE) down
+	$(COMPOSE) --profile legacy-assistant down
 
 logs: init
 	$(COMPOSE) logs -f
