@@ -74,13 +74,26 @@ class GateAdapter(CountingAdapter):
 
     def execute(self, definition: ModelDefinition, run: ModelRun) -> ModelExecutionResult:
         self.gate.mkdir(parents=True, exist_ok=True)
+        n = int(self.counter.read_text()) if self.counter.exists() else 0
+        self.counter.write_text(str(n + 1))
         (self.gate / "started").write_text("1")
         deadline = time.time() + 30
         while not (self.gate / "release").exists():
             if time.time() > deadline:
                 raise TimeoutError("gate was not released")
             time.sleep(0.01)
-        return super().execute(definition, run)
+        return ModelExecutionResult(
+            status=RunStatus.SUCCEEDED,
+            output_summary={
+                "status": "succeeded",
+                "method": "granger_predictive",
+                "method_version": "fake-lease-1",
+                "question_type": "predictive",
+                "estimand": "predictive_granger",
+                "estimate": 0.5,
+                "identification_resolved": False,
+            },
+        )
 
 
 def _engine(
@@ -186,7 +199,7 @@ def test_different_keys_same_fingerprint_one_lease(db_path: Path, tmp_path: Path
     )
     second = engine.request_test(
         _payload(
-            opened["case_id"], proposed["revision"],
+            opened["case_id"], first["revision"],
             proposed["hypothesis"]["hypothesis_id"], "k2",
         )
     )
