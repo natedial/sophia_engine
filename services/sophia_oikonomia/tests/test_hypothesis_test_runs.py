@@ -1,11 +1,13 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sophia_oikonomia.adapters import HYPOTHESIS_TEST_ADAPTER_ID, HypothesisTestAdapter
 from sophia_oikonomia.adapters.registry import AdapterRegistry
+from sophia_oikonomia.core.clock import FileClock
 from sophia_oikonomia.core.runtime import OikonomiaRuntime
 from sophia_oikonomia.core.store import OikonomiaStore
 from sophia_oikonomia.core.types import (
+    ClaimKind,
     ExecutionSpec,
     ModelDefinition,
     ModelFamily,
@@ -96,18 +98,78 @@ def test_fingerprint_conflict_does_not_replace_existing(tmp_path: Path) -> None:
     assert len(runtime.store.list_runs()) == 1
 
 
-def test_execute_resumes_running_run(tmp_path: Path) -> None:
+def test_legacy_running_without_lease_is_not_auto_reclaimed(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     queued = runtime.create_run(
         "episto-granger-predictive",
         _trigger("fp-running"),
         fingerprint="fp-running",
     )
-    running = queued.model_copy(update={"status": RunStatus.RUNNING})
-    runtime.store.save_run(running)
+    import sqlite3
+
+    with sqlite3.connect(runtime.store.db_path) as conn:
+        conn.execute(
+            "UPDATE oikonomia_runs SET status = ? WHERE run_id = ?",
+            (RunStatus.RUNNING.value, queued.id),
+        )
+        payload = conn.execute(
+            "SELECT payload_json FROM oikonomia_runs WHERE run_id = ?",
+            (queued.id,),
+        ).fetchone()[0]
+        import json
+
+        data = json.loads(payload)
+        data["status"] = RunStatus.RUNNING.value
+        conn.execute(
+            "UPDATE oikonomia_runs SET payload_json = ? WHERE run_id = ?",
+            (json.dumps(data), queued.id),
+        )
+    try:
+        runtime.execute_run(queued.id)
+        raise AssertionError("expected unclaimable legacy RUNNING")
+    except ValueError as exc:
+        assert "lease metadata" in str(exc)
+    claimed = runtime.store.claim_run(
+        queued.id, "worker-b", timedelta(seconds=60)
+    )
+    assert claimed.kind == ClaimKind.UNCLAIMABLE
+    recovered = runtime.recover_legacy_running(queued.id, owner="operator")
+    assert recovered.lease_owner == "operator"
     done = runtime.execute_run(queued.id)
     assert done.status in {RunStatus.SUCCEEDED, RunStatus.FAILED}
-    assert runtime.execute_run(queued.id).id == done.id
+
+
+def test_valid_lease_is_not_resumed_by_another_worker(tmp_path: Path) -> None:
+    clock = FileClock(tmp_path / "clock")
+    store = OikonomiaStore(tmp_path / "oikonomia.db", clock=clock)
+    adapters = AdapterRegistry()
+    adapters.register(HYPOTHESIS_TEST_ADAPTER_ID, HypothesisTestAdapter())
+    runtime = OikonomiaRuntime(
+        store=store,
+        adapters=adapters,
+        lease_duration=timedelta(seconds=60),
+        heartbeat_interval=timedelta(days=1),
+    )
+    runtime.register_model(
+        ModelDefinition(
+            id="episto-granger-predictive",
+            name="Episto Granger predictive test",
+            family=ModelFamily.MACRO,
+            owner="episto",
+            state=ModelState.RESEARCH,
+            execution=ExecutionSpec(adapter_id=HYPOTHESIS_TEST_ADAPTER_ID),
+        )
+    )
+    queued = runtime.create_run(
+        "episto-granger-predictive",
+        _trigger("fp-held"),
+        fingerprint="fp-held",
+    )
+    first = runtime.store.claim_run(queued.id, "worker-a", timedelta(seconds=60))
+    assert first.kind == ClaimKind.ACQUIRED
+    pending = runtime.execute_run(queued.id)
+    assert pending.status == RunStatus.RUNNING
+    assert pending.lease_owner == "worker-a"
 
 
 def test_successful_test_is_not_published(tmp_path: Path) -> None:

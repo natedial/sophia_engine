@@ -33,7 +33,7 @@ from sophia_episto.research.contracts import (
     VariableSpec,
 )
 from sophia_episto.research.errors import ProtocolError, ProtocolErrorCode
-from sophia_episto.research.ledger import ResearchLedger
+from sophia_episto.research.ledger import ResearchLedger, semantic_request_digest
 from sophia_episto.research.policy import apply_assessment_policy
 from sophia_episto.research.runners import (
     GRANGER_METHOD,
@@ -114,7 +114,10 @@ class ResearchEngine:
             )
         idempotency_key = payload.get("idempotency_key")
         if idempotency_key:
-            existing = self.ledger.get_idempotent("global", str(idempotency_key))
+            digest = semantic_request_digest("open_case", payload)
+            existing = self.ledger.get_idempotent(
+                "global", str(idempotency_key), digest=digest
+            )
             if existing is not None:
                 return existing
         now = datetime.now(UTC)
@@ -137,9 +140,15 @@ class ResearchEngine:
             "scope": case.scope.model_dump(mode="json"),
         }
         if idempotency_key:
+            digest = semantic_request_digest("open_case", payload)
             with self.ledger._connect() as conn:
                 self.ledger.put_idempotent(
-                    conn, "global", str(idempotency_key), "open_case", response
+                    conn,
+                    "global",
+                    str(idempotency_key),
+                    "open_case",
+                    response,
+                    digest=digest,
                 )
         return response
 
@@ -151,7 +160,9 @@ class ResearchEngine:
     def submit_evidence(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_protocol(payload)
         actor = self._require_actor(payload)
-        case, idempotency_key, replay = self._mutation_prelude(payload)
+        case, idempotency_key, replay, digest = self._mutation_prelude(
+            payload, operation="submit_evidence"
+        )
         if replay is not None:
             return replay
 
@@ -197,12 +208,15 @@ class ResearchEngine:
             new_contributions=new_items,
             existing_ids=existing_ids,
             independence_groups=groups,
+            digest=digest,
         )
 
     def propose_hypothesis(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_protocol(payload)
         actor = self._require_actor(payload)
-        case, idempotency_key, replay = self._mutation_prelude(payload)
+        case, idempotency_key, replay, digest = self._mutation_prelude(
+            payload, operation="propose_hypothesis"
+        )
         if replay is not None:
             return replay
 
@@ -247,24 +261,26 @@ class ResearchEngine:
             hypothesis=hypothesis,
             assessment=assessment,
             variables=[cause, effect],
+            digest=digest,
         )
 
     def request_test(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_protocol(payload)
         self._require_actor(payload)
-        case, idempotency_key, replay = self._mutation_prelude(payload)
+        case, idempotency_key, replay, digest = self._mutation_prelude(
+            payload, operation="request_test"
+        )
         if replay is not None:
             queued = replay.get("result") or {}
             if str(queued.get("status")) in {
                 ResultStatus.QUEUED.value,
                 ResultStatus.RUNNING.value,
             }:
-                return self._resume_test(
+                return self._reconcile_test(
                     case,
                     idempotency_key,
                     EmpiricalResult.model_validate(queued),
-                    payload,
-                    allow_running_resume=True,
+                    digest=digest,
                 )
             return replay
 
@@ -308,12 +324,11 @@ class ResearchEngine:
         existing = self.ledger.get_result_by_fingerprint(fingerprint)
         if existing is not None:
             if existing.status in {ResultStatus.QUEUED, ResultStatus.RUNNING}:
-                return self._resume_test(
+                return self._reconcile_test(
                     case,
                     idempotency_key,
                     existing,
-                    payload,
-                    allow_running_resume=False,
+                    digest=digest,
                 )
             response = {
                 "case_id": case.case_id,
@@ -323,7 +338,12 @@ class ResearchEngine:
             }
             with self.ledger._lock, self.ledger._connect() as conn:
                 self.ledger.put_idempotent(
-                    conn, case.case_id, idempotency_key, "request_test", response
+                    conn,
+                    case.case_id,
+                    idempotency_key,
+                    "request_test",
+                    response,
+                    digest=digest,
                 )
             return response
 
@@ -350,42 +370,31 @@ class ResearchEngine:
             case,
             idempotency_key=idempotency_key,
             result=queued,
+            digest=digest,
         )
         stored = EmpiricalResult.model_validate(queued_response["result"])
         case = self.ledger.require_case(case.case_id)
-        return self._execute_queued_test(
+        return self._reconcile_test(
             case,
             idempotency_key,
             stored,
-            method=method,
-            question_type=question_type,
-            snapshot=snapshot,
-            hypothesis_id=str(hypothesis_id) if hypothesis_id else None,
+            digest=digest,
         )
 
-    def _resume_test(
+    def _reconcile_test(
         self,
         case: ResearchCase,
         idempotency_key: str,
         queued: EmpiricalResult,
-        payload: dict[str, Any],
         *,
-        allow_running_resume: bool,
+        digest: str | None,
     ) -> dict[str, Any]:
-        method = queued.method or str(payload.get("method") or GRANGER_METHOD)
-        question_type = queued.question_type
-        snapshot = queued.input_snapshot
-        hypothesis_id = queued.hypothesis_id
         case = self.ledger.require_case(case.case_id)
         return self._execute_queued_test(
             case,
             idempotency_key,
             queued,
-            method=method,
-            question_type=question_type,
-            snapshot=snapshot,
-            hypothesis_id=hypothesis_id,
-            allow_running_resume=allow_running_resume,
+            digest=digest,
         )
 
     def _result_response(
@@ -413,11 +422,7 @@ class ResearchEngine:
         idempotency_key: str,
         queued: EmpiricalResult,
         *,
-        method: str,
-        question_type: QuestionType,
-        snapshot: InputSnapshot,
-        hypothesis_id: str | None,
-        allow_running_resume: bool = False,
+        digest: str | None,
     ) -> dict[str, Any]:
         latest = self.ledger.get_result(queued.run_id) or queued
         if latest.status in {
@@ -425,40 +430,24 @@ class ResearchEngine:
             ResultStatus.FAILED,
             ResultStatus.UNAVAILABLE,
         }:
-            return self._result_response(case, latest, replayed=True)
+            return self.ledger.complete_result(
+                case,
+                idempotency_key=idempotency_key,
+                result=latest,
+                digest=digest,
+            )
 
         queued = latest
-        if queued.status == ResultStatus.QUEUED:
-            claimed = self.ledger.claim_queued_run(queued)
-            if not claimed:
-                latest = self.ledger.get_result(queued.run_id)
-                if latest is None:
-                    raise ProtocolError(
-                        ProtocolErrorCode.NOT_FOUND, "Queued run disappeared"
-                    )
-                if latest.status in {
-                    ResultStatus.SUCCEEDED,
-                    ResultStatus.FAILED,
-                    ResultStatus.UNAVAILABLE,
-                }:
-                    return self._result_response(case, latest, replayed=True)
-                return self._result_response(case, latest, pending=True)
-        elif queued.status == ResultStatus.RUNNING:
-            if not allow_running_resume:
-                return self._result_response(case, queued, pending=True)
-        else:
-            return self._result_response(case, queued, pending=True)
-
         case = self.ledger.require_case(case.case_id)
         try:
             result = self.runner.run(
                 run_id=queued.run_id,
                 case_id=case.case_id,
-                hypothesis_id=hypothesis_id,
+                hypothesis_id=queued.hypothesis_id,
                 fingerprint=queued.fingerprint,
-                method=method,
-                question_type=question_type,
-                snapshot=snapshot,
+                method=queued.method,
+                question_type=queued.question_type,
+                snapshot=queued.input_snapshot,
             )
         except ProtocolError as exc:
             failed = queued.model_copy(
@@ -473,10 +462,23 @@ class ResearchEngine:
             if exc.code == ProtocolErrorCode.UNSUPPORTED_QUESTION:
                 raise
             return self.ledger.complete_result(
-                case, idempotency_key=idempotency_key, result=failed
+                case,
+                idempotency_key=idempotency_key,
+                result=failed,
+                digest=digest,
+            )
+        if result.status in {ResultStatus.QUEUED, ResultStatus.RUNNING}:
+            return self.ledger.project_result(
+                result,
+                idempotency_key=idempotency_key,
+                digest=digest,
+                pending=True,
             )
         return self.ledger.complete_result(
-            case, idempotency_key=idempotency_key, result=result
+            case,
+            idempotency_key=idempotency_key,
+            result=result,
+            digest=digest,
         )
 
     def get_run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -484,12 +486,26 @@ class ResearchEngine:
         result = self.ledger.get_result(run_id)
         if result is None:
             raise ProtocolError(ProtocolErrorCode.NOT_FOUND, f"Unknown run: {run_id}")
+        inspect = getattr(self.runner, "inspect", None)
+        if inspect is not None and result.status in {
+            ResultStatus.QUEUED,
+            ResultStatus.RUNNING,
+        }:
+            fresh = inspect(
+                fingerprint=result.fingerprint,
+                oikonomia_run_id=result.diagnostics.get("oikonomia_run_id"),
+                template=result,
+            )
+            if fresh is not None:
+                return {"result": fresh.model_dump(mode="json")}
         return {"result": result.model_dump(mode="json")}
 
     def propose_assessment(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_protocol(payload)
         actor = self._require_actor(payload)
-        case, idempotency_key, replay = self._mutation_prelude(payload)
+        case, idempotency_key, replay, digest = self._mutation_prelude(
+            payload, operation="propose_assessment"
+        )
         if replay is not None:
             return replay
 
@@ -553,6 +569,7 @@ class ResearchEngine:
             idempotency_key=idempotency_key,
             proposal=proposal,
             assessment=assessment,
+            digest=digest,
         )
 
     def explain_case(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -630,8 +647,8 @@ class ResearchEngine:
         }
 
     def _mutation_prelude(
-        self, payload: dict[str, Any]
-    ) -> tuple[ResearchCase, str, dict[str, Any] | None]:
+        self, payload: dict[str, Any], *, operation: str
+    ) -> tuple[ResearchCase, str, dict[str, Any] | None, str]:
         case_id = str(payload.get("case_id") or "")
         case = self.ledger.require_case(case_id)
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
@@ -640,16 +657,19 @@ class ResearchEngine:
                 ProtocolErrorCode.INVALID_REQUEST,
                 "idempotency_key is required for mutations",
             )
-        replay = self.ledger.get_idempotent(case.case_id, idempotency_key)
+        digest = semantic_request_digest(operation, payload)
+        replay = self.ledger.get_idempotent(
+            case.case_id, idempotency_key, digest=digest
+        )
         if replay is not None:
-            return case, idempotency_key, replay
+            return case, idempotency_key, replay, digest
         if "expected_revision" not in payload:
             raise ProtocolError(
                 ProtocolErrorCode.INVALID_REQUEST,
                 "expected_revision is required for mutations",
             )
         self.ledger.require_revision(case, int(payload["expected_revision"]))
-        return case, idempotency_key, None
+        return case, idempotency_key, None, digest
 
     def _require_protocol(self, payload: dict[str, Any]) -> None:
         version = str(payload.get("protocol_version") or "")

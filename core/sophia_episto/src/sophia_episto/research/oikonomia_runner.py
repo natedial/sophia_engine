@@ -24,7 +24,14 @@ GRANGER_MODEL_ID = "episto-granger-predictive"
 
 
 class OikonomiaMethodRunner:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        runtime: object | None = None,
+        method_available: bool | None = None,
+    ) -> None:
+        self._method_available = method_available
         from sophia_oikonomia.adapters import (
             HYPOTHESIS_TEST_ADAPTER_ID,
             AdapterRegistry,
@@ -38,6 +45,10 @@ class OikonomiaMethodRunner:
             ModelFamily,
             ModelState,
         )
+
+        if runtime is not None:
+            self.runtime = runtime
+            return
 
         adapters = AdapterRegistry()
         adapters.register(HYPOTHESIS_TEST_ADAPTER_ID, HypothesisTestAdapter())
@@ -63,7 +74,11 @@ class OikonomiaMethodRunner:
             )
 
     def capabilities(self) -> list[MethodCapability]:
-        arithmos_ok = _arithmos_importable()
+        arithmos_ok = (
+            self._method_available
+            if self._method_available is not None
+            else _arithmos_importable()
+        )
         return [
             MethodCapability(
                 name=GRANGER_METHOD,
@@ -154,6 +169,30 @@ class OikonomiaMethodRunner:
             method=method,
         )
 
+    def inspect(
+        self,
+        *,
+        fingerprint: str | None = None,
+        oikonomia_run_id: str | None = None,
+        template: EmpiricalResult | None = None,
+    ) -> EmpiricalResult | None:
+        run = None
+        if oikonomia_run_id:
+            run = self.runtime.get_run(str(oikonomia_run_id))
+        if run is None and fingerprint:
+            run = self.runtime.store.get_run_by_fingerprint(str(fingerprint))
+        if run is None or template is None:
+            return None
+        return _empirical_from_oikonomia(
+            run,
+            run_id=template.run_id,
+            case_id=template.case_id,
+            hypothesis_id=template.hypothesis_id,
+            fingerprint=template.fingerprint,
+            snapshot=template.input_snapshot,
+            method=template.method,
+        )
+
 
 def _empirical_from_oikonomia(
     run: object,
@@ -172,8 +211,14 @@ def _empirical_from_oikonomia(
     status_raw = str(summary.get("status") or run.status.value)
     if run.status == RunStatus.SUCCEEDED:
         status = ResultStatus.SUCCEEDED
+    elif run.status == RunStatus.QUEUED:
+        status = ResultStatus.QUEUED
+    elif run.status == RunStatus.RUNNING:
+        status = ResultStatus.RUNNING
     elif status_raw == "unavailable":
         status = ResultStatus.UNAVAILABLE
+    elif run.status in {RunStatus.FAILED, RunStatus.PUBLISHED}:
+        status = ResultStatus.FAILED if run.status == RunStatus.FAILED else ResultStatus.SUCCEEDED
     else:
         status = ResultStatus.FAILED
     diagnostics = dict(summary.get("diagnostics") or {})
