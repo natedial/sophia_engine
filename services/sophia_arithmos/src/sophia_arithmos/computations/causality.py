@@ -22,9 +22,9 @@ class GrangerCausality(Computation):
     Tests whether past values of one series help predict another
     beyond using past values of the target series alone.
 
-    For true Granger causality between two distinct series, this computation
-    accepts the source series via the 'source_values' parameter (list of floats).
-    If only data is provided, tests autoregressive predictive power within that series.
+    Requires an explicit source series via `source_values`. Missing, malformed,
+    or length-mismatched source input is an error — it is not rewritten as a
+    univariate autoregression of the target.
     """
 
     name = "granger_causality"
@@ -78,11 +78,9 @@ class GrangerCausality(Computation):
         params: dict[str, Any],
         output: OutputMode,
     ) -> ComputationResult:
-        """Compute Granger causality test.
+        """Compute a bivariate Granger test. Source series is required."""
+        import json
 
-        If source_values is provided, performs bivariate Granger test between source and target.
-        Otherwise performs univariate autoregression test on the target series.
-        """
         params = dict(params)
         if not params.get("source") and not params.get("source_series"):
             raise ValueError("Missing required parameter: source or source_series")
@@ -97,109 +95,30 @@ class GrangerCausality(Computation):
         max_lag = params.get("max_lag", 5)
         alpha = params.get("alpha", 0.05)
 
+        if source_values_str in (None, ""):
+            raise ValueError(
+                "Missing required parameter: source_values. "
+                "Omitting the source series changes the question being tested."
+            )
+
         if len(data) < max_lag + 10:
             raise ValueError(f"Insufficient data: need at least {max_lag + 10} observations")
 
         y = np.array([obs.value for obs in data])
-
-        if source_values_str:
-            try:
-                import json
-
-                x = np.array(json.loads(source_values_str))
-            except (json.JSONDecodeError, TypeError):
-                x = None
-        else:
-            x = None
-
-        if x is not None and len(x) == len(y):
-            return self._bivariate_granger(x, y, source, target, max_lag, alpha, len(data))
-        else:
-            return self._univariate_granger(y, source, target, max_lag, alpha, len(data))
-
-    def _univariate_granger(
-        self,
-        y: np.ndarray,
-        source: str,
-        target: str,
-        max_lag: int,
-        alpha: float,
-        n_obs: int,
-    ) -> ComputationResult:
-        """Test autoregressive predictive power within a single series."""
-        best_lag = 1
-        best_pvalue = 1.0
-        best_stat = 0.0
-
-        for lag in range(1, max_lag + 1):
-            y_current = y[lag:]
-            X_lagged = y[:-lag]
-
-            if len(y_current) < 10:
-                continue
-
-            X_with_const = np.column_stack([np.ones(len(X_lagged)), X_lagged])
-
-            try:
-                coeffs, _, _, _ = np.linalg.lstsq(X_with_const, y_current, rcond=None)
-                y_pred = X_with_const @ coeffs
-                ss_res = np.sum((y_current - y_pred) ** 2)
-                ss_tot = np.sum((y_current - np.mean(y_current)) ** 2)
-
-                if ss_tot == 0:
-                    continue
-
-                r_squared = 1 - (ss_res / ss_tot)
-                n = len(y_current)
-                k = 2
-                if r_squared > 0:
-                    f_stat = (r_squared / (k - 1)) / ((1 - r_squared) / (n - k))
-                    p_value = 1 - _f_cdf(f_stat, k - 1, n - k)
-                else:
-                    p_value = 1.0
-                    f_stat = 0.0
-
-                if p_value < best_pvalue:
-                    best_pvalue = p_value
-                    best_lag = lag
-                    best_stat = f_stat
-
-            except Exception:
-                continue
-
-        is_causal = best_pvalue < alpha
-        # Strength = incremental predictive contribution, bounded [0,1].
-        # Only reported when the effect is statistically detected; else 0.
-        strength = 0.0
-        if is_causal and len(y) > best_lag + 5:
-            y_t = y[best_lag:]
-            y_lag = y[:-best_lag]
-            if y_lag.std(ddof=1) > 0 and y_t.std(ddof=1) > 0:
-                r = float(np.corrcoef(y_lag, y_t)[0, 1])
-                strength = max(0.0, min(1.0, r * r))
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source,
-                "target_series": target,
-                "test_statistic": float(best_stat),
-                "p_value": float(best_pvalue),
-                "is_granger_causal": is_causal,
-                "strength": float(strength),
-                "best_lag": best_lag,
-                "max_lag": max_lag,
-                "alpha": alpha,
-                "n_observations": n_obs,
-                "method": "univariate_autoregression",
-                "note": "Univariate test - source_values not provided, testing autoregressive power",
-            },
-            metadata={
-                "computation": "granger_causality",
-                "interpretation": "Univariate autoregression test. Provide source_values for bivariate Granger test.",
-            },
-        )
+        try:
+            parsed = json.loads(source_values_str)
+            x = np.asarray(parsed, dtype=float)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "source_values must be a JSON-encoded list of numbers"
+            ) from exc
+        if x.ndim != 1:
+            raise ValueError("source_values must be a one-dimensional series")
+        if len(x) != len(y):
+            raise ValueError(
+                f"source_values length {len(x)} does not match target observations {len(y)}"
+            )
+        return self._bivariate_granger(x, y, source, target, max_lag, alpha, len(data))
 
     def _bivariate_granger(
         self,
@@ -268,19 +187,5 @@ class GrangerCausality(Computation):
             },
         )
 
-
-def _f_cdf(f_stat: float, dfn: int, dfd: int) -> float:
-    """Simplified F-distribution CDF approximation."""
-    if f_stat <= 0:
-        return 0.0
-    if dfd <= 0:
-        return 0.0
-    try:
-        from scipy import stats
-
-        return float(stats.f.cdf(f_stat, dfn, dfd))
-    except Exception:
-        x = dfn * f_stat / (dfn * f_stat + dfd)
-        return x if x <= 1 else 1.0
 
 
