@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 from ..adapters import AdapterRegistry
@@ -10,7 +12,11 @@ from ..clients import ScrivenerClient, SentryClient
 from ..config import settings
 from .store import OikonomiaStore
 from .types import (
+    DEFAULT_HEARTBEAT_SECONDS,
+    DEFAULT_LEASE_SECONDS,
+    ClaimKind,
     CompleteRunRequest,
+    FinishKind,
     GateStatus,
     InputSnapshotRef,
     ModelDefinition,
@@ -18,6 +24,7 @@ from .types import (
     ModelRun,
     ModelState,
     ModelTrigger,
+    OwnershipError,
     PromoteModelRequest,
     PromotionGate,
     PromotionReview,
@@ -43,8 +50,10 @@ class OikonomiaRuntime:
         adapters: AdapterRegistry | None = None,
         scrivener: ScrivenerClient | None = None,
         sentry: SentryClient | None = None,
+        lease_duration: timedelta | None = None,
+        heartbeat_interval: timedelta | None = None,
     ) -> None:
-        self.store = store or OikonomiaStore()
+        self.store = store or OikonomiaStore(Path(settings.db_path))
         self.adapters = adapters or AdapterRegistry()
         self.scrivener = scrivener or ScrivenerClient(
             base_url=settings.scrivener_url,
@@ -53,6 +62,10 @@ class OikonomiaRuntime:
         self.sentry = sentry or SentryClient(
             base_url=settings.sentry_url,
             timeout_sec=min(settings.request_timeout_sec, 10.0),
+        )
+        self.lease_duration = lease_duration or timedelta(seconds=DEFAULT_LEASE_SECONDS)
+        self.heartbeat_interval = heartbeat_interval or timedelta(
+            seconds=DEFAULT_HEARTBEAT_SECONDS
         )
 
     def register_model(self, definition: ModelDefinition) -> ModelDefinition:
@@ -208,61 +221,96 @@ class OikonomiaRuntime:
     def execute_run(self, run_id: str) -> ModelRun:
         """Execute an existing run through its registered adapter.
 
-        Completed runs are returned as-is so retries after disconnect do not
-        duplicate work. QUEUED and RUNNING (interrupted) runs execute again.
+        Terminal runs are returned as-is. A valid lease returns the pending
+        run without starting another computation. An expired lease is
+        reclaimed with a new fencing generation. Legacy RUNNING rows without
+        lease metadata are not auto-reclaimed.
         """
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise ValueError(f"Unknown run: {run_id}")
-        if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.PUBLISHED}:
-            return run
-
-        definition = self.store.get_model(run.model_id)
+        owner = f"owner-{uuid4().hex}"
+        claimed = self.store.claim_run(run_id, owner, self.lease_duration)
+        if claimed.kind == ClaimKind.TERMINAL:
+            return claimed.run
+        if claimed.kind == ClaimKind.PENDING:
+            return claimed.run
+        if claimed.kind == ClaimKind.UNCLAIMABLE:
+            raise ValueError(
+                f"Run {run_id} is running without lease metadata; stop old "
+                "workers and call recover_legacy_running before reclaiming"
+            )
+        running = claimed.run
+        generation = running.lease_generation
+        definition = self.store.get_model(running.model_id)
         if definition is None:
-            raise ValueError(f"Unknown model: {run.model_id}")
+            self._fail_owned(
+                run_id,
+                owner,
+                generation,
+                error=f"Unknown model: {running.model_id}",
+            )
+            raise ValueError(f"Unknown model: {running.model_id}")
 
         adapter = self.adapters.get(definition.execution.adapter_id)
         if adapter is None:
+            self._fail_owned(
+                run_id,
+                owner,
+                generation,
+                error=(
+                    f"No adapter registered for adapter_id "
+                    f"'{definition.execution.adapter_id}'"
+                ),
+            )
             raise ValueError(
                 f"No adapter registered for adapter_id '{definition.execution.adapter_id}'"
             )
 
-        running = run.model_copy(
-            update={
-                "status": RunStatus.RUNNING,
-                "started_at": datetime.now(UTC),
-                "error": None,
-            }
+        heartbeat = _Heartbeat(
+            store=self.store,
+            run_id=run_id,
+            owner=owner,
+            generation=generation,
+            lease_duration=self.lease_duration,
+            interval=self.heartbeat_interval,
         )
-        self.store.save_run(running)
+        heartbeat.start()
+        try:
+            try:
+                result = adapter.execute(definition, running)
+            except Exception as exc:
+                result = ModelExecutionResult(
+                    status=RunStatus.FAILED,
+                    output_summary={
+                        "status": "error",
+                        "exception_type": exc.__class__.__name__,
+                        "message": str(exc),
+                    },
+                    raw_output={},
+                    insights=[],
+                    quality_score=None,
+                    error=str(exc),
+                )
+        finally:
+            heartbeat.stop()
 
         try:
-            result = adapter.execute(definition, running)
-        except Exception as exc:
-            result = ModelExecutionResult(
-                status=RunStatus.FAILED,
-                output_summary={
-                    "status": "error",
-                    "exception_type": exc.__class__.__name__,
-                    "message": str(exc),
-                },
-                raw_output={},
-                insights=[],
-                quality_score=None,
-                error=str(exc),
+            return self.complete_run(
+                run_id,
+                CompleteRunRequest(
+                    status=result.status,
+                    output_summary=result.output_summary,
+                    raw_output=result.raw_output,
+                    insights=result.insights,
+                    quality_score=result.quality_score,
+                    error=result.error,
+                    lease_owner=owner,
+                    lease_generation=generation,
+                ),
             )
-
-        return self.complete_run(
-            run_id,
-            CompleteRunRequest(
-                status=result.status,
-                output_summary=result.output_summary,
-                raw_output=result.raw_output,
-                insights=result.insights,
-                quality_score=result.quality_score,
-                error=result.error,
-            ),
-        )
+        except OwnershipError:
+            current = self.store.get_run(run_id)
+            if current is None:
+                raise
+            return current
 
     def execute_trigger(
         self,
@@ -279,17 +327,18 @@ class OikonomiaRuntime:
         return TriggerExecutionResult(plan=plan, runs=runs)
 
     def complete_run(self, run_id: str, request: CompleteRunRequest) -> ModelRun:
+        if request.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED}:
+            raise ValueError("Run completion must end in succeeded or failed status")
+        if not request.lease_owner or request.lease_generation is None:
+            raise OwnershipError(
+                "lease_owner and lease_generation are required to complete a run"
+            )
         run = self.store.get_run(run_id)
         if run is None:
             raise ValueError(f"Unknown run: {run_id}")
-
-        if request.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED}:
-            raise ValueError("Run completion must end in succeeded or failed status")
-
-        updated = run.model_copy(
+        proposed = run.model_copy(
             update={
                 "status": request.status,
-                "completed_at": datetime.now(UTC),
                 "raw_output": request.raw_output,
                 "output_summary": request.output_summary,
                 "insights": request.insights,
@@ -297,7 +346,53 @@ class OikonomiaRuntime:
                 "error": request.error,
             }
         )
-        return self.store.save_run(updated)
+        outcome = self.store.finish_run(
+            run_id,
+            request.lease_owner,
+            request.lease_generation,
+            proposed,
+        )
+        if outcome.kind == FinishKind.ACCEPTED:
+            return outcome.run
+        if outcome.kind == FinishKind.ALREADY_TERMINAL:
+            return outcome.run
+        raise OwnershipError(
+            f"Run {run_id} is not owned by generation {request.lease_generation}"
+        )
+
+    def recover_legacy_running(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        lease_duration: timedelta | None = None,
+    ) -> ModelRun:
+        """Opt-in recovery for pre-migration RUNNING rows without lease metadata."""
+        return self.store.recover_legacy_run(
+            run_id,
+            owner=owner,
+            lease_duration=lease_duration or self.lease_duration,
+        )
+
+    def _fail_owned(
+        self,
+        run_id: str,
+        owner: str,
+        generation: int,
+        *,
+        error: str,
+    ) -> None:
+        run = self.store.get_run(run_id)
+        if run is None:
+            return
+        failed = run.model_copy(
+            update={
+                "status": RunStatus.FAILED,
+                "error": error,
+                "output_summary": {"status": "error", "message": error},
+            }
+        )
+        self.store.finish_run(run_id, owner, generation, failed)
 
     def publish_projection(self, request: PublishProjectionRequest) -> PublishedProjection:
         run = self.store.get_run(request.run_id)
@@ -325,8 +420,7 @@ class OikonomiaRuntime:
             else run.quality_score,
         )
 
-        updated_run = run.model_copy(update={"status": RunStatus.PUBLISHED})
-        self.store.save_run(updated_run)
+        self.store.mark_published(run.id)
         saved = self.store.save_publication(publication)
         self._notify_sentry_of_publication(
             definition=definition,
@@ -498,3 +592,43 @@ class OikonomiaRuntime:
                 }
             }
         )
+
+
+class _Heartbeat:
+    """Attempt-scoped lease renewal. A process crash leaves an expiring lease."""
+
+    def __init__(
+        self,
+        *,
+        store: OikonomiaStore,
+        run_id: str,
+        owner: str,
+        generation: int,
+        lease_duration: timedelta,
+        interval: timedelta,
+    ) -> None:
+        self._store = store
+        self._run_id = run_id
+        self._owner = owner
+        self._generation = generation
+        self._lease_duration = lease_duration
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="oikonomia-heartbeat", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=min(1.0, self._interval.total_seconds() + 0.1))
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval.total_seconds()):
+            if not self._store.renew_lease(
+                self._run_id,
+                self._owner,
+                self._generation,
+                self._lease_duration,
+            ):
+                return

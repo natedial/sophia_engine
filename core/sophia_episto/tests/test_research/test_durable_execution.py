@@ -10,18 +10,6 @@ from tests.test_research.helpers import FakeRunner, snapshot
 from tests.test_research.test_acceptance import _open, _propose
 
 
-class CrashOnceRunner(FakeRunner):
-    def __init__(self) -> None:
-        super().__init__()
-        self.attempts = 0
-
-    def run(self, **kwargs):
-        self.attempts += 1
-        if self.attempts == 1:
-            raise RuntimeError("interrupted before completion")
-        return super().run(**kwargs)
-
-
 def _test_payload(case_id: str, revision: int, hypothesis_id: str, key: str) -> dict:
     return {
         "protocol_version": "1",
@@ -36,7 +24,22 @@ def _test_payload(case_id: str, revision: int, hypothesis_id: str, key: str) -> 
     }
 
 
-def test_interrupted_run_is_recoverable(db_path):
+def test_fake_runner_in_process_crash_leaves_queued_for_retry(db_path):
+    """FakeRunner is for policy tests. An in-process exception is not a lease.
+
+    Recovery of a live coordinator worker is covered by test_execution_lease.py.
+    """
+    class CrashOnceRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def run(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("interrupted before completion")
+            return super().run(**kwargs)
+
     runner = CrashOnceRunner()
     engine = ResearchEngine(db_path, runner=runner)
     opened = _open(engine)
@@ -59,13 +62,9 @@ def test_interrupted_run_is_recoverable(db_path):
         engine.request_test(payload)
     pending = engine.get_case({"case_id": opened["case_id"]})
     assert pending["pending_runs"]
-    run_id = pending["pending_runs"][0]["run_id"]
-    assert pending["pending_runs"][0]["status"] in {"queued", "running"}
-
+    assert pending["pending_runs"][0]["status"] == "queued"
     recovered = engine.request_test(payload)
-    assert recovered["result"]["run_id"] == run_id
     assert recovered["result"]["status"] == "succeeded"
-    assert engine.get_run({"run_id": run_id})["result"]["status"] == "succeeded"
     assert runner.attempts == 2
 
 
@@ -93,8 +92,12 @@ def test_replay_after_success_does_not_rerun(engine):
     assert len(engine.runner.calls) == 1  # type: ignore[attr-defined]
 
 
-def test_concurrent_clients_one_fingerprint(db_path):
-    opened_engine = ResearchEngine(db_path, runner=FakeRunner())
+def test_concurrent_clients_one_fingerprint(db_path, tmp_path):
+    pytest.importorskip("sophia_oikonomia")
+    from tests.test_research.test_execution_lease import CountingAdapter, _engine
+
+    counter = tmp_path / "calls"
+    opened_engine = _engine(db_path, tmp_path / "oiko.db", CountingAdapter(counter))
     opened = _open(opened_engine)
     proposed = _propose(
         opened_engine,
@@ -110,7 +113,7 @@ def test_concurrent_clients_one_fingerprint(db_path):
 
     def worker(key: str) -> None:
         try:
-            engine = ResearchEngine(db_path, runner=FakeRunner())
+            engine = _engine(db_path, tmp_path / "oiko.db", CountingAdapter(counter))
             results.append(
                 engine.request_test(
                     _test_payload(
@@ -138,6 +141,7 @@ def test_concurrent_clients_one_fingerprint(db_path):
     final = opened_engine.explain_case({"case_id": opened["case_id"]})
     completed = [item for item in final["computed_results"] if item["status"] == "succeeded"]
     assert len(completed) == 1
+    assert counter.read_text() == "1"
 
 
 def test_oikonomia_runner_coordinates_granger(db_path, tmp_path):

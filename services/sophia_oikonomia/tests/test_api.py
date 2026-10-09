@@ -109,7 +109,7 @@ def test_run_completion_and_publication_flow(client: TestClient) -> None:
     run_id = create_run.json()["id"]
     assert create_run.json()["input_snapshot"]["payload"]["target_series_id"] == "CPIAUCSL"
 
-    complete = client.post(
+    unfenced = client.post(
         f"/v1/runs/{run_id}/complete",
         json={
             "status": "succeeded",
@@ -118,8 +118,11 @@ def test_run_completion_and_publication_flow(client: TestClient) -> None:
             "quality_score": 0.78,
         },
     )
-    assert complete.status_code == 200
-    assert complete.json()["status"] == "succeeded"
+    assert unfenced.status_code == 409
+
+    executed = client.post(f"/v1/runs/{run_id}/execute")
+    assert executed.status_code == 200
+    assert executed.json()["status"] == "succeeded"
 
     publish = client.post(
         "/v1/publications",

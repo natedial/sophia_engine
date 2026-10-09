@@ -100,8 +100,11 @@ def run_case(
     )
     cited_results = []
     revision = growth["revision"]
-    if test.get("result"):
-        cited_results = [test["result"]["run_id"]]
+    result = test.get("result") or {}
+    result_status = str(result.get("status") or "")
+    pending = bool(test.get("pending")) or result_status in {"queued", "running"}
+    if result and not pending:
+        cited_results = [result["run_id"]]
         revision = test.get("revision", revision)
     assessment = sophia.invoke(
         "propose_assessment",

@@ -44,7 +44,8 @@ It does not replace:
 - `POST /v1/runs/execute`
 - `GET /v1/runs/{run_id}`
 - `POST /v1/runs/{run_id}/execute`
-- `POST /v1/runs/{run_id}/complete`
+- `POST /v1/runs/{run_id}/complete` (requires `lease_owner` and `lease_generation`)
+- `POST /v1/runs/{run_id}/recover-legacy`
 - `GET /v1/publications`
 - `GET /v1/publications/latest/{model_id}`
 - `POST /v1/publications`
@@ -87,3 +88,17 @@ Promotion is intended to follow:
 4. only `champion` models can publish projections
 
 Champion promotion is slot-based. Promoting a new model to champion in the same `production_slot` demotes the prior champion to `shadow` and records it as the rollback target.
+
+## Execution leases and upgrade drain
+
+Oikonomia is the sole execution owner. `execute_run` acquires a renewable lease (default 60s, heartbeat every 10s) before invoking an adapter. A second caller that hits a valid lease receives the pending `RUNNING` record and does not start another computation. Completions must present the current `lease_owner` and `lease_generation`; stale or missing credentials are rejected.
+
+Stop old workers before upgrading. Pre-migration `RUNNING` rows have no lease metadata. Missing metadata is not proof that the worker died, so those rows are **not** auto-reclaimed. After the old process is gone, call:
+
+```bash
+curl -X POST http://127.0.0.1:8006/v1/runs/$RUN_ID/recover-legacy \
+  -H 'content-type: application/json' \
+  -d '{"owner":"operator"}'
+```
+
+That attaches an already-expired lease. A later `POST /v1/runs/{id}/execute` may then acquire the next generation. Do not recover while a mixed-version worker might still be writing.

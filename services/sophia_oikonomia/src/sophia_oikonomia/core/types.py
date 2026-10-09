@@ -6,6 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DEFAULT_LEASE_SECONDS = 60
+DEFAULT_HEARTBEAT_SECONDS = 10
+
 
 class ModelFamily(str, Enum):
     """Supported model families."""
@@ -58,6 +61,32 @@ class RunStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     PUBLISHED = "published"
+
+
+TERMINAL_RUN_STATUSES = frozenset(
+    {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.PUBLISHED}
+)
+
+
+class ClaimKind(str, Enum):
+    """Outcome of an execution-lease claim."""
+
+    ACQUIRED = "acquired"
+    PENDING = "pending"
+    TERMINAL = "terminal"
+    UNCLAIMABLE = "unclaimable"
+
+
+class FinishKind(str, Enum):
+    """Outcome of a fenced completion."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    ALREADY_TERMINAL = "already_terminal"
+
+
+class OwnershipError(ValueError):
+    """Raised when a completion or renewal does not own the current lease."""
 
 
 class PromotionGate(str, Enum):
@@ -257,6 +286,28 @@ class ModelRun(BaseModel):
     insights: list[str] = Field(default_factory=list)
     quality_score: float | None = None
     error: str | None = None
+    lease_owner: str | None = None
+    lease_generation: int = 0
+    lease_expires_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+
+
+class ClaimOutcome(BaseModel):
+    """Structured result of claim_run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ClaimKind
+    run: ModelRun
+
+
+class FinishOutcome(BaseModel):
+    """Structured result of finish_run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: FinishKind
+    run: ModelRun
 
 
 class CompleteRunRequest(BaseModel):
@@ -270,6 +321,8 @@ class CompleteRunRequest(BaseModel):
     quality_score: float | None = None
     status: RunStatus = RunStatus.SUCCEEDED
     error: str | None = None
+    lease_owner: str | None = None
+    lease_generation: int | None = None
 
 
 class ModelExecutionResult(BaseModel):
