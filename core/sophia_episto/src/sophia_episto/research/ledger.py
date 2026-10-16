@@ -1,7 +1,9 @@
 """SQLite research-case ledger.
 
 Evidence acceptance and the resulting assessment revision are written in one
-transaction. Contribution IDs, idempotency keys, and run fingerprints are unique.
+BEGIN IMMEDIATE transaction: live state, expected revision, and writes share a
+connection. Terminal results cannot be rewritten as queued or running.
+Contribution IDs, idempotency keys, and run fingerprints are unique.
 """
 
 from __future__ import annotations
@@ -10,8 +12,9 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sophia_episto.research.contracts import (
     AgentProposal,
@@ -24,6 +27,13 @@ from sophia_episto.research.contracts import (
     VariableSpec,
 )
 from sophia_episto.research.errors import ProtocolError, ProtocolErrorCode
+
+
+TERMINAL_RESULT_STATUSES = {
+    ResultStatus.SUCCEEDED,
+    ResultStatus.FAILED,
+    ResultStatus.UNAVAILABLE,
+}
 
 
 def semantic_request_digest(operation: str, payload: dict[str, Any]) -> str:
@@ -53,7 +63,23 @@ class ResearchLedger:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = None
         return conn
+
+    @contextmanager
+    def _immediate(self) -> Iterator[sqlite3.Connection]:
+        """One reserved transaction for state checks and writes."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -132,24 +158,9 @@ class ResearchLedger:
         digest: str | None = None,
     ) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT response_json, request_digest FROM idempotency "
-                "WHERE case_id = ? AND idempotency_key = ?",
-                (case_id, idempotency_key),
-            ).fetchone()
-        if row is None:
-            return None
-        stored_digest = row["request_digest"]
-        if digest is not None and stored_digest and stored_digest != digest:
-            raise ProtocolError(
-                ProtocolErrorCode.CONFLICT,
-                "Idempotency key reused with a different request",
-                details={
-                    "idempotency_key": idempotency_key,
-                    "case_id": case_id,
-                },
+            return self._load_idempotent(
+                conn, case_id, idempotency_key, digest=digest
             )
-        return json.loads(row["response_json"])
 
     def put_idempotent(
         self,
@@ -170,7 +181,7 @@ class ResearchLedger:
 
     def save_case(self, case: ResearchCase) -> None:
         payload = case.model_dump(mode="json")
-        with self._lock, self._connect() as conn:
+        with self._lock, self._immediate() as conn:
             conn.execute(
                 "INSERT INTO cases (case_id, revision, payload_json) VALUES (?, ?, ?) "
                 "ON CONFLICT(case_id) DO UPDATE SET revision = excluded.revision, "
@@ -212,7 +223,7 @@ class ResearchLedger:
         return self._bump(conn, case)
 
     def save_variable(self, variable: VariableSpec) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._immediate() as conn:
             conn.execute(
                 "INSERT INTO variables (variable_id, payload_json) VALUES (?, ?) "
                 "ON CONFLICT(variable_id) DO UPDATE SET payload_json = excluded.payload_json",
@@ -230,7 +241,7 @@ class ResearchLedger:
         return VariableSpec.model_validate_json(row["payload_json"])
 
     def save_hypothesis(self, hypothesis: MechanismHypothesis) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._immediate() as conn:
             self._upsert_hypothesis(conn, hypothesis)
 
     def _upsert_hypothesis(
@@ -360,12 +371,35 @@ class ResearchLedger:
         existing_ids: list[str],
         independence_groups: list[str],
         digest: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         """Insert new contributions and bump the case revision atomically."""
-        with self._lock, self._connect() as conn:
-            if new_contributions:
-                case = self._bump(conn, case)
-                for item in new_contributions:
+        with self._lock, self._immediate() as conn:
+            replay = self._load_idempotent(
+                conn, case.case_id, idempotency_key, digest=digest
+            )
+            if replay is not None:
+                return replay
+            live = self._require_expected_revision(
+                conn, case.case_id, expected_revision
+            )
+            created = list(new_contributions)
+            if created:
+                still_new: list[EvidenceAssessment] = []
+                for item in created:
+                    row = conn.execute(
+                        "SELECT contribution_id FROM contributions "
+                        "WHERE contribution_id = ?",
+                        (item.contribution_id,),
+                    ).fetchone()
+                    if row is None:
+                        still_new.append(item)
+                    elif item.contribution_id not in existing_ids:
+                        existing_ids.append(item.contribution_id)
+                created = still_new
+            if created:
+                live = self._bump(conn, live)
+                for item in created:
                     conn.execute(
                         "INSERT INTO contributions "
                         "(contribution_id, case_id, independence_group, payload_json) "
@@ -378,20 +412,20 @@ class ResearchLedger:
                         ),
                     )
             response = {
-                "case_id": case.case_id,
-                "revision": case.revision,
+                "case_id": live.case_id,
+                "revision": live.revision,
                 "contribution_ids": existing_ids
-                + [item.contribution_id for item in new_contributions],
+                + [item.contribution_id for item in created],
                 "independence_groups": sorted(set(independence_groups)),
                 "created_contribution_ids": [
-                    item.contribution_id for item in new_contributions
+                    item.contribution_id for item in created
                 ],
                 "provenance": [
                     {
                         "contribution_id": item.contribution_id,
                         "status": item.provenance_status.value,
                     }
-                    for item in new_contributions
+                    for item in created
                 ]
                 + [
                     {
@@ -403,7 +437,7 @@ class ResearchLedger:
             }
             self.put_idempotent(
                 conn,
-                case.case_id,
+                live.case_id,
                 idempotency_key,
                 "submit_evidence",
                 response,
@@ -420,9 +454,18 @@ class ResearchLedger:
         assessment: HypothesisAssessment,
         variables: list[VariableSpec],
         digest: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
-            case = self._bump(conn, case)
+        with self._lock, self._immediate() as conn:
+            replay = self._load_idempotent(
+                conn, case.case_id, idempotency_key, digest=digest
+            )
+            if replay is not None:
+                return replay
+            live = self._require_expected_revision(
+                conn, case.case_id, expected_revision
+            )
+            live = self._bump(conn, live)
             for variable in variables:
                 conn.execute(
                     "INSERT INTO variables (variable_id, payload_json) VALUES (?, ?) "
@@ -433,14 +476,14 @@ class ResearchLedger:
             self._upsert_hypothesis(conn, hypothesis)
             self._write_assessment(conn, assessment)
             response = {
-                "case_id": case.case_id,
-                "revision": case.revision,
+                "case_id": live.case_id,
+                "revision": live.revision,
                 "hypothesis": hypothesis.model_dump(mode="json"),
                 "assessment": assessment.model_dump(mode="json"),
             }
             self.put_idempotent(
                 conn,
-                case.case_id,
+                live.case_id,
                 idempotency_key,
                 "propose_hypothesis",
                 response,
@@ -455,30 +498,40 @@ class ResearchLedger:
         idempotency_key: str,
         result: EmpiricalResult,
         digest: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._immediate() as conn:
+            replay = self._load_idempotent(
+                conn, case.case_id, idempotency_key, digest=digest
+            )
+            if replay is not None:
+                return replay
             existing = conn.execute(
                 "SELECT payload_json FROM results WHERE fingerprint = ?",
                 (result.fingerprint,),
             ).fetchone()
             if existing is not None:
                 loaded = EmpiricalResult.model_validate_json(existing["payload_json"])
+                live = self._load_case(conn, case.case_id)
                 response = {
-                    "case_id": case.case_id,
-                    "revision": case.revision,
+                    "case_id": live.case_id,
+                    "revision": live.revision,
                     "result": loaded.model_dump(mode="json"),
                     "replayed": True,
                 }
                 self.put_idempotent(
                     conn,
-                    case.case_id,
+                    live.case_id,
                     idempotency_key,
                     "request_test",
                     response,
                     digest=digest,
                 )
                 return response
-            case = self._bump(conn, case)
+            live = self._require_expected_revision(
+                conn, case.case_id, expected_revision
+            )
+            live = self._bump(conn, live)
             try:
                 conn.execute(
                     "INSERT INTO results "
@@ -499,14 +552,14 @@ class ResearchLedger:
                 ).fetchone()
                 loaded = EmpiricalResult.model_validate_json(row["payload_json"])
                 response = {
-                    "case_id": case.case_id,
-                    "revision": case.revision,
+                    "case_id": live.case_id,
+                    "revision": live.revision,
                     "result": loaded.model_dump(mode="json"),
                     "replayed": True,
                 }
                 self.put_idempotent(
                     conn,
-                    case.case_id,
+                    live.case_id,
                     idempotency_key,
                     "request_test",
                     response,
@@ -514,13 +567,13 @@ class ResearchLedger:
                 )
                 return response
             response = {
-                "case_id": case.case_id,
-                "revision": case.revision,
+                "case_id": live.case_id,
+                "revision": live.revision,
                 "result": result.model_dump(mode="json"),
             }
             self.put_idempotent(
                 conn,
-                case.case_id,
+                live.case_id,
                 idempotency_key,
                 "request_test",
                 response,
@@ -531,15 +584,9 @@ class ResearchLedger:
     def claim_queued_run(self, result: EmpiricalResult) -> bool:
         """Atomically move a queued run to running. False if another client claimed it."""
         running = result.model_copy(update={"status": ResultStatus.RUNNING})
-        with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM results WHERE run_id = ?",
-                (result.run_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            current = EmpiricalResult.model_validate_json(row["payload_json"])
-            if current.status != ResultStatus.QUEUED:
+        with self._lock, self._immediate() as conn:
+            current = self._load_result(conn, result.run_id)
+            if current is None or current.status != ResultStatus.QUEUED:
                 return False
             conn.execute(
                 "UPDATE results SET payload_json = ? WHERE run_id = ?",
@@ -556,22 +603,17 @@ class ResearchLedger:
         pending: bool = True,
     ) -> dict[str, Any]:
         """Update a queued/running projection without bumping the case revision."""
-        with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM results WHERE run_id = ?",
-                (result.run_id,),
-            ).fetchone()
-            if row is None:
+        with self._lock, self._immediate() as conn:
+            current = self._load_result(conn, result.run_id)
+            if current is None:
                 raise ProtocolError(
                     ProtocolErrorCode.NOT_FOUND, f"Unknown run: {result.run_id}"
                 )
-            current = EmpiricalResult.model_validate_json(row["payload_json"])
             stored = current
-            if current.status not in {
-                ResultStatus.SUCCEEDED,
-                ResultStatus.FAILED,
-                ResultStatus.UNAVAILABLE,
-            }:
+            if (
+                current.status not in TERMINAL_RESULT_STATUSES
+                and result.status not in TERMINAL_RESULT_STATUSES
+            ):
                 conn.execute(
                     "UPDATE results SET payload_json = ?, vintage = ? "
                     "WHERE run_id = ? AND case_id = ?",
@@ -583,11 +625,7 @@ class ResearchLedger:
                     ),
                 )
                 stored = result
-            case_row = conn.execute(
-                "SELECT payload_json FROM cases WHERE case_id = ?",
-                (result.case_id,),
-            ).fetchone()
-            case = ResearchCase.model_validate_json(case_row["payload_json"])
+            case = self._load_case(conn, result.case_id)
             response = {
                 "case_id": case.case_id,
                 "revision": case.revision,
@@ -614,56 +652,43 @@ class ResearchLedger:
         result: EmpiricalResult,
         digest: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM results WHERE run_id = ?",
-                (result.run_id,),
-            ).fetchone()
-            if row is None:
+        with self._lock, self._immediate() as conn:
+            current = self._load_result(conn, result.run_id)
+            if current is None:
                 raise ProtocolError(
                     ProtocolErrorCode.NOT_FOUND, f"Unknown run: {result.run_id}"
                 )
-            current = EmpiricalResult.model_validate_json(row["payload_json"])
-            if current.status in {
-                ResultStatus.SUCCEEDED,
-                ResultStatus.FAILED,
-                ResultStatus.UNAVAILABLE,
-            }:
-                live = self._load_case(conn, case.case_id)
-                response = {
-                    "case_id": live.case_id,
-                    "revision": live.revision,
-                    "result": current.model_dump(mode="json"),
-                    "replayed": True,
-                }
-                self._upsert_idempotent(
-                    conn,
-                    live.case_id,
-                    idempotency_key,
-                    "request_test",
-                    response,
-                    digest=digest,
+            live = self._load_case(conn, case.case_id)
+            if current.status in TERMINAL_RESULT_STATUSES:
+                stored = current
+                replayed = True
+            elif result.status not in TERMINAL_RESULT_STATUSES:
+                stored = current
+                replayed = True
+            else:
+                live = self._bump(conn, live)
+                conn.execute(
+                    "UPDATE results SET payload_json = ?, vintage = ? "
+                    "WHERE run_id = ? AND case_id = ?",
+                    (
+                        result.model_dump_json(),
+                        result.input_snapshot.vintage,
+                        result.run_id,
+                        result.case_id,
+                    ),
                 )
-                return response
-            case = self._bump(conn, case)
-            conn.execute(
-                "UPDATE results SET payload_json = ?, vintage = ? "
-                "WHERE run_id = ? AND case_id = ?",
-                (
-                    result.model_dump_json(),
-                    result.input_snapshot.vintage,
-                    result.run_id,
-                    result.case_id,
-                ),
-            )
+                stored = result
+                replayed = False
             response = {
-                "case_id": case.case_id,
-                "revision": case.revision,
-                "result": result.model_dump(mode="json"),
+                "case_id": live.case_id,
+                "revision": live.revision,
+                "result": stored.model_dump(mode="json"),
             }
+            if replayed:
+                response["replayed"] = True
             self._upsert_idempotent(
                 conn,
-                case.case_id,
+                live.case_id,
                 idempotency_key,
                 "request_test",
                 response,
@@ -677,9 +702,13 @@ class ResearchLedger:
         *,
         idempotency_key: str,
         result: EmpiricalResult,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         return self.transact_queued_result(
-            case, idempotency_key=idempotency_key, result=result
+            case,
+            idempotency_key=idempotency_key,
+            result=result,
+            expected_revision=expected_revision,
         )
 
     def transact_assessment(
@@ -690,9 +719,18 @@ class ResearchLedger:
         proposal: AgentProposal,
         assessment: HypothesisAssessment,
         digest: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
-            case = self._bump(conn, case)
+        with self._lock, self._immediate() as conn:
+            replay = self._load_idempotent(
+                conn, case.case_id, idempotency_key, digest=digest
+            )
+            if replay is not None:
+                return replay
+            live = self._require_expected_revision(
+                conn, case.case_id, expected_revision
+            )
+            live = self._bump(conn, live)
             conn.execute(
                 "INSERT INTO proposals (proposal_id, case_id, payload_json) "
                 "VALUES (?, ?, ?)",
@@ -708,14 +746,14 @@ class ResearchLedger:
             )
             self._write_assessment(conn, linked)
             response = {
-                "case_id": case.case_id,
-                "revision": case.revision,
+                "case_id": live.case_id,
+                "revision": live.revision,
                 "proposal": proposal.model_dump(mode="json"),
                 "assessment": linked.model_dump(mode="json"),
             }
             self.put_idempotent(
                 conn,
-                case.case_id,
+                live.case_id,
                 idempotency_key,
                 "propose_assessment",
                 response,
@@ -760,6 +798,55 @@ class ResearchLedger:
             )
         return ResearchCase.model_validate_json(row["payload_json"])
 
+    def _load_result(
+        self, conn: sqlite3.Connection, run_id: str
+    ) -> EmpiricalResult | None:
+        row = conn.execute(
+            "SELECT payload_json FROM results WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return EmpiricalResult.model_validate_json(row["payload_json"])
+
+    def _load_idempotent(
+        self,
+        conn: sqlite3.Connection,
+        case_id: str,
+        idempotency_key: str,
+        *,
+        digest: str | None = None,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT response_json, request_digest FROM idempotency "
+            "WHERE case_id = ? AND idempotency_key = ?",
+            (case_id, idempotency_key),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_digest = row["request_digest"]
+        if digest is not None and stored_digest and stored_digest != digest:
+            raise ProtocolError(
+                ProtocolErrorCode.CONFLICT,
+                "Idempotency key reused with a different request",
+                details={
+                    "idempotency_key": idempotency_key,
+                    "case_id": case_id,
+                },
+            )
+        return json.loads(row["response_json"])
+
+    def _require_expected_revision(
+        self,
+        conn: sqlite3.Connection,
+        case_id: str,
+        expected_revision: int | None,
+    ) -> ResearchCase:
+        live = self._load_case(conn, case_id)
+        if expected_revision is not None:
+            self.require_revision(live, expected_revision)
+        return live
+
     def _upsert_idempotent(
         self,
         conn: sqlite3.Connection,
@@ -796,8 +883,24 @@ class ResearchLedger:
                 "updated_at": datetime.now(UTC),
             }
         )
-        conn.execute(
-            "UPDATE cases SET revision = ?, payload_json = ? WHERE case_id = ?",
-            (updated.revision, updated.model_dump_json(), updated.case_id),
+        cursor = conn.execute(
+            "UPDATE cases SET revision = ?, payload_json = ? "
+            "WHERE case_id = ? AND revision = ?",
+            (
+                updated.revision,
+                updated.model_dump_json(),
+                updated.case_id,
+                current.revision,
+            ),
         )
+        if cursor.rowcount != 1:
+            live = self._load_case(conn, case.case_id)
+            raise ProtocolError(
+                ProtocolErrorCode.STALE_REVISION,
+                "Stale case revision",
+                details={
+                    "expected_revision": current.revision,
+                    "current_revision": live.revision,
+                },
+            )
         return updated

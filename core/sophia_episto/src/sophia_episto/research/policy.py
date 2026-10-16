@@ -53,6 +53,32 @@ def apply_assessment_policy(
             alternatives,
         )
 
+    bound_evidence = [
+        item for item in cited_evidence if _evidence_bound(item, case_id, hypothesis_id)
+    ]
+    bound_results = [
+        item for item in cited_results if _result_bound(item, case_id, hypothesis_id)
+    ]
+    if len(bound_evidence) != len(cited_evidence) or len(bound_results) != len(
+        cited_results
+    ):
+        unmet.append("cited_records_not_bound")
+        return _build(
+            hypothesis_id,
+            case_id,
+            current,
+            HypothesisRecordStatus.UNMET_REQUIREMENTS,
+            bound_evidence,
+            bound_results,
+            allowed,
+            unmet,
+            limitations,
+            alternatives,
+        )
+
+    cited_evidence = bound_evidence
+    cited_results = bound_results
+
     if not cited_evidence and not cited_results:
         unmet.append("evidence_or_result_required")
         return _build(
@@ -140,6 +166,18 @@ def apply_assessment_policy(
         limitations,
         alternatives,
     )
+
+
+def _evidence_bound(
+    item: EvidenceAssessment, case_id: str, hypothesis_id: str
+) -> bool:
+    if item.case_id != case_id:
+        return False
+    return item.hypothesis_id in {None, hypothesis_id}
+
+
+def _result_bound(item: EmpiricalResult, case_id: str, hypothesis_id: str) -> bool:
+    return item.case_id == case_id and item.hypothesis_id == hypothesis_id
 
 
 def _build(
