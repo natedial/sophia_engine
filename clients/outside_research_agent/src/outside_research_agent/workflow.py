@@ -99,38 +99,42 @@ def run_case(
         observations=observations,
     )
     cited_results = []
-    revision = growth["revision"]
+    revision = test.get("revision", growth["revision"])
     result = test.get("result") or {}
+    run_id = result.get("run_id")
     result_status = str(result.get("status") or "")
     pending = bool(test.get("pending")) or result_status in {"queued", "running"}
-    if result and not pending:
-        cited_results = [result["run_id"]]
-        revision = test.get("revision", revision)
-    assessment = sophia.invoke(
-        "propose_assessment",
-        {
-            "protocol_version": PROTOCOL_VERSION,
-            "actor": actor,
-            "case_id": opened["case_id"],
-            "expected_revision": revision,
-            "idempotency_key": f"{actor}:assess-reaction",
-            "hypothesis_id": reaction["hypothesis"]["hypothesis_id"],
-            "cited_evidence_ids": evidence.get("contribution_ids") or [],
-            "cited_result_ids": cited_results,
-            "requested_uses": ["explain", "predict", "intervene"],
-            "rationale": (
-                "Predictive association may be useful; identification is unresolved "
-                "so intervention remains disallowed."
-            ),
-        },
-    )
+    assessment = None
+    if not pending:
+        if run_id:
+            cited_results = [run_id]
+        assessment = sophia.invoke(
+            "propose_assessment",
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "actor": actor,
+                "case_id": opened["case_id"],
+                "expected_revision": revision,
+                "idempotency_key": f"{actor}:assess-reaction",
+                "hypothesis_id": reaction["hypothesis"]["hypothesis_id"],
+                "cited_evidence_ids": evidence.get("contribution_ids") or [],
+                "cited_result_ids": cited_results,
+                "requested_uses": ["explain", "predict", "intervene"],
+                "rationale": (
+                    "Predictive association may be useful; identification is unresolved "
+                    "so intervention remains disallowed."
+                ),
+            },
+        )
     explanation = sophia.invoke("explain_case", {"case_id": opened["case_id"]})
     return {
         "case_id": opened["case_id"],
+        "revision": revision,
         "capabilities": capabilities,
         "evidence": evidence,
         "hypotheses": [reaction, growth],
         "test": test,
+        "run_id": run_id,
         "assessment": assessment,
         "explanation": explanation,
     }

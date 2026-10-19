@@ -209,6 +209,7 @@ class ResearchEngine:
             existing_ids=existing_ids,
             independence_groups=groups,
             digest=digest,
+            expected_revision=case.revision,
         )
 
     def propose_hypothesis(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,6 +263,7 @@ class ResearchEngine:
             assessment=assessment,
             variables=[cause, effect],
             digest=digest,
+            expected_revision=case.revision,
         )
 
     def request_test(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -371,6 +373,7 @@ class ResearchEngine:
             idempotency_key=idempotency_key,
             result=queued,
             digest=digest,
+            expected_revision=case.revision,
         )
         stored = EmpiricalResult.model_validate(queued_response["result"])
         case = self.ledger.require_case(case.case_id)
@@ -570,6 +573,7 @@ class ResearchEngine:
             proposal=proposal,
             assessment=assessment,
             digest=digest,
+            expected_revision=case.revision,
         )
 
     def explain_case(self, payload: dict[str, Any]) -> dict[str, Any]:
