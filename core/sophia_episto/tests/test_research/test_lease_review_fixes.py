@@ -1,8 +1,10 @@
-"""P1 lease-review fixes: atomic ledger writes and bound citations."""
+"""Lease-review fixes: atomic writes, bound citations, and per-operation digests."""
 
 from __future__ import annotations
 
 import threading
+
+import pytest
 
 from sophia_episto.research.contracts import (
     AllowedUse,
@@ -254,3 +256,113 @@ def test_bound_result_still_grants_predict(engine):
     )
     assert AllowedUse.PREDICT.value in assessed["assessment"]["allowed_uses"]
     assert AllowedUse.EXPLAIN.value in assessed["assessment"]["allowed_uses"]
+
+
+def test_reused_hypothesis_key_with_different_sign_conflicts(engine):
+    opened = _open(engine)
+    first = _propose(
+        engine,
+        opened["case_id"],
+        opened["revision"],
+        "agent-a",
+        "reaction_function",
+        "positive",
+        "same-hyp-key",
+    )
+    with pytest.raises(ProtocolError) as exc:
+        _propose(
+            engine,
+            opened["case_id"],
+            first["revision"],
+            "agent-a",
+            "growth_channel",
+            "negative",
+            "same-hyp-key",
+        )
+    assert exc.value.code == ProtocolErrorCode.CONFLICT
+    replay = _propose(
+        engine,
+        opened["case_id"],
+        opened["revision"],
+        "agent-b",
+        "reaction_function",
+        "positive",
+        "same-hyp-key",
+    )
+    assert replay["hypothesis"]["hypothesis_id"] == first["hypothesis"]["hypothesis_id"]
+    assert replay["hypothesis"]["sign"] == "positive"
+
+
+def test_reused_evidence_key_with_different_claims_conflicts(engine):
+    opened = _open(engine)
+    first = engine.submit_evidence(
+        {
+            "protocol_version": "1",
+            "actor": "agent-a",
+            "case_id": opened["case_id"],
+            "expected_revision": opened["revision"],
+            "idempotency_key": "ev-key",
+            "claims": [
+                {
+                    "namespace": "notes",
+                    "occurrence_id": "c1",
+                    "snapshot_hash": "h1",
+                    "locations": ["p1"],
+                    "excerpt": "first claim",
+                }
+            ],
+        }
+    )
+    with pytest.raises(ProtocolError) as exc:
+        engine.submit_evidence(
+            {
+                "protocol_version": "1",
+                "actor": "agent-a",
+                "case_id": opened["case_id"],
+                "expected_revision": first["revision"],
+                "idempotency_key": "ev-key",
+                "claims": [
+                    {
+                        "namespace": "notes",
+                        "occurrence_id": "c2",
+                        "snapshot_hash": "h2",
+                        "locations": ["p2"],
+                        "excerpt": "different claim",
+                    }
+                ],
+            }
+        )
+    assert exc.value.code == ProtocolErrorCode.CONFLICT
+
+
+def test_reused_assessment_key_with_different_citations_conflicts(engine):
+    opened = _open(engine)
+    proposed = _propose(
+        engine, opened["case_id"], opened["revision"], "agent-a",
+        "reaction_function", "positive", "hyp-1",
+    )
+    ran = _request(
+        engine,
+        opened["case_id"],
+        proposed["revision"],
+        proposed["hypothesis"]["hypothesis_id"],
+        "run-1",
+    )
+    first = _assess(
+        engine,
+        opened["case_id"],
+        ran["revision"],
+        proposed["hypothesis"]["hypothesis_id"],
+        "assess-key",
+        [ran["result"]["run_id"]],
+    )
+    with pytest.raises(ProtocolError) as exc:
+        _assess(
+            engine,
+            opened["case_id"],
+            first["revision"],
+            proposed["hypothesis"]["hypothesis_id"],
+            "assess-key",
+            [],
+        )
+    assert exc.value.code == ProtocolErrorCode.CONFLICT

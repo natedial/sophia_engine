@@ -35,17 +35,61 @@ TERMINAL_RESULT_STATUSES = {
     ResultStatus.UNAVAILABLE,
 }
 
+# Actor, protocol version, expected revision, and the key itself are transport.
+_TRANSPORT_FIELDS = frozenset(
+    {"protocol_version", "actor", "idempotency_key", "expected_revision"}
+)
+
+# Meaningful fields per mutation. A reused key with a different digest conflicts.
+_OPERATION_DIGEST_FIELDS: dict[str, tuple[str, ...]] = {
+    "open_case": ("question", "scope", "unresolved_questions"),
+    "submit_evidence": ("claims",),
+    "propose_hypothesis": (
+        "cause",
+        "cause_variable",
+        "effect",
+        "effect_variable",
+        "channel",
+        "sign",
+        "lag",
+        "conditions",
+        "alternatives",
+        "evidence_ids",
+        "expected_observations",
+        "falsifiers",
+        "rationale",
+    ),
+    "request_test": ("method", "question_type", "hypothesis_id", "input"),
+    "propose_assessment": (
+        "hypothesis_id",
+        "cited_evidence_ids",
+        "cited_result_ids",
+        "requested_uses",
+        "assumptions",
+        "rationale",
+    ),
+}
+
 
 def semantic_request_digest(operation: str, payload: dict[str, Any]) -> str:
-    """Hash computation-defining inputs. Actor and transport metadata are excluded."""
-    material = {
+    """Hash this operation's semantic fields. Actor and transport metadata are excluded."""
+    material: dict[str, Any] = {
         "operation": operation,
         "case_id": payload.get("case_id"),
-        "method": payload.get("method"),
-        "question_type": payload.get("question_type"),
-        "hypothesis_id": payload.get("hypothesis_id"),
-        "input": payload.get("input"),
     }
+    fields = _OPERATION_DIGEST_FIELDS.get(operation)
+    if fields is None:
+        material.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in _TRANSPORT_FIELDS
+            }
+        )
+    else:
+        for field in fields:
+            if field in payload:
+                material[field] = payload[field]
     encoded = json.dumps(material, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

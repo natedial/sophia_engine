@@ -398,17 +398,14 @@ def test_stale_revision_and_idempotent_replay(engine):
             "hyp-stale",
         )
     assert exc.value.code == ProtocolErrorCode.STALE_REVISION
-    replay = engine.propose_hypothesis(
-        {
-            "protocol_version": "1",
-            "actor": "agent-a",
-            "case_id": opened["case_id"],
-            "expected_revision": opened["revision"],
-            "idempotency_key": "hyp-1",
-            "cause": _var("inflation_surprise", "Core CPI surprise"),
-            "effect": _var("policy_path", "Expected policy path"),
-            "channel": "reaction_function",
-        }
+    replay = _propose(
+        engine,
+        opened["case_id"],
+        opened["revision"],
+        "agent-a",
+        "reaction_function",
+        "positive",
+        "hyp-1",
     )
     assert replay["hypothesis"]["hypothesis_id"] == first["hypothesis"]["hypothesis_id"]
 
