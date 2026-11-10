@@ -1,7 +1,7 @@
 # Slice D runtime inventory
 
-Date: 2026-10-08  
-Checkout: `cursor/causal-slice-d-70a1` stacked on Slice C  
+Date: 2026-10-08
+Checkout: `cursor/causal-slice-d-70a1` stacked on Slice C
 Research path: outside agent → `sophia-research` CLI → Episto ledger → Oikonomia → Arithmos Granger
 
 This is a usage inventory, not a deployment shutdown. Package trees for Prima, Forge, Canvas, and the dashboard remain in git until a later deletion pass. They are off the default runtime.

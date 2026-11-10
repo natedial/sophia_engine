@@ -1,7 +1,7 @@
 # Sophia research and causal-engine refactor plan
 
-Date: 2026-10-07  
-Status: proposed implementation plan; revised for outside-agent ownership; no runtime changes made  
+Date: 2026-10-07
+Status: proposed implementation plan; revised for outside-agent ownership; no runtime changes made
 Target: `/Users/ncdial/devwork/sophia_engine-causal-foundation-hardening`
 
 ## Decision and intended outcome
