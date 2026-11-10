@@ -40,9 +40,9 @@ class EpistoPlannerAdapter:
         try:
             from sophia_episto.capability import SearchBackedCapabilityResolver
             from sophia_episto.intake import build_question_brief
-            from sophia_episto.policy import RuleBasedAcquisitionPolicy
-            from sophia_episto.playbooks.registry import default_playbooks
             from sophia_episto.planner import PlaybookPlanner
+            from sophia_episto.playbooks.registry import default_playbooks
+            from sophia_episto.policy import RuleBasedAcquisitionPolicy
         except ImportError:
             self._build_question_brief = None
             self._planner = None
