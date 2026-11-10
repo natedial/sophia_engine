@@ -22,9 +22,9 @@ class GrangerCausality(Computation):
     Tests whether past values of one series help predict another
     beyond using past values of the target series alone.
 
-    For true Granger causality between two distinct series, this computation
-    accepts the source series via the 'source_values' parameter (list of floats).
-    If only data is provided, tests autoregressive predictive power within that series.
+    Requires an explicit source series via `source_values`. Missing, malformed,
+    or length-mismatched source input is an error — it is not rewritten as a
+    univariate autoregression of the target.
     """
 
     name = "granger_causality"
@@ -78,11 +78,9 @@ class GrangerCausality(Computation):
         params: dict[str, Any],
         output: OutputMode,
     ) -> ComputationResult:
-        """Compute Granger causality test.
+        """Compute a bivariate Granger test. Source series is required."""
+        import json
 
-        If source_values is provided, performs bivariate Granger test between source and target.
-        Otherwise performs univariate autoregression test on the target series.
-        """
         params = dict(params)
         if not params.get("source") and not params.get("source_series"):
             raise ValueError("Missing required parameter: source or source_series")
@@ -97,101 +95,30 @@ class GrangerCausality(Computation):
         max_lag = params.get("max_lag", 5)
         alpha = params.get("alpha", 0.05)
 
+        if source_values_str in (None, ""):
+            raise ValueError(
+                "Missing required parameter: source_values. "
+                "Omitting the source series changes the question being tested."
+            )
+
         if len(data) < max_lag + 10:
             raise ValueError(f"Insufficient data: need at least {max_lag + 10} observations")
 
         y = np.array([obs.value for obs in data])
-
-        if source_values_str:
-            try:
-                import json
-
-                x = np.array(json.loads(source_values_str))
-            except (json.JSONDecodeError, TypeError):
-                x = None
-        else:
-            x = None
-
-        if x is not None and len(x) == len(y):
-            return self._bivariate_granger(x, y, source, target, max_lag, alpha, len(data))
-        else:
-            return self._univariate_granger(y, source, target, max_lag, alpha, len(data))
-
-    def _univariate_granger(
-        self,
-        y: np.ndarray,
-        source: str,
-        target: str,
-        max_lag: int,
-        alpha: float,
-        n_obs: int,
-    ) -> ComputationResult:
-        """Test autoregressive predictive power within a single series."""
-        best_lag = 1
-        best_pvalue = 1.0
-        best_stat = 0.0
-
-        for lag in range(1, max_lag + 1):
-            y_current = y[lag:]
-            X_lagged = y[:-lag]
-
-            if len(y_current) < 10:
-                continue
-
-            X_with_const = np.column_stack([np.ones(len(X_lagged)), X_lagged])
-
-            try:
-                coeffs, _, _, _ = np.linalg.lstsq(X_with_const, y_current, rcond=None)
-                y_pred = X_with_const @ coeffs
-                ss_res = np.sum((y_current - y_pred) ** 2)
-                ss_tot = np.sum((y_current - np.mean(y_current)) ** 2)
-
-                if ss_tot == 0:
-                    continue
-
-                r_squared = 1 - (ss_res / ss_tot)
-                n = len(y_current)
-                k = 2
-                if r_squared > 0:
-                    f_stat = (r_squared / (k - 1)) / ((1 - r_squared) / (n - k))
-                    p_value = 1 - _f_cdf(f_stat, k - 1, n - k)
-                else:
-                    p_value = 1.0
-                    f_stat = 0.0
-
-                if p_value < best_pvalue:
-                    best_pvalue = p_value
-                    best_lag = lag
-                    best_stat = f_stat
-
-            except Exception:
-                continue
-
-        is_causal = best_pvalue < alpha
-        strength = max(0.0, 1.0 - best_pvalue) if best_pvalue < alpha else 0.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source,
-                "target_series": target,
-                "test_statistic": float(best_stat),
-                "p_value": float(best_pvalue),
-                "is_granger_causal": is_causal,
-                "strength": float(strength),
-                "best_lag": best_lag,
-                "max_lag": max_lag,
-                "alpha": alpha,
-                "n_observations": n_obs,
-                "method": "univariate_autoregression",
-                "note": "Univariate test - source_values not provided, testing autoregressive power",
-            },
-            metadata={
-                "computation": "granger_causality",
-                "interpretation": "Univariate autoregression test. Provide source_values for bivariate Granger test.",
-            },
-        )
+        try:
+            parsed = json.loads(source_values_str)
+            x = np.asarray(parsed, dtype=float)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "source_values must be a JSON-encoded list of numbers"
+            ) from exc
+        if x.ndim != 1:
+            raise ValueError("source_values must be a one-dimensional series")
+        if len(x) != len(y):
+            raise ValueError(
+                f"source_values length {len(x)} does not match target observations {len(y)}"
+            )
+        return self._bivariate_granger(x, y, source, target, max_lag, alpha, len(data))
 
     def _bivariate_granger(
         self,
@@ -227,7 +154,16 @@ class GrangerCausality(Computation):
             p_value = 1.0
             is_causal = False
 
-        strength = 1.0 - p_value if p_value < alpha else 0.0
+        # Strength = partial R², the incremental variance in y explained by
+        # lagged x beyond y's own lags. Derived from the Granger F-stat:
+        #   partial_R² = F·df_num / (F·df_num + df_denom)
+        # Bounded [0, 1). Reported only when the effect is detected; else 0.
+        strength = 0.0
+        if is_causal and test_statistic > 0:
+            df_num = lag_order
+            df_denom = max(n_obs - 2 * lag_order - 1, 1)
+            f_df = test_statistic * df_num
+            strength = float(f_df / (f_df + df_denom))
 
         return ComputationResult(
             series=None,
@@ -252,173 +188,4 @@ class GrangerCausality(Computation):
         )
 
 
-def _f_cdf(f_stat: float, dfn: int, dfd: int) -> float:
-    """Simplified F-distribution CDF approximation."""
-    if f_stat <= 0:
-        return 0.0
-    if dfd <= 0:
-        return 0.0
-    try:
-        from scipy import stats
 
-        return float(stats.f.cdf(f_stat, dfn, dfd))
-    except Exception:
-        x = dfn * f_stat / (dfn * f_stat + dfd)
-        return x if x <= 1 else 1.0
-
-
-@registry.register
-class CausalStrength(Computation):
-    """Estimate causal strength between two series using multiple methods."""
-
-    name = "causal_strength"
-    description = "Estimate causal strength from source to target using multiple methods"
-    params = {
-        "source_series": ParamSpec(
-            type="string",
-            description="ID of the source series",
-            required=True,
-        ),
-        "target_series": ParamSpec(
-            type="string",
-            description="ID of the target series",
-            required=True,
-        ),
-        "method": ParamSpec(
-            type="string",
-            description="Method to use: 'regression', 'correlation', 'transfer_entropy'",
-            default="regression",
-            choices=["regression", "correlation", "transfer_entropy"],
-        ),
-    }
-    precision_type = PrecisionType.DEFAULT
-
-    def compute(
-        self,
-        data: list[Observation],
-        params: dict[str, Any],
-        output: OutputMode,
-    ) -> ComputationResult:
-        """Compute causal strength estimate."""
-        source_id = params["source_series"]
-        target_id = params["target_series"]
-        method = params.get("method", "regression")
-
-        if len(data) < 10:
-            raise ValueError(f"Insufficient data: need at least 10 observations")
-
-        values = np.array([obs.value for obs in data])
-
-        if method == "correlation":
-            return self._correlation_method(values, source_id, target_id)
-        elif method == "transfer_entropy":
-            return self._transfer_entropy_method(values, source_id, target_id)
-        else:
-            return self._regression_method(values, source_id, target_id)
-
-    def _regression_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Use regression to estimate causal strength."""
-        lag = 1
-        y = values[lag:]
-        X = values[:-lag].reshape(-1, 1)
-        X = np.column_stack([np.ones(len(X)), X])
-
-        try:
-            coeffs, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
-            y_pred = X @ coeffs
-            ss_res = np.sum((y - y_pred) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-            strength = abs(coeffs[1]) if len(coeffs) > 1 else 0.0
-            p_value = 0.05
-        except Exception:
-            r_squared = 0.0
-            strength = 0.0
-            p_value = 1.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "regression",
-                "strength": float(strength),
-                "r_squared": float(r_squared),
-                "coefficient": float(coeffs[1]) if len(coeffs) > 1 else 0.0,
-                "p_value": float(p_value),
-            },
-            metadata={"computation": "causal_strength"},
-        )
-
-    def _correlation_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Use correlation of lagged values."""
-        lag = 1
-        source = values[:-lag]
-        target = values[lag:]
-
-        correlation = np.corrcoef(source, target)[0, 1]
-        strength = abs(correlation) if not np.isnan(correlation) else 0.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "correlation",
-                "strength": float(strength),
-                "correlation": float(correlation) if not np.isnan(correlation) else 0.0,
-            },
-            metadata={"computation": "causal_strength", "lag": lag},
-        )
-
-    def _transfer_entropy_method(
-        self,
-        values: np.ndarray,
-        source_id: str,
-        target_id: str,
-    ) -> ComputationResult:
-        """Estimate transfer entropy (simplified version)."""
-        lag = 1
-        future = values[lag:]
-        present = values[:-lag]
-
-        bins = 5
-        hist_ystar = np.histogram2d(future, present, bins=bins)[0]
-        hist_y = np.histogram(present, bins=bins)[0]
-
-        p_y = hist_y / hist_y.sum()
-        p_ystar_y = hist_ystar / hist_ystar.sum(axis=1, keepdims=True)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            te = 0.0
-            for i in range(bins):
-                for j in range(bins):
-                    if p_ystar_y[i, j] > 0 and p_y[j] > 0:
-                        te += p_ystar_y[i, j] * np.log(p_ystar_y[i, j] / p_y[j])
-
-        strength = max(0.0, te) if not np.isnan(te) else 0.0
-
-        return ComputationResult(
-            series=None,
-            latest=None,
-            summary={
-                "source_series": source_id,
-                "target_series": target_id,
-                "method": "transfer_entropy",
-                "strength": float(strength),
-                "transfer_entropy": float(te) if not np.isnan(te) else 0.0,
-            },
-            metadata={"computation": "causal_strength", "lag": lag, "bins": bins},
-        )

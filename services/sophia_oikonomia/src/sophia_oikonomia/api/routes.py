@@ -9,6 +9,7 @@ from ..core.types import (
     ModelDefinition,
     ModelRun,
     ModelTrigger,
+    OwnershipError,
     PromoteModelRequest,
     PublishProjectionRequest,
     PublishedProjection,
@@ -128,6 +129,18 @@ def build_router(runtime: OikonomiaRuntime) -> APIRouter:
     async def complete_run(run_id: str, request: CompleteRunRequest) -> ModelRun:
         try:
             return runtime.complete_run(run_id, request)
+        except OwnershipError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 404 if "Unknown run" in str(exc) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @router.post("/v1/runs/{run_id}/recover-legacy", response_model=ModelRun)
+    async def recover_legacy_run(run_id: str, payload: dict[str, object] | None = None) -> ModelRun:
+        body = payload or {}
+        owner = str(body.get("owner") or "legacy-recovered")
+        try:
+            return runtime.recover_legacy_running(run_id, owner=owner)
         except ValueError as exc:
             status_code = 404 if "Unknown run" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc

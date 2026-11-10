@@ -9,7 +9,6 @@ from sophia_oikonomia.core.store import OikonomiaStore
 from sophia_oikonomia.core.types import (
     AnalysisSpec,
     CadencePolicy,
-    CompleteRunRequest,
     ExecutionSpec,
     InputSnapshotRef,
     ModelDefinition,
@@ -73,16 +72,18 @@ def test_publish_projection_notifies_sentry(tmp_path) -> None:
         trigger_type=TriggerType.MANUAL,
         as_of=datetime(2026, 3, 18, 15, 0, tzinfo=UTC),
     )
+    class _SummaryAdapter(_NoopAdapter):
+        def execute(self, definition, run) -> ModelExecutionResult:
+            return ModelExecutionResult(
+                status=RunStatus.SUCCEEDED,
+                output_summary={"core_cpi_3m_annualized": 3.4},
+                insights=["Inflation revised higher."],
+                quality_score=0.8,
+            )
+
+    adapters.register("noop", _SummaryAdapter())
     run = runtime.create_run("bistro-v1", trigger, requested_by="tester")
-    runtime.complete_run(
-        run.id,
-        CompleteRunRequest(
-            status=RunStatus.SUCCEEDED,
-            output_summary={"core_cpi_3m_annualized": 3.4},
-            insights=["Inflation revised higher."],
-            quality_score=0.8,
-        ),
-    )
+    runtime.execute_run(run.id)
 
     runtime.publish_projection(
         PublishProjectionRequest(

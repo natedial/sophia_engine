@@ -1,4 +1,7 @@
-"""Causal discovery from data using Granger causality and PC algorithm."""
+"""Causal discovery from data using Granger causality.
+
+PC / causal-learn is not part of the supported research runtime.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +27,8 @@ class DiscoveredEdge:
 class CausalDiscovery:
     """Methods for discovering causal relationships from time series data.
 
-    Supports:
-    - Granger causality testing
-    - PC algorithm (via causal-learn)
-    - Regime-aware detection
+    Supports Granger tests on explicitly supplied series. Graph-wide PC
+    discovery is not registered.
     """
 
     def __init__(self, data: dict[str, list[float]] | None = None) -> None:
@@ -108,45 +109,6 @@ class CausalDiscovery:
                     edges.append(result)
 
         return edges
-
-    def pc_algorithm(
-        self,
-        variables: list[str],
-        alpha: float = 0.05,
-    ) -> list[tuple[str, str]]:
-        """Run PC algorithm for causal structure learning.
-
-        Returns list of directed edges (source, target).
-        Requires causal-learn package.
-        """
-        try:
-            from causallearn.search.ConstraintBased.PC import pc
-            from causallearn.utils.cit import fisherz
-
-            if len(variables) < 2:
-                return []
-
-            data_matrix = np.column_stack([self.data[v] for v in variables])
-
-            cg = pc(data_matrix, alpha=alpha, indep_test=fisherz)
-
-            edges = []
-            graph = cg.G.graph
-
-            for i, var1 in enumerate(variables):
-                for j, var2 in enumerate(variables):
-                    if i >= j:
-                        continue
-
-                    if graph[i, j] == -1 and graph[j, i] == 1:
-                        edges.append((var1, var2))
-                    elif graph[i, j] == 1 and graph[j, i] == -1:
-                        edges.append((var2, var1))
-
-            return edges
-
-        except ImportError:
-            return []
 
     def regime_aware_detection(
         self,
