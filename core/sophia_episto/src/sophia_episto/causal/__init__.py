@@ -1,10 +1,10 @@
-"""Causal world model components."""
+"""Causal world model components.
 
-from sophia_episto.causal.discovery import (
-    CausalDiscovery,
-    DiscoveredEdge,
-    rank_candidates,
-)
+Numerical discovery (numpy/scipy/statsmodels) lives in
+`sophia_episto.causal.discovery` and is an optional extra. Importing this
+package does not load those libraries.
+"""
+
 from sophia_episto.causal.edge import CausalEdge, expert_priors
 from sophia_episto.causal.graph import (
     CausalGraph,
@@ -19,16 +19,13 @@ from sophia_episto.causal.inference import (
 )
 
 __all__ = [
-    "CausalDiscovery",
     "CausalEdge",
     "CausalGraph",
     "CausalInference",
-    "DiscoveredEdge",
     "InferenceResult",
     "create_initial_graph",
     "expert_priors",
     "load_graph",
     "query_causal_effect",
-    "rank_candidates",
     "save_graph",
 ]

@@ -1,3 +1,7 @@
+# Default `make up` is the research stack: postgres, scrivener, arithmos.
+# Prima/Forge/Canvas/dashboard/Telegram/Tholos/Kampe stay in the
+# `legacy-assistant` profile (`make up-legacy`). They are not on the
+# causal/research path.
 services:
   postgres:
     image: postgres:16-alpine
@@ -53,6 +57,7 @@ services:
       retries: 12
 
   sophia_kampe:
+    profiles: ["legacy-assistant"]
     build: ../services/sophia_kampe
     ports:
       - "127.0.0.1:${KAMPE_PORT:-8002}:8002"
@@ -70,6 +75,7 @@ services:
       retries: 12
 
   sophia_canvas:
+    profiles: ["legacy-assistant"]
     build: ../services/sophia_canvas
     command:
       - /bin/sh
@@ -93,6 +99,7 @@ services:
       retries: 12
 
   sophia_dashboard:
+    profiles: ["legacy-assistant"]
     build: ../frontend/sophia-dashboard
     ports:
       - "127.0.0.1:${DASHBOARD_PORT:-13000}:80"
@@ -106,10 +113,11 @@ services:
       retries: 8
 
   sophia_tholos:
+    profiles: ["legacy-assistant"]
     build:
       context: ../services/sophia_tholos
       args:
-        THOLOS_INSTALL_SEMANTIC: ${THOLOS_INSTALL_SEMANTIC:-true}
+        THOLOS_INSTALL_SEMANTIC: ${THOLOS_INSTALL_SEMANTIC:-false}
         THOLOS_PRELOAD_MODEL: ${THOLOS_PRELOAD_MODEL:-false}
         THOLOS_MODEL_NAME: ${THOLOS_MODEL_NAME:-all-MiniLM-L6-v2}
     ports:
@@ -118,7 +126,7 @@ services:
       THOLOS_DB_PATH: /corpus/chunks.sqlite
       THOLOS_NPZ_PATH: /corpus/embeddings.npz
       THOLOS_MODEL_NAME: ${THOLOS_MODEL_NAME:-all-MiniLM-L6-v2}
-      THOLOS_SEMANTIC_ENABLED: ${THOLOS_SEMANTIC_ENABLED:-true}
+      THOLOS_SEMANTIC_ENABLED: ${THOLOS_SEMANTIC_ENABLED:-false}
       THOLOS_SEMANTIC_LOCAL_FILES_ONLY: ${THOLOS_SEMANTIC_LOCAL_FILES_ONLY:-true}
       THOLOS_SEMANTIC_VERIFY_ON_STARTUP: ${THOLOS_SEMANTIC_VERIFY_ON_STARTUP:-false}
       THOLOS_SEMANTIC_STRICT: ${THOLOS_SEMANTIC_STRICT:-false}
@@ -134,6 +142,7 @@ services:
       retries: 12
 
   sophia_gateway:
+    profiles: ["legacy-assistant"]
     build:
       context: ..
       dockerfile: agents/sophia_prima/Dockerfile
@@ -169,7 +178,7 @@ services:
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8080
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_POLLING_ENABLED: ${TELEGRAM_POLLING_ENABLED:-true}
+      TELEGRAM_POLLING_ENABLED: ${TELEGRAM_POLLING_ENABLED:-false}
       TELEGRAM_ACCOUNTS_JSON: ${TELEGRAM_ACCOUNTS_JSON:-}
       GATEWAY_BINDINGS_JSON: ${GATEWAY_BINDINGS_JSON:-}
     depends_on:

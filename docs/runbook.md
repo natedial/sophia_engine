@@ -15,7 +15,24 @@ cd ../sophia_oikonomia && pip install -e .
 cd ../sophia_sentry && pip install -e .
 cd ../sophia_pylon && pip install -e .
 cd ../../agents/sophia_prima && pip install -e .
+
+cd ../..
+pip install -e 'core/sophia_episto[dev,legacy-causal]'
+pip install -e 'clients/outside_research_agent[dev]'
 ```
+
+The Episto and outside-agent packages are sufficient for the source-neutral research CLI. The remaining packages support direct service development and the optional legacy-assistant profile.
+
+## Research CLI
+
+```bash
+source .venv/bin/activate
+mkdir -p .sophia
+sophia-research --db .sophia/research.db capabilities
+outside-research-agent --help
+```
+
+Mutation operations accept a JSON object through standard input or `--payload`. Use `outside-research-agent run` for a scripted vertical slice and `outside-research-agent resume` to recover a case from its ID.
 
 ## Start Services (separate shells)
 
@@ -74,15 +91,19 @@ Other commands:
 - `make ps`
 - `make down`
 
-Service URLs:
+Default research-stack URLs:
 - `http://localhost:8000` scrivener
 - `http://localhost:8001` sophia_arithmos
+
+`make up-legacy` additionally starts:
 - `http://localhost:8002` sophia_kampe
-- `http://localhost:8006` sophia_oikonomia
-- `http://localhost:8007` sophia_sentry
 - `http://localhost:8003` sophia_canvas
 - `http://localhost:13000` sophia_dashboard
 - `http://localhost:18080` sophia_gateway
+
+Services started manually in the examples above use:
+- `http://localhost:8006` sophia_oikonomia
+- `http://localhost:8007` sophia_sentry
 
 Gateway endpoints:
 - `GET /health`

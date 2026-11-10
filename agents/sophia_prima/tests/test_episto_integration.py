@@ -8,8 +8,8 @@ import pytest
 from sophia.agent import AgentConfig, SophiaAgent
 from sophia.config import Settings
 from sophia.context import ConversationContext
-from sophia.events import EventType
 from sophia.episto_adapter import EpistoPlanContext
+from sophia.events import EventType
 from sophia.llm.types import CompletionResponse, Message, Role, StopReason, TokenUsage
 from sophia.memory import MemoryManager, MemoryManagerConfig
 from sophia.memory.store import InMemoryMemoryStore
@@ -97,6 +97,7 @@ class DummyPylon:
 
 
 def _build_agent(tmp_path: Path) -> tuple[SophiaAgent, DummyProvider]:
+    project_config = Path(__file__).resolve().parents[1] / "config"
     personality_file = tmp_path / "config" / "personality.md"
     personality_file.parent.mkdir(parents=True)
     personality_file.write_text("# Sophia\n\n## Style\nPlain.", encoding="utf-8")
@@ -112,7 +113,7 @@ def _build_agent(tmp_path: Path) -> tuple[SophiaAgent, DummyProvider]:
         openai_api_key="test-key",
         llm_model="test-model",
         memory_store_backend="memory",
-        agent_fs_read_allowlist=f"{tmp_path / 'config'},.sophia",
+        agent_fs_read_allowlist=f"{tmp_path / 'config'},{project_config},.sophia",
     )
     provider = DummyProvider()
     agent = SophiaAgent(

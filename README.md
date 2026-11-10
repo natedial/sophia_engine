@@ -5,9 +5,9 @@ Unified workspace for the Sophia agent, gateway, and backend services.
 ## Structure
 
 - `agents/` - User-facing agents (e.g. sophia_prima)
-- `services/` - Backend services (scrivener, sophia_arithmos, sophia_kampe, sophia_pylon)
+- `clients/` - Standalone clients, including the outside research agent
+- `services/` - Backend services (Scrivener, Arithmos, Oikonomia, and legacy services)
 - `core/` - Shared core packages (episto, onto, teleo)
-- `shared/` - Shared schemas, client helpers
 - `infra/` - Deployment artifacts
 - `docs/` - System-level docs and runbooks
 
@@ -17,13 +17,23 @@ Unified workspace for the Sophia agent, gateway, and backend services.
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-cd services/sophia_pylon && pip install -e .
-cd ../../agents/sophia_prima && pip install -e .
+pip install -e 'core/sophia_episto[dev,legacy-causal]'
+pip install -e 'clients/outside_research_agent[dev]'
 ```
 
-See `docs/runbook.md` for running the services.
+Inspect the research protocol without starting an agent or LLM provider:
+
+```bash
+mkdir -p .sophia
+sophia-research --db .sophia/research.db capabilities
+outside-research-agent --help
+```
+
+See [`docs/runbook.md`](docs/runbook.md) for service and legacy-assistant setup.
 
 ## Quick Start (Docker)
+
+Default `make up` is the research stack (postgres, Scrivener, Arithmos). Causal cases run through `sophia-research` / the outside-agent harness, not the gateway.
 
 ```bash
 make up
@@ -32,20 +42,16 @@ make up
 Services:
 - `http://localhost:8000` scrivener
 - `http://localhost:8001` sophia_arithmos
-- `http://localhost:8002` sophia_kampe
-- `http://localhost:8003` sophia_canvas
-- `http://localhost:13000` sophia_dashboard
-- `http://localhost:18080` sophia_gateway
+
+Prima, Canvas, dashboard, Telegram, Tholos, and Kampe are the `legacy-assistant` profile:
+
+```bash
+make up-legacy
+```
 
 Useful commands:
 - `make logs`
 - `make ps`
 - `make down`
 
-Gateway notes:
-- `sophia_gateway` serves `GET /health`, `POST /v1/messages`, and `WS /ws`.
-- Set `OPENAI_API_KEY` in `infra/.env` to enable live agent responses.
-- Optional: set `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` to use Anthropic instead.
-- Optional: set `LLM_PROVIDER=groq` + `GROQ_API_KEY` to use Groq (OpenAI-compatible API).
-- Optional: set `PERSONALITY_PATH` and `SOUL_PATH` to override prompt component files.
-- Set `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_ACCOUNTS_JSON`) to enable Telegram polling.
+The research CLI does not require an LLM provider, Telegram, or the dashboard.
