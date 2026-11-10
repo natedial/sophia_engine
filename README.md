@@ -5,9 +5,9 @@ Unified workspace for the Sophia agent, gateway, and backend services.
 ## Structure
 
 - `agents/` - User-facing agents (e.g. sophia_prima)
-- `services/` - Backend services (scrivener, sophia_arithmos, sophia_kampe, sophia_pylon)
+- `clients/` - Standalone clients, including the outside research agent
+- `services/` - Backend services (Scrivener, Arithmos, Oikonomia, and legacy services)
 - `core/` - Shared core packages (episto, onto, teleo)
-- `shared/` - Shared schemas, client helpers
 - `infra/` - Deployment artifacts
 - `docs/` - System-level docs and runbooks
 
@@ -17,11 +17,19 @@ Unified workspace for the Sophia agent, gateway, and backend services.
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-cd services/sophia_pylon && pip install -e .
-cd ../../agents/sophia_prima && pip install -e .
+pip install -e 'core/sophia_episto[dev,legacy-causal]'
+pip install -e 'clients/outside_research_agent[dev]'
 ```
 
-See `docs/runbook.md` for running the services.
+Inspect the research protocol without starting an agent or LLM provider:
+
+```bash
+mkdir -p .sophia
+sophia-research --db .sophia/research.db capabilities
+outside-research-agent --help
+```
+
+See [`docs/runbook.md`](docs/runbook.md) for service and legacy-assistant setup.
 
 ## Quick Start (Docker)
 
