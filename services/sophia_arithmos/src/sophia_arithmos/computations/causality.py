@@ -186,4 +186,3 @@ class GrangerCausality(Computation):
                 "interpretation": "Bivariate Granger causality test using VAR model.",
             },
         )
-
