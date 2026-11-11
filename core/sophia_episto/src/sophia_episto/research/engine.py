@@ -56,6 +56,72 @@ class ResearchEngine:
                 Path(db_path).stem + "-oikonomia.sqlite"
             )
         )
+        self._rescore_after_provenance_rename()
+
+    def _rescore_after_provenance_rename(self) -> None:
+        """Re-run the current policy on assessments that cited a 'verified' claim.
+
+        The old policy granted explain on a shape-checked claim alone. When the
+        ledger renames such a claim to well_formed it queues it; here the
+        engine re-scores every assessment citing a queued claim from its
+        original inputs. Unchanged outcomes are not rewritten.
+        """
+        for case_id, contribution_ids in self.ledger.list_rescore_queue().items():
+            proposals = {
+                item.proposal_id: item for item in self.ledger.list_proposals(case_id)
+            }
+            rescored: list[HypothesisAssessment] = []
+            for current in self.ledger.list_assessments(case_id):
+                if not contribution_ids & set(current.contributing_evidence_ids):
+                    continue
+                updated = self._rescore(current, proposals)
+                if _same_outcome(updated, current):
+                    continue
+                rescored.append(updated)
+            self.ledger.transact_rescore(case_id, contribution_ids, rescored)
+
+    def _rescore(
+        self,
+        current: HypothesisAssessment,
+        proposals: dict[str, AgentProposal],
+    ) -> HypothesisAssessment:
+        case_id = current.case_id
+        cited_evidence: list[EvidenceAssessment] = []
+        missing_evidence: list[str] = []
+        for contribution_id in current.contributing_evidence_ids:
+            item = self.ledger.get_contribution(case_id, contribution_id)
+            if item is None:
+                missing_evidence.append(contribution_id)
+            else:
+                cited_evidence.append(item)
+        cited_results: list[EmpiricalResult] = []
+        missing_results: list[str] = []
+        for run_id in current.contributing_result_ids:
+            result = self.ledger.get_result(run_id)
+            if result is None:
+                missing_results.append(run_id)
+            else:
+                cited_results.append(result)
+        latest = next(
+            (
+                proposals[proposal_id]
+                for proposal_id in reversed(current.contributing_proposal_ids)
+                if proposal_id in proposals
+            ),
+            None,
+        )
+        hypothesis = self.ledger.get_hypothesis(current.hypothesis_id)
+        return apply_assessment_policy(
+            hypothesis_id=current.hypothesis_id,
+            case_id=case_id,
+            current=current,
+            cited_evidence=cited_evidence,
+            cited_results=cited_results,
+            requested_uses=list(latest.requested_uses) if latest else [],
+            missing_evidence_ids=missing_evidence,
+            missing_result_ids=missing_results,
+            alternatives=hypothesis.alternatives if hypothesis else [],
+        )
 
     def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -717,6 +783,12 @@ def _variable_from_payload(raw: Any) -> VariableSpec | None:
             )
         return VariableSpec.model_validate(raw)
     return None
+
+
+def _same_outcome(a: HypothesisAssessment, b: HypothesisAssessment) -> bool:
+    """Equal apart from the revision counter and the policy version stamp."""
+    ignore = {"revision", "policy_version"}
+    return a.model_dump(exclude=ignore) == b.model_dump(exclude=ignore)
 
 
 def _contribution_id(claim: SourceClaimRef) -> str:

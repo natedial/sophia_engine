@@ -184,6 +184,11 @@ class ResearchLedger:
                     response_json TEXT NOT NULL,
                     PRIMARY KEY (case_id, idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS provenance_rescore_queue (
+                    case_id TEXT NOT NULL,
+                    contribution_id TEXT NOT NULL,
+                    PRIMARY KEY (case_id, contribution_id)
+                );
                 """
             )
             idempotency_columns = {
@@ -203,8 +208,9 @@ class ResearchLedger:
 
         Ledgers written before the rename hold 'verified' in contribution
         payloads and in stored submit_evidence responses. The old status was
-        a shape check, never a verification. Stored assessments are left as
-        they were; they are not re-scored here.
+        a shape check, never a verification. Each rewritten contribution is
+        queued in the same transaction, so the engine re-scores the
+        assessments that cite it.
         """
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -220,6 +226,11 @@ class ResearchLedger:
                     "UPDATE contributions SET payload_json = ? "
                     "WHERE case_id = ? AND contribution_id = ?",
                     (json.dumps(data), case_id, contribution_id),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO provenance_rescore_queue "
+                    "(case_id, contribution_id) VALUES (?, ?)",
+                    (case_id, contribution_id),
                 )
             for case_id, key, response in conn.execute(
                 "SELECT case_id, idempotency_key, response_json FROM idempotency "
@@ -851,6 +862,56 @@ class ResearchLedger:
             result=result,
             expected_revision=expected_revision,
         )
+
+    def list_rescore_queue(self) -> dict[str, set[str]]:
+        """Contributions renamed from 'verified', by case, awaiting re-score."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT case_id, contribution_id FROM provenance_rescore_queue"
+            ).fetchall()
+        queue: dict[str, set[str]] = {}
+        for row in rows:
+            queue.setdefault(row["case_id"], set()).add(row["contribution_id"])
+        return queue
+
+    def transact_rescore(
+        self,
+        case_id: str,
+        contribution_ids: set[str],
+        rescored: list[HypothesisAssessment],
+    ) -> None:
+        """Write engine re-scores and clear their queue rows atomically.
+
+        Writes nothing if another process already cleared the queue, and
+        skips an assessment that changed after it was re-scored.
+        """
+        ids = sorted(contribution_ids)
+        marks = ", ".join("?" for _ in ids)
+        with self._lock, self._immediate() as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM provenance_rescore_queue "
+                f"WHERE case_id = ? AND contribution_id IN ({marks})",
+                (case_id, *ids),
+            ).fetchone()[0]
+            if not pending:
+                return
+            fresh = []
+            for assessment in rescored:
+                row = conn.execute(
+                    "SELECT revision FROM assessments WHERE hypothesis_id = ?",
+                    (assessment.hypothesis_id,),
+                ).fetchone()
+                if row is not None and row["revision"] == assessment.revision - 1:
+                    fresh.append(assessment)
+            if fresh:
+                self._bump(conn, self._load_case(conn, case_id))
+                for assessment in fresh:
+                    self._write_assessment(conn, assessment)
+            conn.execute(
+                "DELETE FROM provenance_rescore_queue "
+                f"WHERE case_id = ? AND contribution_id IN ({marks})",
+                (case_id, *ids),
+            )
 
     def transact_assessment(
         self,

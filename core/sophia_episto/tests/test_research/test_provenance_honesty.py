@@ -84,3 +84,101 @@ def test_stored_verified_status_is_rewritten(db_path):
     ResearchLedger(db_path)
     again = ResearchLedger(db_path).get_contribution(case["case_id"], contribution_id)
     assert again.provenance_status == ProvenanceStatus.WELL_FORMED
+
+
+def _grant_as_old_policy_did(db_path, hypothesis_id: str) -> None:
+    """Store the assessment the pre-rename policy gave a lone 'verified' claim."""
+    with sqlite3.connect(db_path) as conn:
+        (payload,) = conn.execute(
+            "SELECT payload_json FROM assessments WHERE hypothesis_id = ?",
+            (hypothesis_id,),
+        ).fetchone()
+        data = json.loads(payload)
+        data.update(
+            {
+                "status": "useful_bounded",
+                "allowed_uses": ["explain"],
+                "unmet_requirements": [],
+            }
+        )
+        conn.execute(
+            "UPDATE assessments SET payload_json = ? WHERE hypothesis_id = ?",
+            (json.dumps(data), hypothesis_id),
+        )
+
+
+def _history(engine, hypothesis_id: str) -> list:
+    return engine.ledger.list_assessment_history(hypothesis_id)
+
+
+def test_assessment_granted_on_verified_claim_is_rescored(db_path):
+    engine = ResearchEngine(db_path, runner=FakeRunner())
+    case = _open(engine, "q")
+    submitted = engine.submit_evidence(_submit_payload(case))
+    assessment = _assess(
+        engine, case["case_id"], submitted["revision"], submitted["contribution_ids"]
+    )
+    hypothesis_id = assessment["hypothesis_id"]
+    _mark_verified(db_path)
+    _grant_as_old_policy_did(db_path, hypothesis_id)
+    revision_before = engine.ledger.require_case(case["case_id"]).revision
+    history_before = len(_history(engine, hypothesis_id))
+
+    reopened = ResearchEngine(db_path, runner=FakeRunner())
+    rescored = reopened.ledger.get_assessment(hypothesis_id)
+    assert rescored.status.value == "unmet_requirements"
+    assert rescored.allowed_uses == []
+    assert "verified_source_or_result_required" in rescored.unmet_requirements
+    assert rescored.revision == assessment["revision"] + 1
+    assert rescored.contributing_proposal_ids == assessment["contributing_proposal_ids"]
+    assert len(_history(reopened, hypothesis_id)) == history_before + 1
+    assert reopened.ledger.require_case(case["case_id"]).revision == revision_before + 1
+
+    again = ResearchEngine(db_path, runner=FakeRunner())
+    assert again.ledger.get_assessment(hypothesis_id) == rescored
+    assert len(_history(again, hypothesis_id)) == history_before + 1
+
+
+def test_assessment_still_supported_by_a_result_is_not_rewritten(db_path):
+    from tests.test_research.test_durable_execution import _test_payload
+
+    engine = ResearchEngine(db_path, runner=FakeRunner())
+    case = _open(engine, "q")
+    submitted = engine.submit_evidence(_submit_payload(case))
+    proposed = engine.propose_hypothesis(
+        {
+            "protocol_version": "1",
+            "actor": "r",
+            "case_id": case["case_id"],
+            "expected_revision": submitted["revision"],
+            "idempotency_key": "h",
+            "cause": "x",
+            "effect": "y",
+        }
+    )
+    hypothesis_id = proposed["hypothesis"]["hypothesis_id"]
+    run = engine.request_test(
+        _test_payload(case["case_id"], proposed["revision"], hypothesis_id, "run")
+    )
+    engine.propose_assessment(
+        {
+            "protocol_version": "1",
+            "actor": "r",
+            "case_id": case["case_id"],
+            "expected_revision": run["revision"],
+            "idempotency_key": "a",
+            "hypothesis_id": hypothesis_id,
+            "cited_evidence_ids": submitted["contribution_ids"],
+            "cited_result_ids": [run["result"]["run_id"]],
+            "requested_uses": ["explain", "predict"],
+        }
+    )
+    _mark_verified(db_path)
+    stored = engine.ledger.get_assessment(hypothesis_id)
+    revision_before = engine.ledger.require_case(case["case_id"]).revision
+    history_before = len(_history(engine, hypothesis_id))
+
+    reopened = ResearchEngine(db_path, runner=FakeRunner())
+    assert reopened.ledger.get_assessment(hypothesis_id) == stored
+    assert len(_history(reopened, hypothesis_id)) == history_before
+    assert reopened.ledger.require_case(case["case_id"]).revision == revision_before
