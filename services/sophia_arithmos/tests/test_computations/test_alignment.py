@@ -76,3 +76,22 @@ def test_join_ignores_input_order() -> None:
     joined = inner_join_on_date(list(reversed(source)), _series(dates))
     assert joined.dates == dates
     assert joined.source == [float(i) for i in range(30)]
+
+
+def test_gap_inside_joined_window_rejected() -> None:
+    """A monthly series missing two years must not run with a 25-month lag."""
+    months = _month_starts(2015, 80)
+    target = _series(months[:30] + months[54:])
+    with pytest.raises(ValueError) as exc:
+        inner_join_on_date(_series(months), target)
+    assert "gap" in str(exc.value)
+    assert "2017-06-01" in str(exc.value)
+    assert "2019-07-01" in str(exc.value)
+
+
+def test_holiday_gaps_in_business_daily_are_allowed() -> None:
+    """Good Friday (Thu -> Mon) is a 4-day gap: still daily, still continuous."""
+    days = [d for d in _business_days(date(2024, 3, 18), 20) if d != date(2024, 3, 29)]
+    joined = inner_join_on_date(_series(days), _series(days))
+    assert len(joined.dates) == 19
+    assert joined.frequency == "daily"

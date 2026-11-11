@@ -46,6 +46,23 @@ def infer_frequency(dates: list[date]) -> str:
     raise ValueError(f"Cannot infer frequency: median gap of {gap} days")
 
 
+def _require_continuous(dates: list[date], frequency: str) -> None:
+    """Every step between joined dates must be one period of the frequency.
+
+    A lag is one step in the joined series, so a missing stretch would make
+    a lag span several periods without anyone seeing it.
+    """
+    low, high = next((lo, hi) for name, lo, hi in _FREQUENCY_GAPS if name == frequency)
+    for earlier, later in zip(dates, dates[1:], strict=False):
+        days = (later - earlier).days
+        if not low <= days <= high:
+            raise ValueError(
+                f"Joined {frequency} series has a gap of {days} days from "
+                f"{earlier.isoformat()} to {later.isoformat()}; "
+                f"a {frequency} step is {low:g} to {high:g} days"
+            )
+
+
 def _by_date(series: list[Observation], label: str) -> dict[date, float]:
     values: dict[date, float] = {}
     for obs in series:
@@ -67,6 +84,7 @@ def inner_join_on_date(source: list[Observation], target: list[Observation]) -> 
             f"target is {target_frequency}"
         )
     shared = sorted(source_by_date.keys() & target_by_date.keys())
+    _require_continuous(shared, source_frequency)
     return JoinedSeries(
         dates=shared,
         source=[source_by_date[d] for d in shared],
