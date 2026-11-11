@@ -13,7 +13,6 @@ from sophia_episto.research.contracts import (
     EvidenceAssessment,
     HypothesisAssessment,
     HypothesisRecordStatus,
-    ProvenanceStatus,
     QuestionType,
     ResultStatus,
 )
@@ -94,17 +93,10 @@ def apply_assessment_policy(
             alternatives,
         )
 
-    verified = [
-        item
-        for item in cited_evidence
-        if item.provenance_status == ProvenanceStatus.VERIFIED
-    ]
-    unverified = [
-        item
-        for item in cited_evidence
-        if item.provenance_status != ProvenanceStatus.VERIFIED
-    ]
-    if unverified:
+    # No source claim is verified: provenance is at best well_formed, a
+    # shape check. Cited claims are recorded and add a limitation; they
+    # grant no use on their own.
+    if cited_evidence:
         limitations.append("unverified_or_invalid_source_provenance")
 
     succeeded = [item for item in cited_results if item.status == ResultStatus.SUCCEEDED]
@@ -129,11 +121,8 @@ def apply_assessment_policy(
         and not item.identification_resolved
     ]
 
-    if verified:
-        allowed.append(AllowedUse.EXPLAIN)
     if predictive or identified:
-        if AllowedUse.EXPLAIN not in allowed:
-            allowed.append(AllowedUse.EXPLAIN)
+        allowed.append(AllowedUse.EXPLAIN)
         allowed.append(AllowedUse.PREDICT)
     if identified:
         allowed.extend([AllowedUse.INTERVENE, AllowedUse.COUNTERFACTUAL])
@@ -143,13 +132,13 @@ def apply_assessment_policy(
         unmet.append("causal_identification_unresolved")
         limitations.append("predictive_or_qualitative_result_is_not_an_intervention")
 
-    if not allowed and unverified and not succeeded:
+    if not allowed and cited_evidence and not succeeded:
         unmet.append("verified_source_or_result_required")
 
     status = HypothesisRecordStatus.USEFUL_BOUNDED if allowed else (
         HypothesisRecordStatus.UNMET_REQUIREMENTS
     )
-    if failed and not succeeded and not verified:
+    if failed and not succeeded:
         status = HypothesisRecordStatus.FAILED
         if ResultStatus.UNAVAILABLE in {item.status for item in failed}:
             status = HypothesisRecordStatus.UNAVAILABLE

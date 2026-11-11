@@ -195,6 +195,52 @@ class ResearchLedger:
                     "ALTER TABLE idempotency ADD COLUMN request_digest TEXT"
                 )
             self._migrate_case_scoped_contributions(conn)
+            self._migrate_well_formed_provenance(conn)
+
+    @staticmethod
+    def _migrate_well_formed_provenance(conn: sqlite3.Connection) -> None:
+        """Rename the stored provenance status 'verified' to 'well_formed'.
+
+        Ledgers written before the rename hold 'verified' in contribution
+        payloads and in stored submit_evidence responses. The old status was
+        a shape check, never a verification. Stored assessments are left as
+        they were; they are not re-scored here.
+        """
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for case_id, contribution_id, payload in conn.execute(
+                "SELECT case_id, contribution_id, payload_json FROM contributions "
+                "WHERE payload_json LIKE '%verified%'"
+            ).fetchall():
+                data = json.loads(payload)
+                if data.get("provenance_status") != "verified":
+                    continue
+                data["provenance_status"] = "well_formed"
+                conn.execute(
+                    "UPDATE contributions SET payload_json = ? "
+                    "WHERE case_id = ? AND contribution_id = ?",
+                    (json.dumps(data), case_id, contribution_id),
+                )
+            for case_id, key, response in conn.execute(
+                "SELECT case_id, idempotency_key, response_json FROM idempotency "
+                "WHERE operation = 'submit_evidence' AND response_json LIKE '%verified%'"
+            ).fetchall():
+                data = json.loads(response)
+                changed = False
+                for item in data.get("provenance") or []:
+                    if item.get("status") == "verified":
+                        item["status"] = "well_formed"
+                        changed = True
+                if changed:
+                    conn.execute(
+                        "UPDATE idempotency SET response_json = ? "
+                        "WHERE case_id = ? AND idempotency_key = ?",
+                        (json.dumps(data), case_id, key),
+                    )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     @staticmethod
     def _migrate_case_scoped_contributions(conn: sqlite3.Connection) -> None:

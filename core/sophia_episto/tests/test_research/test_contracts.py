@@ -1,7 +1,8 @@
 from sophia_episto.research.contracts import ProvenanceStatus, SourceClaimRef
 
 
-def test_verified_claim_needs_identity_and_locus():
+def test_identity_and_excerpt_is_only_well_formed():
+    """An identity field plus a locus is a shape check, not verification."""
     claim = SourceClaimRef(
         namespace="analyst",
         occurrence_id="doc:1:span:4",
@@ -10,7 +11,7 @@ def test_verified_claim_needs_identity_and_locus():
         excerpt="quoted text",
         author="A",
     )
-    assert claim.provenance_status() == ProvenanceStatus.VERIFIED
+    assert claim.provenance_status() == ProvenanceStatus.WELL_FORMED
 
 
 def test_bare_citation_is_unverified():
