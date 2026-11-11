@@ -147,10 +147,11 @@ class ResearchLedger:
                     payload_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS contributions (
-                    contribution_id TEXT PRIMARY KEY,
+                    contribution_id TEXT NOT NULL,
                     case_id TEXT NOT NULL,
                     independence_group TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (case_id, contribution_id)
                 );
                 CREATE TABLE IF NOT EXISTS results (
                     run_id TEXT PRIMARY KEY,
@@ -193,6 +194,53 @@ class ResearchLedger:
                 conn.execute(
                     "ALTER TABLE idempotency ADD COLUMN request_digest TEXT"
                 )
+            self._migrate_case_scoped_contributions(conn)
+
+    @staticmethod
+    def _migrate_case_scoped_contributions(conn: sqlite3.Connection) -> None:
+        """Re-key contributions from (contribution_id) to (case_id, contribution_id).
+
+        Ledgers created before contributions were case-scoped keyed them on the
+        content-derived ID alone, so a claim could belong to only one case.
+        SQLite cannot alter a primary key, so the table is rebuilt in place,
+        in one transaction so a crash cannot leave the rows in a side table.
+        """
+
+        def legacy_key() -> bool:
+            key_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(contributions)").fetchall()
+                if row[5]
+            }
+            return key_columns == {"contribution_id"}
+
+        if not legacy_key():
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if legacy_key():  # another process may have migrated meanwhile
+                conn.execute(
+                    "CREATE TABLE contributions_case_scoped ("
+                    "contribution_id TEXT NOT NULL, "
+                    "case_id TEXT NOT NULL, "
+                    "independence_group TEXT NOT NULL, "
+                    "payload_json TEXT NOT NULL, "
+                    "PRIMARY KEY (case_id, contribution_id))"
+                )
+                conn.execute(
+                    "INSERT INTO contributions_case_scoped "
+                    "(contribution_id, case_id, independence_group, payload_json) "
+                    "SELECT contribution_id, case_id, independence_group, payload_json "
+                    "FROM contributions"
+                )
+                conn.execute("DROP TABLE contributions")
+                conn.execute(
+                    "ALTER TABLE contributions_case_scoped RENAME TO contributions"
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def get_idempotent(
         self,
@@ -325,11 +373,14 @@ class ResearchLedger:
             ).fetchall()
         return [MechanismHypothesis.model_validate_json(row["payload_json"]) for row in rows]
 
-    def get_contribution(self, contribution_id: str) -> EvidenceAssessment | None:
+    def get_contribution(
+        self, case_id: str, contribution_id: str
+    ) -> EvidenceAssessment | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT payload_json FROM contributions WHERE contribution_id = ?",
-                (contribution_id,),
+                "SELECT payload_json FROM contributions "
+                "WHERE case_id = ? AND contribution_id = ?",
+                (case_id, contribution_id),
             ).fetchone()
         if row is None:
             return None
@@ -433,8 +484,8 @@ class ResearchLedger:
                 for item in created:
                     row = conn.execute(
                         "SELECT contribution_id FROM contributions "
-                        "WHERE contribution_id = ?",
-                        (item.contribution_id,),
+                        "WHERE case_id = ? AND contribution_id = ?",
+                        (item.case_id, item.contribution_id),
                     ).fetchone()
                     if row is None:
                         still_new.append(item)

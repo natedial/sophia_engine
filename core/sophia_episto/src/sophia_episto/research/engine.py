@@ -183,7 +183,7 @@ class ResearchEngine:
             status = claim.provenance_status()
             group = claim.independence_group or claim.snapshot_hash or claim.document_revision or contribution_id
             groups.append(group)
-            existing = self.ledger.get_contribution(contribution_id)
+            existing = self.ledger.get_contribution(case.case_id, contribution_id)
             if existing is not None:
                 existing_ids.append(contribution_id)
                 continue
@@ -532,7 +532,7 @@ class ResearchEngine:
         cited_evidence: list[EvidenceAssessment] = []
         missing_evidence: list[str] = []
         for contribution_id in cited_evidence_ids:
-            item = self.ledger.get_contribution(contribution_id)
+            item = self.ledger.get_contribution(case.case_id, contribution_id)
             if item is None:
                 missing_evidence.append(contribution_id)
             else:
