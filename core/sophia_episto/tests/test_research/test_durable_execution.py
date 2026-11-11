@@ -268,3 +268,41 @@ def test_counterfactual_still_rejected_before_queue(engine):
         )
     assert exc.value.code == ProtocolErrorCode.UNSUPPORTED_QUESTION
     assert engine.explain_case({"case_id": opened["case_id"]})["pending_runs"] == []
+
+
+def test_result_from_older_method_version_is_not_reused(db_path):
+    """A new method version must compute afresh, not serve the old result."""
+    old = ResearchEngine(db_path, runner=FakeRunner(version="method-1"))
+    opened = _open(old)
+    proposed = _propose(
+        old,
+        opened["case_id"],
+        opened["revision"],
+        "agent-a",
+        "reaction_function",
+        "positive",
+        "hyp-1",
+    )
+    first = old.request_test(
+        _test_payload(
+            opened["case_id"],
+            proposed["revision"],
+            proposed["hypothesis"]["hypothesis_id"],
+            "before-upgrade",
+        )
+    )
+
+    new = ResearchEngine(db_path, runner=FakeRunner(version="method-2"))
+    second = new.request_test(
+        _test_payload(
+            opened["case_id"],
+            first["revision"],
+            proposed["hypothesis"]["hypothesis_id"],
+            "after-upgrade",
+        )
+    )
+
+    assert second["result"]["run_id"] != first["result"]["run_id"]
+    assert second["result"]["method_version"] == "method-2"
+    assert "replayed" not in second
+    assert len(new.runner.calls) == 1  # type: ignore[attr-defined]

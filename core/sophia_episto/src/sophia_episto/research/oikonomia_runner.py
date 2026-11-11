@@ -94,6 +94,7 @@ class OikonomiaMethodRunner:
                     "Executed through Oikonomia. Predictive only; not an "
                     "intervention or identified causal effect."
                 ),
+                version=GRANGER_VERSION,
             )
         ]
 

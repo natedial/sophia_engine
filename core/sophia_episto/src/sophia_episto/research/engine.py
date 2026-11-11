@@ -391,7 +391,9 @@ class ResearchEngine:
                 details={"method": method},
             )
 
-        fingerprint = _run_fingerprint(method, snapshot, hypothesis_id, case.case_id)
+        fingerprint = _run_fingerprint(
+            method, capability.version, snapshot, hypothesis_id, case.case_id
+        )
         existing = self.ledger.get_result_by_fingerprint(fingerprint)
         if existing is not None:
             if existing.status in {ResultStatus.QUEUED, ResultStatus.RUNNING}:
@@ -807,12 +809,14 @@ def _contribution_id(claim: SourceClaimRef) -> str:
 
 def _run_fingerprint(
     method: str,
+    method_version: str,
     snapshot: InputSnapshot,
     hypothesis_id: str | None,
     case_id: str,
 ) -> str:
     payload = {
         "method": method,
+        "method_version": method_version,
         "case_id": case_id,
         "hypothesis_id": hypothesis_id,
         "snapshot": snapshot.model_dump(mode="json"),

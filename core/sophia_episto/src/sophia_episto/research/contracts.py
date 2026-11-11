@@ -256,6 +256,9 @@ class MethodCapability(ResearchModel):
     question_types: list[QuestionType]
     required_inputs: list[str]
     notes: str = ""
+    # Part of every run fingerprint: a result from another version of the
+    # method is never reused for a new request.
+    version: str = ""
 
 
 class Capabilities(ResearchModel):
