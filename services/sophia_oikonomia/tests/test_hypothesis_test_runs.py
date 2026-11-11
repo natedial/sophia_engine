@@ -36,6 +36,10 @@ def _runtime(tmp_path: Path) -> OikonomiaRuntime:
     return runtime
 
 
+def _day(offset: int) -> str:
+    return (datetime(2020, 1, 1) + timedelta(days=offset)).date().isoformat()
+
+
 def _trigger(fingerprint: str) -> ModelTrigger:
     return ModelTrigger(
         trigger_type=TriggerType.HYPOTHESIS,
@@ -50,10 +54,10 @@ def _trigger(fingerprint: str) -> ModelTrigger:
                 "source_series": "x",
                 "target_series": "y",
                 "source_observations": [
-                    {"date": "2020-01-01", "value": float(i)} for i in range(40)
+                    {"date": _day(i), "value": float(i)} for i in range(40)
                 ],
                 "target_observations": [
-                    {"date": "2020-01-01", "value": float(i) + 0.1} for i in range(40)
+                    {"date": _day(i), "value": float(i) + 0.1} for i in range(40)
                 ],
             },
         },
@@ -183,3 +187,37 @@ def test_successful_test_is_not_published(tmp_path: Path) -> None:
     model = runtime.get_model("episto-granger-predictive")
     assert model is not None
     assert model.state == ModelState.RESEARCH
+
+
+def test_granger_adapter_joins_series_on_date() -> None:
+    """The adapter sends dated pairs, so Arithmos matches them by date."""
+    import math
+
+    from sophia_oikonomia.adapters.hypothesis_test import _run_granger
+
+    start = datetime(2020, 1, 1).date()
+    target = [
+        {"date": (start + timedelta(days=i)).isoformat(), "value": math.sin(i / 3) + i * 0.01}
+        for i in range(40)
+    ]
+    source = [
+        {"date": (start + timedelta(days=i)).isoformat(), "value": math.cos(i / 5)}
+        for i in range(5, 40)
+    ]
+    result = _run_granger(
+        {
+            "vintage": "v1",
+            "source_series": "x",
+            "target_series": "y",
+            "source_observations": source,
+            "target_observations": target,
+        },
+        "granger_predictive",
+        "predictive",
+    )
+
+    assert result.status == RunStatus.SUCCEEDED, result.error
+    diagnostics = result.output_summary["diagnostics"]
+    assert diagnostics["n_joined"] == 35
+    assert diagnostics["joined_start"] == "2020-01-06"
+    assert result.output_summary["method_version"] == "arithmos-granger-2"

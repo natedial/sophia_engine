@@ -1,5 +1,7 @@
 """Causality computations for time series analysis."""
 
+import json
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -13,6 +15,7 @@ from ..core.types import (
     ParamSpec,
     PrecisionType,
 )
+from .alignment import inner_join_on_date
 
 
 @registry.register
@@ -22,9 +25,11 @@ class GrangerCausality(Computation):
     Tests whether past values of one series help predict another
     beyond using past values of the target series alone.
 
-    Requires an explicit source series via `source_values`. Missing, malformed,
-    or length-mismatched source input is an error — it is not rewritten as a
-    univariate autoregression of the target.
+    Requires an explicit dated source series via `source_observations`. The
+    source and target are inner-joined on date; pairs are never matched by
+    list position. Missing or malformed source input, duplicate dates, mixed
+    frequencies, or too short an overlap is an error. Nothing is rewritten as
+    a univariate autoregression of the target.
     """
 
     name = "granger_causality"
@@ -50,9 +55,12 @@ class GrangerCausality(Computation):
             description="Target series name (alias: target)",
             required=False,
         ),
-        "source_values": ParamSpec(
+        "source_observations": ParamSpec(
             type="string",
-            description="JSON-encoded list of source series values for bivariate Granger test",
+            description=(
+                'JSON list of dated source points, [{"date": "YYYY-MM-DD", "value": 1.0}, ...]; '
+                "joined to the target on date"
+            ),
             required=False,
         ),
         "max_lag": ParamSpec(
@@ -78,9 +86,7 @@ class GrangerCausality(Computation):
         params: dict[str, Any],
         output: OutputMode,
     ) -> ComputationResult:
-        """Compute a bivariate Granger test. Source series is required."""
-        import json
-
+        """Compute a bivariate Granger test on the dates both series share."""
         params = dict(params)
         if not params.get("source") and not params.get("source_series"):
             raise ValueError("Missing required parameter: source or source_series")
@@ -91,34 +97,47 @@ class GrangerCausality(Computation):
 
         source = params["source"]
         target = params["target"]
-        source_values_str = params.get("source_values")
+        source_json = params.get("source_observations")
         max_lag = params.get("max_lag", 5)
         alpha = params.get("alpha", 0.05)
 
-        if source_values_str in (None, ""):
+        if source_json in (None, ""):
             raise ValueError(
-                "Missing required parameter: source_values. "
+                "Missing required parameter: source_observations. "
                 "Omitting the source series changes the question being tested."
             )
+        source_obs = _parse_dated_series(source_json)
 
-        if len(data) < max_lag + 10:
-            raise ValueError(f"Insufficient data: need at least {max_lag + 10} observations")
-
-        y = np.array([obs.value for obs in data])
-        try:
-            parsed = json.loads(source_values_str)
-            x = np.asarray(parsed, dtype=float)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        joined = inner_join_on_date(source_obs, data)
+        n_joined = len(joined.dates)
+        if n_joined < max_lag + 10:
             raise ValueError(
-                "source_values must be a JSON-encoded list of numbers"
-            ) from exc
-        if x.ndim != 1:
-            raise ValueError("source_values must be a one-dimensional series")
-        if len(x) != len(y):
-            raise ValueError(
-                f"source_values length {len(x)} does not match target observations {len(y)}"
+                f"Insufficient data: need at least {max_lag + 10} observations on "
+                f"shared dates, have n_joined={n_joined} "
+                f"(source {len(source_obs)}, target {len(data)})"
             )
-        return self._bivariate_granger(x, y, source, target, max_lag, alpha, len(data))
+
+        result = self._bivariate_granger(
+            np.asarray(joined.source, dtype=float),
+            np.asarray(joined.target, dtype=float),
+            source,
+            target,
+            max_lag,
+            alpha,
+            n_joined,
+        )
+        if result.summary is not None:
+            result.summary.update(
+                {
+                    "n_source": len(source_obs),
+                    "n_target": len(data),
+                    "n_joined": n_joined,
+                    "joined_start": joined.dates[0].isoformat(),
+                    "joined_end": joined.dates[-1].isoformat(),
+                    "frequency": joined.frequency,
+                }
+            )
+        return result
 
     def _bivariate_granger(
         self,
@@ -186,3 +205,17 @@ class GrangerCausality(Computation):
                 "interpretation": "Bivariate Granger causality test using VAR model.",
             },
         )
+
+
+def _parse_dated_series(source_json: str) -> list[Observation]:
+    """Parse `source_observations`: a JSON list of {"date", "value"} objects."""
+    try:
+        parsed = json.loads(source_json)
+        return [
+            Observation(date=date.fromisoformat(point["date"]), value=float(point["value"]))
+            for point in parsed
+        ]
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            'source_observations must be a JSON-encoded list of {"date", "value"} objects'
+        ) from exc
