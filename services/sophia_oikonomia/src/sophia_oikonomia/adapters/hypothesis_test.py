@@ -21,7 +21,7 @@ from ..core.types import (
 from .base import ModelAdapter
 
 ADAPTER_ID = "hypothesis_test"
-GRANGER_VERSION = "arithmos-granger-1"
+GRANGER_VERSION = "arithmos-granger-2"  # 2: series joined on date
 
 
 class HypothesisTestAdapter(ModelAdapter):
@@ -136,11 +136,14 @@ def _run_granger(
         Observation(date=date.fromisoformat(point["date"]), value=float(point["value"]))
         for point in target_obs
     ]
-    source_values = [float(point["value"]) for point in source_obs]
+    # Dated pairs: Arithmos joins source and target on date, not position.
+    source_points = [
+        {"date": str(point["date"]), "value": float(point["value"])} for point in source_obs
+    ]
     params = {
         "source": snapshot.get("source_series") or "source",
         "target": snapshot.get("target_series") or "target",
-        "source_values": json.dumps(source_values),
+        "source_observations": json.dumps(source_points),
     }
     window = {
         "start": snapshot.get("window_start"),
