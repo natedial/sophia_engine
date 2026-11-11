@@ -92,6 +92,59 @@ def test_replay_after_success_does_not_rerun(engine):
     assert len(engine.runner.calls) == 1  # type: ignore[attr-defined]
 
 
+def test_second_client_same_fingerprint_gets_existing_run(engine):
+    """A second client sending the same computation converges on the first run.
+
+    It read the case before the first run was queued, so its expected
+    revision is stale; the fingerprint dedup must still answer it.
+    """
+    opened = _open(engine)
+    proposed = _propose(
+        engine,
+        opened["case_id"],
+        opened["revision"],
+        "agent-a",
+        "reaction_function",
+        "positive",
+        "hyp-1",
+    )
+    args = (
+        opened["case_id"],
+        proposed["revision"],
+        proposed["hypothesis"]["hypothesis_id"],
+    )
+    first = engine.request_test(_test_payload(*args, "c1"))
+    second = engine.request_test(_test_payload(*args, "c2"))
+    assert second["result"]["run_id"] == first["result"]["run_id"]
+    assert second["replayed"] is True
+    assert len(engine.runner.calls) == 1  # type: ignore[attr-defined]
+
+
+def test_stale_revision_new_fingerprint_still_rejected(engine):
+    """Only the dedup path may skip the revision check."""
+    opened = _open(engine)
+    proposed = _propose(
+        engine,
+        opened["case_id"],
+        opened["revision"],
+        "agent-a",
+        "reaction_function",
+        "positive",
+        "hyp-1",
+    )
+    args = (
+        opened["case_id"],
+        proposed["revision"],
+        proposed["hypothesis"]["hypothesis_id"],
+    )
+    engine.request_test(_test_payload(*args, "c1"))
+    different = _test_payload(*args, "c2")
+    different["input"] = snapshot("v2", [0.5, 0.6, 0.7], [0.2, 0.3, 0.4]).model_dump()
+    with pytest.raises(ProtocolError) as exc:
+        engine.request_test(different)
+    assert exc.value.code == ProtocolErrorCode.STALE_REVISION
+
+
 def test_concurrent_clients_one_fingerprint(db_path, tmp_path):
     pytest.importorskip("sophia_oikonomia")
     from tests.test_research.test_execution_lease import CountingAdapter, _engine

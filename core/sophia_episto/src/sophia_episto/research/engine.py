@@ -269,8 +269,11 @@ class ResearchEngine:
     def request_test(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_protocol(payload)
         self._require_actor(payload)
+        # The revision check waits until after the fingerprint lookup: a
+        # client repeating an existing computation gets that run back even
+        # if another client's request moved the case on in the meantime.
         case, idempotency_key, replay, digest = self._mutation_prelude(
-            payload, operation="request_test"
+            payload, operation="request_test", check_revision=False
         )
         if replay is not None:
             queued = replay.get("result") or {}
@@ -349,6 +352,7 @@ class ResearchEngine:
                 )
             return response
 
+        self.ledger.require_revision(case, int(payload["expected_revision"]))
         run_id = f"run-{uuid4().hex[:12]}"
         queued = EmpiricalResult(
             run_id=run_id,
@@ -651,7 +655,7 @@ class ResearchEngine:
         }
 
     def _mutation_prelude(
-        self, payload: dict[str, Any], *, operation: str
+        self, payload: dict[str, Any], *, operation: str, check_revision: bool = True
     ) -> tuple[ResearchCase, str, dict[str, Any] | None, str]:
         case_id = str(payload.get("case_id") or "")
         case = self.ledger.require_case(case_id)
@@ -672,7 +676,8 @@ class ResearchEngine:
                 ProtocolErrorCode.INVALID_REQUEST,
                 "expected_revision is required for mutations",
             )
-        self.ledger.require_revision(case, int(payload["expected_revision"]))
+        if check_revision:
+            self.ledger.require_revision(case, int(payload["expected_revision"]))
         return case, idempotency_key, None, digest
 
     def _require_protocol(self, payload: dict[str, Any]) -> None:
