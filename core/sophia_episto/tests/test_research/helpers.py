@@ -20,8 +20,10 @@ class FakeRunner:
         available: bool = True,
         result: EmpiricalResult | None = None,
         error: ProtocolError | None = None,
+        version: str = "fake-1",
     ) -> None:
         self.available = available
+        self.version = version
         self.result = result
         self.error = error
         self.calls: list[dict] = []
@@ -33,6 +35,7 @@ class FakeRunner:
                 available=self.available,
                 question_types=[QuestionType.PREDICTIVE, QuestionType.ASSOCIATION],
                 required_inputs=["source_observations", "target_observations", "vintage"],
+                version=self.version,
             )
         ]
 
@@ -68,7 +71,7 @@ class FakeRunner:
             hypothesis_id=kwargs["hypothesis_id"],
             fingerprint=kwargs["fingerprint"],
             method=kwargs["method"],
-            method_version="fake-1",
+            method_version=self.version,
             question_type=QuestionType.PREDICTIVE,
             estimand="predictive_granger",
             status=ResultStatus.SUCCEEDED,

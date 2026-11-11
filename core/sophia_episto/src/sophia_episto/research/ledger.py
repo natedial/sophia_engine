@@ -147,10 +147,11 @@ class ResearchLedger:
                     payload_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS contributions (
-                    contribution_id TEXT PRIMARY KEY,
+                    contribution_id TEXT NOT NULL,
                     case_id TEXT NOT NULL,
                     independence_group TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (case_id, contribution_id)
                 );
                 CREATE TABLE IF NOT EXISTS results (
                     run_id TEXT PRIMARY KEY,
@@ -183,6 +184,11 @@ class ResearchLedger:
                     response_json TEXT NOT NULL,
                     PRIMARY KEY (case_id, idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS provenance_rescore_queue (
+                    case_id TEXT NOT NULL,
+                    contribution_id TEXT NOT NULL,
+                    PRIMARY KEY (case_id, contribution_id)
+                );
                 """
             )
             idempotency_columns = {
@@ -193,6 +199,105 @@ class ResearchLedger:
                 conn.execute(
                     "ALTER TABLE idempotency ADD COLUMN request_digest TEXT"
                 )
+            self._migrate_case_scoped_contributions(conn)
+            self._migrate_well_formed_provenance(conn)
+
+    @staticmethod
+    def _migrate_well_formed_provenance(conn: sqlite3.Connection) -> None:
+        """Rename the stored provenance status 'verified' to 'well_formed'.
+
+        Ledgers written before the rename hold 'verified' in contribution
+        payloads and in stored submit_evidence responses. The old status was
+        a shape check, never a verification. Each rewritten contribution is
+        queued in the same transaction, so the engine re-scores the
+        assessments that cite it.
+        """
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for case_id, contribution_id, payload in conn.execute(
+                "SELECT case_id, contribution_id, payload_json FROM contributions "
+                "WHERE payload_json LIKE '%verified%'"
+            ).fetchall():
+                data = json.loads(payload)
+                if data.get("provenance_status") != "verified":
+                    continue
+                data["provenance_status"] = "well_formed"
+                conn.execute(
+                    "UPDATE contributions SET payload_json = ? "
+                    "WHERE case_id = ? AND contribution_id = ?",
+                    (json.dumps(data), case_id, contribution_id),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO provenance_rescore_queue "
+                    "(case_id, contribution_id) VALUES (?, ?)",
+                    (case_id, contribution_id),
+                )
+            for case_id, key, response in conn.execute(
+                "SELECT case_id, idempotency_key, response_json FROM idempotency "
+                "WHERE operation = 'submit_evidence' AND response_json LIKE '%verified%'"
+            ).fetchall():
+                data = json.loads(response)
+                changed = False
+                for item in data.get("provenance") or []:
+                    if item.get("status") == "verified":
+                        item["status"] = "well_formed"
+                        changed = True
+                if changed:
+                    conn.execute(
+                        "UPDATE idempotency SET response_json = ? "
+                        "WHERE case_id = ? AND idempotency_key = ?",
+                        (json.dumps(data), case_id, key),
+                    )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _migrate_case_scoped_contributions(conn: sqlite3.Connection) -> None:
+        """Re-key contributions from (contribution_id) to (case_id, contribution_id).
+
+        Ledgers created before contributions were case-scoped keyed them on the
+        content-derived ID alone, so a claim could belong to only one case.
+        SQLite cannot alter a primary key, so the table is rebuilt in place,
+        in one transaction so a crash cannot leave the rows in a side table.
+        """
+
+        def legacy_key() -> bool:
+            key_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(contributions)").fetchall()
+                if row[5]
+            }
+            return key_columns == {"contribution_id"}
+
+        if not legacy_key():
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if legacy_key():  # another process may have migrated meanwhile
+                conn.execute(
+                    "CREATE TABLE contributions_case_scoped ("
+                    "contribution_id TEXT NOT NULL, "
+                    "case_id TEXT NOT NULL, "
+                    "independence_group TEXT NOT NULL, "
+                    "payload_json TEXT NOT NULL, "
+                    "PRIMARY KEY (case_id, contribution_id))"
+                )
+                conn.execute(
+                    "INSERT INTO contributions_case_scoped "
+                    "(contribution_id, case_id, independence_group, payload_json) "
+                    "SELECT contribution_id, case_id, independence_group, payload_json "
+                    "FROM contributions"
+                )
+                conn.execute("DROP TABLE contributions")
+                conn.execute(
+                    "ALTER TABLE contributions_case_scoped RENAME TO contributions"
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def get_idempotent(
         self,
@@ -325,11 +430,14 @@ class ResearchLedger:
             ).fetchall()
         return [MechanismHypothesis.model_validate_json(row["payload_json"]) for row in rows]
 
-    def get_contribution(self, contribution_id: str) -> EvidenceAssessment | None:
+    def get_contribution(
+        self, case_id: str, contribution_id: str
+    ) -> EvidenceAssessment | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT payload_json FROM contributions WHERE contribution_id = ?",
-                (contribution_id,),
+                "SELECT payload_json FROM contributions "
+                "WHERE case_id = ? AND contribution_id = ?",
+                (case_id, contribution_id),
             ).fetchone()
         if row is None:
             return None
@@ -433,8 +541,8 @@ class ResearchLedger:
                 for item in created:
                     row = conn.execute(
                         "SELECT contribution_id FROM contributions "
-                        "WHERE contribution_id = ?",
-                        (item.contribution_id,),
+                        "WHERE case_id = ? AND contribution_id = ?",
+                        (item.case_id, item.contribution_id),
                     ).fetchone()
                     if row is None:
                         still_new.append(item)
@@ -754,6 +862,56 @@ class ResearchLedger:
             result=result,
             expected_revision=expected_revision,
         )
+
+    def list_rescore_queue(self) -> dict[str, set[str]]:
+        """Contributions renamed from 'verified', by case, awaiting re-score."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT case_id, contribution_id FROM provenance_rescore_queue"
+            ).fetchall()
+        queue: dict[str, set[str]] = {}
+        for row in rows:
+            queue.setdefault(row["case_id"], set()).add(row["contribution_id"])
+        return queue
+
+    def transact_rescore(
+        self,
+        case_id: str,
+        contribution_ids: set[str],
+        rescored: list[HypothesisAssessment],
+    ) -> None:
+        """Write engine re-scores and clear their queue rows atomically.
+
+        Writes nothing if another process already cleared the queue, and
+        skips an assessment that changed after it was re-scored.
+        """
+        ids = sorted(contribution_ids)
+        marks = ", ".join("?" for _ in ids)
+        with self._lock, self._immediate() as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM provenance_rescore_queue "
+                f"WHERE case_id = ? AND contribution_id IN ({marks})",
+                (case_id, *ids),
+            ).fetchone()[0]
+            if not pending:
+                return
+            fresh = []
+            for assessment in rescored:
+                row = conn.execute(
+                    "SELECT revision FROM assessments WHERE hypothesis_id = ?",
+                    (assessment.hypothesis_id,),
+                ).fetchone()
+                if row is not None and row["revision"] == assessment.revision - 1:
+                    fresh.append(assessment)
+            if fresh:
+                self._bump(conn, self._load_case(conn, case_id))
+                for assessment in fresh:
+                    self._write_assessment(conn, assessment)
+            conn.execute(
+                "DELETE FROM provenance_rescore_queue "
+                f"WHERE case_id = ? AND contribution_id IN ({marks})",
+                (case_id, *ids),
+            )
 
     def transact_assessment(
         self,

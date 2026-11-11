@@ -17,7 +17,9 @@ PROTOCOL_VERSION = "1"
 
 
 class ProvenanceStatus(str, Enum):
-    VERIFIED = "verified"
+    # Has an identity field and a locus. Nothing has checked the excerpt
+    # against the source, so this is a shape check, not verification.
+    WELL_FORMED = "well_formed"
     UNVERIFIED = "unverified"
     INVALID = "invalid"
 
@@ -102,7 +104,7 @@ class SourceClaimRef(ResearchModel):
         has_identity = bool(self.snapshot_hash or self.content_hash or self.document_revision)
         has_locus = bool(self.locations or (self.excerpt and self.excerpt.strip()))
         if has_identity and has_locus:
-            return ProvenanceStatus.VERIFIED
+            return ProvenanceStatus.WELL_FORMED
         if self.citation and not has_identity and not has_locus:
             return ProvenanceStatus.UNVERIFIED
         if has_identity or has_locus:
@@ -254,6 +256,9 @@ class MethodCapability(ResearchModel):
     question_types: list[QuestionType]
     required_inputs: list[str]
     notes: str = ""
+    # Part of every run fingerprint: a result from another version of the
+    # method is never reused for a new request.
+    version: str = ""
 
 
 class Capabilities(ResearchModel):
