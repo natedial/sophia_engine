@@ -1,15 +1,15 @@
 """FastAPI application entry point for Sophia Arithmos."""
 
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .config import settings, configure_logging
 from .api import router
+from .config import configure_logging, settings
 
 # Configure logging before anything else
 configure_logging()
@@ -17,7 +17,7 @@ configure_logging()
 logger = logging.getLogger("sophia_arithmos")
 
 # Import computations module to trigger registration
-from . import computations  # noqa: F401
+from . import computations  # noqa: E402, F401
 
 
 @asynccontextmanager

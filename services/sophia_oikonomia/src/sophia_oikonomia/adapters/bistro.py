@@ -46,7 +46,9 @@ class BistroAdapter(ModelAdapter):
             if dependency.kind == DependencyKind.SERIES and dependency.series_id
         ]
         if not series_dependencies:
-            raise ValueError(f"BISTRO model '{definition.id}' requires at least one series dependency")
+            raise ValueError(
+                f"BISTRO model '{definition.id}' requires at least one series dependency"
+            )
 
         lookback_days = int(
             definition.execution.default_parameters.get("lookback_days", self.default_lookback_days)
@@ -87,7 +89,8 @@ class BistroAdapter(ModelAdapter):
 
         if target_payload is None:
             raise ValueError(
-                f"BISTRO model '{definition.id}' target series '{target_series_id}' was not found in dependencies"
+                f"BISTRO model '{definition.id}' target series '{target_series_id}' "
+                "was not found in dependencies"
             )
 
         return InputSnapshotRef(
@@ -131,12 +134,14 @@ class BistroAdapter(ModelAdapter):
         }
 
         insights = [
-            f"{definition.name} produced {len(forecasts)} forecast points as of {run.input_snapshot.as_of.date().isoformat()}."
+            f"{definition.name} produced {len(forecasts)} forecast points as of "
+            f"{run.input_snapshot.as_of.date().isoformat()}."
         ]
         if forecasts:
             first_point = forecasts[0]
             insights.append(
-                f"Near-term forecast is {first_point.get('point_forecast')} for {first_point.get('timestamp')}."
+                f"Near-term forecast is {first_point.get('point_forecast')} "
+                f"for {first_point.get('timestamp')}."
             )
 
         status = RunStatus.SUCCEEDED if payload.get("status") != "error" else RunStatus.FAILED

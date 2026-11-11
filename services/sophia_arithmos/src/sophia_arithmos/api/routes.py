@@ -7,13 +7,13 @@ from fastapi import APIRouter, HTTPException
 
 from .. import __version__
 from ..config import settings
-from ..core import registry, get_computation, Observation, OutputMode
+from ..core import Observation, OutputMode, get_computation, registry
 from .schemas import (
+    ComputationResultOutput,
+    ComputationTypeInfo,
+    ComputationTypesResponse,
     ComputeRequest,
     ComputeResponse,
-    ComputationResultOutput,
-    ComputationTypesResponse,
-    ComputationTypeInfo,
     HealthResponse,
     ObservationOutput,
 )
@@ -71,7 +71,10 @@ async def compute(request: ComputeRequest) -> ComputeResponse:
         )
         raise HTTPException(
             status_code=400,
-            detail=f"Too many data points: {len(request.data)} exceeds limit of {settings.max_input_points}",
+            detail=(
+                f"Too many data points: {len(request.data)} "
+                f"exceeds limit of {settings.max_input_points}"
+            ),
         )
 
     if len(request.computations) > settings.max_computations:
@@ -82,7 +85,10 @@ async def compute(request: ComputeRequest) -> ComputeResponse:
         )
         raise HTTPException(
             status_code=400,
-            detail=f"Too many computations: {len(request.computations)} exceeds limit of {settings.max_computations}",
+            detail=(
+                f"Too many computations: {len(request.computations)} "
+                f"exceeds limit of {settings.max_computations}"
+            ),
         )
 
     # Convert input data to internal format

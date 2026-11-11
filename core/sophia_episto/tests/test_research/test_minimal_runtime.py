@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from sophia_episto.research.engine import ResearchEngine
 from tests.test_research.helpers import FakeRunner
 
 

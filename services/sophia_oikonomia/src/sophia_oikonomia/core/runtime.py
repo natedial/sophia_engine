@@ -28,9 +28,9 @@ from .types import (
     PromoteModelRequest,
     PromotionGate,
     PromotionReview,
-    PublishProjectionRequest,
-    PublishedProjection,
     PublicationState,
+    PublishedProjection,
+    PublishProjectionRequest,
     ReviewModelRequest,
     RunPlan,
     RunPlanItem,
@@ -174,14 +174,16 @@ class OikonomiaRuntime:
         review = self.store.get_latest_review(model_id)
         if review is None or review.requested_state != request.target_state:
             raise ValueError(
-                f"Model '{model_id}' has no matching review for promotion to {request.target_state.value}"
+                f"Model '{model_id}' has no matching review for promotion to "
+                f"{request.target_state.value}"
             )
 
         gate_map = {result.gate: result.status for result in review.gate_results}
         for gate in self._required_gates(request.target_state):
             if gate_map.get(gate) not in {GateStatus.PASSED, GateStatus.WAIVED}:
                 raise ValueError(
-                    f"Model '{model_id}' failed promotion gate '{gate.value}' for {request.target_state.value}"
+                    f"Model '{model_id}' failed promotion gate '{gate.value}' "
+                    f"for {request.target_state.value}"
                 )
 
         updates: dict[str, object] = {

@@ -1,7 +1,6 @@
 """Computation registry for dynamic lookup."""
 
 import logging
-from typing import Type
 
 from .base import Computation
 
@@ -17,7 +16,7 @@ class ComputationRegistry:
     def __init__(self) -> None:
         self._computations: dict[str, Computation] = {}
 
-    def register(self, computation_class: Type[Computation]) -> Type[Computation]:
+    def register(self, computation_class: type[Computation]) -> type[Computation]:
         """Register a computation class. Can be used as a decorator."""
         instance = computation_class()
         self._computations[instance.name] = instance

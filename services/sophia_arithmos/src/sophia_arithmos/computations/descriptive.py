@@ -1,6 +1,5 @@
 """Descriptive statistics computations."""
 
-from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -177,7 +176,10 @@ class DescriptiveStats(Computation):
     """Calculate comprehensive descriptive statistics."""
 
     name = "descriptive_stats"
-    description = "Calculate comprehensive descriptive statistics (mean, median, std, min, max, quartiles)"
+    description = (
+        "Calculate comprehensive descriptive statistics "
+        "(mean, median, std, min, max, quartiles)"
+    )
     precision_type = PrecisionType.DEFAULT
 
     def compute(

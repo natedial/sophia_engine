@@ -272,11 +272,17 @@ class CompoundRates(Computation):
     """Compound multiple period rates together."""
 
     name = "compound_rates"
-    description = "Compound multiple rates together and optionally annualize the result. Input rates can be annualized rates (default) or period rates."
+    description = (
+        "Compound multiple rates together and optionally annualize the result. "
+        "Input rates can be annualized rates (default) or period rates."
+    )
     params = {
         "input_annualized": ParamSpec(
             type="bool",
-            description="If True (default), input rates are annualized and will be converted to period rates first",
+            description=(
+                "If True (default), input rates are annualized and will be "
+                "converted to period rates first"
+            ),
             default=True,
         ),
         "annualize_output": ParamSpec(
@@ -323,7 +329,9 @@ class CompoundRates(Computation):
             days = (data[i + 1].date - data[i].date).days
 
             if days <= 0:
-                raise ValueError("Observations must be in chronological order with positive day gaps")
+                raise ValueError(
+                    "Observations must be in chronological order with positive day gaps"
+                )
 
             if input_annualized:
                 # Convert annualized rate to period rate: (1 + r)^(days/365) - 1
@@ -371,7 +379,9 @@ class ContinuousToDiscrete(Computation):
     params = {
         "periods": ParamSpec(
             type="int",
-            description="Compounding frequency per year (1=annual, 2=semi, 4=quarterly, 12=monthly)",
+            description=(
+                "Compounding frequency per year (1=annual, 2=semi, 4=quarterly, 12=monthly)"
+            ),
             default=1,
             min_value=1,
         ),

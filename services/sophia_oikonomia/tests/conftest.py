@@ -4,7 +4,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sophia_oikonomia.adapters.base import ModelAdapter
-from sophia_oikonomia.main import app, runtime, store
 from sophia_oikonomia.core.types import (
     InputSnapshotRef,
     ModelDefinition,
@@ -13,6 +12,7 @@ from sophia_oikonomia.core.types import (
     ModelTrigger,
     RunStatus,
 )
+from sophia_oikonomia.main import app, runtime, store
 
 
 class FakeBistroAdapter(ModelAdapter):
