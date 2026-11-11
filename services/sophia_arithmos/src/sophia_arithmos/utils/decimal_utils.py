@@ -1,7 +1,6 @@
 """Decimal precision utilities."""
 
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Union
+from decimal import ROUND_HALF_UP, Decimal
 
 from ..config import settings
 from ..core.types import PrecisionType
@@ -21,7 +20,7 @@ def get_precision_for_type(precision_type: PrecisionType) -> int:
 
 
 def quantize_decimal(
-    value: Union[Decimal, float, int, str],
+    value: Decimal | float | int | str,
     precision: int,
 ) -> Decimal:
     """Quantize a value to specified decimal places.
@@ -41,7 +40,7 @@ def quantize_decimal(
 
 
 def round_to_precision(
-    value: Union[Decimal, float, int, str],
+    value: Decimal | float | int | str,
     precision_type: PrecisionType = PrecisionType.DEFAULT,
 ) -> float:
     """Round a value to the precision specified by type.
@@ -59,7 +58,7 @@ def round_to_precision(
 
 
 def format_with_precision(
-    value: Union[Decimal, float, int, str],
+    value: Decimal | float | int | str,
     precision_type: PrecisionType = PrecisionType.DEFAULT,
 ) -> str:
     """Format a value as a string with appropriate precision.

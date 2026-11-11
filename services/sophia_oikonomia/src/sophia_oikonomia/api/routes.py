@@ -11,9 +11,9 @@ from ..core.types import (
     ModelTrigger,
     OwnershipError,
     PromoteModelRequest,
-    PublishProjectionRequest,
-    PublishedProjection,
     PromotionReview,
+    PublishedProjection,
+    PublishProjectionRequest,
     ReviewModelRequest,
     RunPlan,
     TriggerExecutionResult,
@@ -92,7 +92,9 @@ def build_router(runtime: OikonomiaRuntime) -> APIRouter:
 
         try:
             parsed_trigger = ModelTrigger.model_validate(trigger)
-            return runtime.create_run(model_id=model_id, trigger=parsed_trigger, requested_by=str(requested_by))
+            return runtime.create_run(
+                model_id=model_id, trigger=parsed_trigger, requested_by=str(requested_by)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -174,7 +176,10 @@ def build_router(runtime: OikonomiaRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"No publication for model: {model_id}")
         return publication
 
-    @router.get("/v1/publications/latest/slot/{production_slot}", response_model=PublishedProjection)
+    @router.get(
+        "/v1/publications/latest/slot/{production_slot}",
+        response_model=PublishedProjection,
+    )
     async def get_latest_publication_for_slot(production_slot: str) -> PublishedProjection:
         publication = runtime.get_latest_publication_for_slot(production_slot)
         if publication is None:

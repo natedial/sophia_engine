@@ -222,7 +222,11 @@ class RollingRegression(Computation):
                 "latest_slope": slopes[-1].value if slopes else None,
                 "latest_r_squared": r_squared_series[-1].value if r_squared_series else None,
                 "avg_slope": float(np.mean([s.value for s in slopes])) if slopes else None,
-                "avg_r_squared": float(np.mean([r.value for r in r_squared_series])) if r_squared_series else None,
+                "avg_r_squared": (
+                    float(np.mean([r.value for r in r_squared_series]))
+                    if r_squared_series
+                    else None
+                ),
             },
             metadata={
                 "computation": "rolling_regression",

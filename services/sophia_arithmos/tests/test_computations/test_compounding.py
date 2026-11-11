@@ -1,15 +1,14 @@
 """Tests for compounding computations."""
 
-import math
 from datetime import date
 
-from sophia_arithmos.core.types import Observation, OutputMode
 from sophia_arithmos.computations.compounding import (
     AnnualizeMoM,
     AnnualizeQoQ,
     CompoundDailyRate,
     Deannualize,
 )
+from sophia_arithmos.core.types import Observation, OutputMode
 
 
 def test_annualize_mom_compound() -> None:

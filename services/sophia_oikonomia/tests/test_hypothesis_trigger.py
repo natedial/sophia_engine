@@ -2,8 +2,6 @@
 
 from datetime import UTC, datetime
 
-import pytest
-
 from sophia_oikonomia.core.runtime import OikonomiaRuntime
 from sophia_oikonomia.core.types import (
     ExecutionSpec,

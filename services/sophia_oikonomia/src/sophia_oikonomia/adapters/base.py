@@ -1,7 +1,6 @@
 """Adapter boundary for external economic and market models."""
 
 from abc import ABC, abstractmethod
-from typing import Any
 
 from ..core.types import (
     InputSnapshotRef,

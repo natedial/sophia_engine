@@ -34,6 +34,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+# UP042 asks for StrEnum. StrEnum changes format() output for these
+# enums, which reaches serialized values, so it is not a lint fix.
+ignore = ["UP042"]
 
 [tool.mypy]
 python_version = "3.11"

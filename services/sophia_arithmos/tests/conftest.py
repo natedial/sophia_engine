@@ -5,8 +5,8 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from sophia_arithmos.main import app
 from sophia_arithmos.core.types import Observation
+from sophia_arithmos.main import app
 
 
 @pytest.fixture
