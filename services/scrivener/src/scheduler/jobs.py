@@ -196,6 +196,8 @@ def _log_sweep(
                 started_at=started_at,
                 completed_at=completed_at,
                 status=status,
+                source=source,
+                job_type=job_type,
             )
             session.add(log)
     except Exception as e:

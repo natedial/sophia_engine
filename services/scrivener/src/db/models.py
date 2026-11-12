@@ -143,9 +143,16 @@ class FetchLog(Base):
     records_fetched: Mapped[int | None] = mapped_column(Integer)
     records_inserted: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Which sweep wrote the row, e.g. source "FRED", job_type "daily_sweep".
+    source: Mapped[str | None] = mapped_column(String(50))
+    job_type: Mapped[str | None] = mapped_column(String(100))
 
     # Relationships
     job: Mapped["FetchJob"] = relationship(back_populates="logs")
+
+    __table_args__ = (
+        Index("idx_fetch_logs_sweep", "job_type", "source", "status", "completed_at"),
+    )
 
 
 class EconomicEvent(Base):

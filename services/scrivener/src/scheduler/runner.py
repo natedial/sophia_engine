@@ -8,6 +8,12 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from src.config import get_settings
+from src.scheduler.catch_up import (
+    RELEASE_SYNC_DAYS_AHEAD,
+    has_upcoming_release_dates,
+    last_successful_daily_sweep,
+    sweep_is_overdue,
+)
 from src.scheduler.scheduler import create_scheduler, get_timezone
 from src.scheduler.jobs import daily_sweep_all, fetch_series_on_release
 from src.scheduler.calendar import ReleaseCalendar
@@ -38,6 +44,49 @@ class SchedulerRunner:
             replace_existing=True,
         )
         logger.info(f"Scheduled daily sweep at {hour:02d}:{minute:02d} {self.settings.timezone}")
+
+    def setup_release_calendar_sync(self) -> None:
+        """Refresh release_dates daily, before the 6am calendar check."""
+        self.scheduler.add_job(
+            self._sync_release_calendar,
+            trigger=CronTrigger(hour=5, minute=50, timezone=self.tz),
+            id="release_calendar_sync",
+            name="FRED release calendar sync",
+            replace_existing=True,
+        )
+        logger.info("Scheduled FRED release calendar sync (5:50am ET)")
+
+    def _sync_release_calendar(self) -> None:
+        """Sync release_dates from FRED; a degraded sync is logged, not fatal."""
+        from src.query.releases import ReleaseQuery
+
+        ready = ReleaseQuery._auto_sync_release_calendar(days_ahead=RELEASE_SYNC_DAYS_AHEAD)
+        logger.info(f"Release calendar sync finished: ready={ready}")
+
+    def schedule_catch_up_sweep(self) -> None:
+        """Run a sweep now if the last scheduled one was missed."""
+        try:
+            last = last_successful_daily_sweep()
+        except Exception as e:  # a database outage must not stop the scheduler
+            logger.warning(f"Could not read last sweep; running catch-up anyway: {e}")
+            last = None
+        now = datetime.now(self.tz)
+        if not sweep_is_overdue(
+            last,
+            now,
+            hour=self.settings.daily_sweep_hour,
+            minute=self.settings.daily_sweep_minute,
+            tz=self.tz,
+        ):
+            return
+        self.scheduler.add_job(
+            daily_sweep_all,
+            trigger=DateTrigger(run_date=now, timezone=self.tz),
+            id="catch_up_sweep",
+            name="Catch-up sweep - missed daily sweep",
+            replace_existing=True,
+        )
+        logger.info(f"Daily sweep overdue (last success: {last}); running catch-up now")
 
     def setup_calendar_checker(self) -> None:
         """Set up a job to check release_dates every 12 hours."""
@@ -162,6 +211,17 @@ class SchedulerRunner:
         self.setup_daily_sweep()
         self.setup_calendar_checker()
         self.setup_speaker_calendar_sync()
+        self.setup_release_calendar_sync()
+        self.schedule_catch_up_sweep()
+
+        # A fresh or stale release calendar would leave nothing to schedule.
+        try:
+            calendar_ready = has_upcoming_release_dates(days=30)
+        except Exception as e:
+            logger.warning(f"Could not read release_dates; syncing anyway: {e}")
+            calendar_ready = False
+        if not calendar_ready:
+            self._sync_release_calendar()
 
         # Run initial check
         self._check_and_schedule_events()
