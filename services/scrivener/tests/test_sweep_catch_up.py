@@ -52,14 +52,28 @@ def test_comparison_works_across_time_zones() -> None:
     assert not sweep_is_overdue(last_utc, now, hour=17, minute=0, tz=ET)
 
 
-def test_runner_start_runs_overdue_sweep_immediately(monkeypatch) -> None:
+def _offline_runner(monkeypatch, *, last_sweep=None, calendar_ready=True, calls=None):
+    """A runner whose database and network touch points are stubbed out."""
+    from src.query.releases import ReleaseQuery
     from src.scheduler import runner as runner_module
 
-    monkeypatch.setattr(runner_module, "last_successful_daily_sweep", lambda: None)
+    calls = calls if calls is not None else []
+    monkeypatch.setattr(runner_module, "last_successful_daily_sweep", lambda: last_sweep)
+    monkeypatch.setattr(runner_module, "has_upcoming_release_dates", lambda days: calendar_ready)
+    monkeypatch.setattr(
+        ReleaseQuery,
+        "_auto_sync_release_calendar",
+        staticmethod(lambda days_ahead: calls.append(("sync", days_ahead)) or True),
+    )
     runner = runner_module.SchedulerRunner(blocking=False)
-    monkeypatch.setattr(runner, "_check_and_schedule_events", lambda: None)
+    monkeypatch.setattr(runner, "_check_and_schedule_events", lambda: calls.append(("check",)))
     monkeypatch.setattr(runner, "_sync_speaker_calendar", lambda: None)
     monkeypatch.setattr(runner.scheduler, "start", lambda: None)
+    return runner
+
+
+def test_runner_start_runs_overdue_sweep_immediately(monkeypatch) -> None:
+    runner = _offline_runner(monkeypatch, last_sweep=None)
 
     runner.start()
 
@@ -68,17 +82,52 @@ def test_runner_start_runs_overdue_sweep_immediately(monkeypatch) -> None:
 
 
 def test_runner_start_skips_catch_up_when_current(monkeypatch) -> None:
-    from src.scheduler import runner as runner_module
-
-    monkeypatch.setattr(
-        runner_module, "last_successful_daily_sweep", lambda: datetime.now(ET)
-    )
-    runner = runner_module.SchedulerRunner(blocking=False)
-    monkeypatch.setattr(runner, "_check_and_schedule_events", lambda: None)
-    monkeypatch.setattr(runner, "_sync_speaker_calendar", lambda: None)
-    monkeypatch.setattr(runner.scheduler, "start", lambda: None)
+    runner = _offline_runner(monkeypatch, last_sweep=datetime.now(ET))
 
     runner.start()
 
     ids = {job.id for job in runner.scheduler.get_jobs()}
     assert "catch_up_sweep" not in ids
+
+
+def test_runner_schedules_daily_release_calendar_sync(monkeypatch) -> None:
+    runner = _offline_runner(monkeypatch, last_sweep=datetime.now(ET))
+
+    runner.start()
+
+    job = runner.scheduler.get_job("release_calendar_sync")
+    assert job is not None
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "5"
+    assert fields["minute"] == "50"
+
+
+def test_daily_release_sync_looks_120_days_ahead(monkeypatch) -> None:
+    calls: list = []
+    runner = _offline_runner(monkeypatch, last_sweep=datetime.now(ET), calls=calls)
+
+    runner._sync_release_calendar()
+
+    assert ("sync", 120) in calls
+
+
+def test_start_syncs_empty_release_calendar_before_first_check(monkeypatch) -> None:
+    calls: list = []
+    runner = _offline_runner(
+        monkeypatch, last_sweep=datetime.now(ET), calendar_ready=False, calls=calls
+    )
+
+    runner.start()
+
+    assert calls.index(("sync", 120)) < calls.index(("check",))
+
+
+def test_start_skips_release_sync_when_calendar_has_dates(monkeypatch) -> None:
+    calls: list = []
+    runner = _offline_runner(
+        monkeypatch, last_sweep=datetime.now(ET), calendar_ready=True, calls=calls
+    )
+
+    runner.start()
+
+    assert ("sync", 120) not in calls

@@ -62,3 +62,28 @@ def last_successful_daily_sweep() -> datetime | None:
     if set(latest) != set(SWEEP_SOURCES):
         return None
     return min(latest.values())
+
+
+# Release-calendar horizon for the daily sync; 120 days is the range the
+# release-calendar fix handoff records as completing reliably.
+RELEASE_SYNC_DAYS_AHEAD = 120
+
+
+def has_upcoming_release_dates(days: int) -> bool:
+    """True when release_dates holds at least one date in the next `days` days."""
+    from datetime import date
+
+    from src.db.connection import get_session
+    from src.db.models import ReleaseDate
+
+    today = date.today()
+    with get_session() as session:
+        found = session.execute(
+            select(ReleaseDate.id)
+            .where(
+                ReleaseDate.release_date >= today,
+                ReleaseDate.release_date <= today + timedelta(days=days),
+            )
+            .limit(1)
+        ).first()
+    return found is not None
