@@ -91,47 +91,12 @@ Deployment notes:
 - Run two long-lived processes: the scheduler (`scrivener scheduler`) and the API server (`scrivener serve`).
 - Order does not matter. The scheduler keeps `release_dates` current itself (daily sync, and at start-up when it is empty); `scrivener sync-releases` is still available for a manual refresh.
 - `scrivener sync-releases` now reports whether the FRED snapshot was complete. Only `complete` runs perform destructive cleanup of future `release_dates`; degraded runs stay insert-only for safety and exit non-zero.
-- `docker-compose.yml` includes an API healthcheck on `/health` so the host can distinguish "running" from "serving traffic".
 
 ### Running in-house
 
-Since 2026-11-12 Scrivener runs on the local host instead of AWS and Supabase. `make up` from the repo root starts Postgres, the API (`scrivener`) and the scheduler (`scrivener-scheduler`); all restart on their own after a reboot (Docker Desktop must start at login). Both services use the Compose Postgres; `DATABASE_URL` in `infra/.env` points at the same database through `localhost:5433` for CLI use on the host. The previous Supabase URL is kept there, commented out, as a fallback.
+Since 2026-11-12 Scrivener runs on the local host instead of AWS and Supabase. `make up` from the repo root starts Postgres, the API (`scrivener`) and the scheduler (`scrivener-scheduler`); all restart on their own after a reboot (Docker Desktop must start at login). Both services use the Compose Postgres; `DATABASE_URL` in `infra/.env` points at the same database through `localhost:5433` for CLI use on the host. The previous Supabase URL is kept there, commented out, as a fallback. The AWS deployment files (a standalone `docker-compose.yml`, systemd units and the email-alert watchdog) were removed at the same time; git history has them.
 
 On a fresh database the tables are created at start-up, the scheduler syncs the release calendar, and a catch-up sweep backfills the lookback window (5 years by default).
-
-### Email Alerts
-
-Scrivener includes a host-side watchdog for EC2 deployments. It checks the Docker Compose services every minute and sends an email when a service is missing, crash-looping, exited, or unhealthy. It also sends a recovery email when the service returns to normal.
-
-Watchdog env vars:
-
-```bash
-SCRIVENER_ALERT_SMTP_HOST=email-smtp.us-east-1.amazonaws.com
-SCRIVENER_ALERT_SMTP_PORT=587
-SCRIVENER_ALERT_SMTP_USERNAME=...
-SCRIVENER_ALERT_SMTP_PASSWORD=...
-SCRIVENER_ALERT_FROM=scrivener-alerts@example.com
-SCRIVENER_ALERT_TO=you@example.com
-
-# Optional
-SCRIVENER_ALERT_SMTP_USE_TLS=true
-SCRIVENER_ALERT_SUBJECT_PREFIX=[Scrivener Alert]
-SCRIVENER_ALERT_SERVICES=api,scheduler
-SCRIVENER_ALERT_LOG_LINES=40
-SCRIVENER_ALERT_COOLDOWN_MINUTES=60
-SCRIVENER_ALERT_STATE_FILE=/opt/scrivener/.scrivener-watchdog-state.json
-```
-
-Recommended EC2 rollout:
-
-```bash
-sudo cp deploy/systemd/scrivener-watchdog.service /etc/systemd/system/
-sudo cp deploy/systemd/scrivener-watchdog.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now scrivener-watchdog.timer
-```
-
-The systemd unit reads both `/opt/scrivener/.env` and `/opt/scrivener/.monitor.env`, so SMTP credentials can live outside the app container env file if preferred.
 
 ## CLI Commands
 
