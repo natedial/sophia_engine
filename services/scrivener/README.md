@@ -30,8 +30,8 @@ pip install -e .
 Create a `.env` file:
 
 ```bash
-# Database (Supabase session pooler)
-DATABASE_URL=postgresql://user:password@host:5432/postgres
+# Database: the local Compose Postgres (see "Running in-house" below)
+DATABASE_URL=postgresql://user:password@localhost:5433/sophia
 
 # API Keys
 FRED_API_KEY=your-fred-api-key
@@ -89,9 +89,15 @@ scrivener serve --port 8000
 
 Deployment notes:
 - Run two long-lived processes: the scheduler (`scrivener scheduler`) and the API server (`scrivener serve`).
-- Order does not matter, but the scheduler only schedules release-based fetches once `release_dates` are populated (run `scrivener sync-releases` at least once, and periodically thereafter).
+- Order does not matter. The scheduler keeps `release_dates` current itself (daily sync, and at start-up when it is empty); `scrivener sync-releases` is still available for a manual refresh.
 - `scrivener sync-releases` now reports whether the FRED snapshot was complete. Only `complete` runs perform destructive cleanup of future `release_dates`; degraded runs stay insert-only for safety and exit non-zero.
 - `docker-compose.yml` includes an API healthcheck on `/health` so the host can distinguish "running" from "serving traffic".
+
+### Running in-house
+
+Since 2026-11-12 Scrivener runs on the local host instead of AWS and Supabase. `make up` from the repo root starts Postgres, the API (`scrivener`) and the scheduler (`scrivener-scheduler`); all restart on their own after a reboot (Docker Desktop must start at login). Both services use the Compose Postgres; `DATABASE_URL` in `infra/.env` points at the same database through `localhost:5433` for CLI use on the host. The previous Supabase URL is kept there, commented out, as a fallback.
+
+On a fresh database the tables are created at start-up, the scheduler syncs the release calendar, and a catch-up sweep backfills the lookback window (5 years by default).
 
 ### Email Alerts
 
@@ -248,10 +254,15 @@ API documentation available at `/docs` when the server is running.
 The scheduler runs these jobs:
 
 1. **Daily Sweep** (5pm ET): Fetches all core series from all sources
-2. **Calendar Check** (6am & 6pm ET): Checks `release_dates` and schedules fetches for upcoming releases
-3. **Speaker Calendar Sync** (6:05am & 6:05pm ET): Upserts Fed Board speaker events from `calendar.json`
+2. **Release Calendar Sync** (5:50am ET): Refreshes `release_dates` from FRED, 120 days ahead
+3. **Calendar Check** (6am & 6pm ET): Checks `release_dates` and schedules fetches for upcoming releases
+4. **Speaker Calendar Sync** (6:05am & 6:05pm ET): Upserts Fed Board speaker events from `calendar.json`
 
 Event-triggered fetches run 1 minute after the scheduled release time.
+
+At start-up the scheduler also:
+- syncs the release calendar if `release_dates` has nothing in the next 30 days, before its first calendar check;
+- runs a catch-up sweep if the FRED and BLS daily sweeps have not both succeeded since the most recent 5pm ET slot. Every sweep re-fetches the full lookback window, so one sweep fills any gap left while the host was down.
 
 ## Project Structure
 
@@ -273,7 +284,7 @@ scrivener/
 ## Requirements
 
 - Python 3.11+
-- PostgreSQL (Supabase recommended)
+- PostgreSQL (the local Compose Postgres 16)
 - FRED API key (free at https://fred.stlouisfed.org/docs/api/api_key.html)
 - BLS API key (optional, increases rate limits)
 
