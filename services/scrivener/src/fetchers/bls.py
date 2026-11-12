@@ -530,7 +530,8 @@ class BlsFetcher(BaseFetcher):
             if observations:
                 # Ensure series exists
                 series_id = self.ensure_series(external_id)
-                records_inserted = self.upsert_observations(series_id, observations)
+                counts = self.store_vintages(series_id, observations)
+                records_inserted = counts["new_dates"] + counts["revisions"]
 
                 results.append({
                     "status": "success",
