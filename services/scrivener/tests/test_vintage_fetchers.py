@@ -111,3 +111,25 @@ def test_unarchived_rows_are_observed_today_in_eastern_time(pg_session, monkeypa
     row = pg_session.query(Observation).one()
     assert row.realtime_start == date(2026, 11, 12)
     assert row.vintage_source == "observed"
+
+
+def test_backfill_requests_chunks_covering_every_vintage(pg_session, monkeypatch) -> None:
+    """ALFRED refuses more than 2000 vintage dates per request."""
+    vintages = list(pd.date_range("2005-01-03", periods=4500, freq="D"))
+    stub = _StubFred()
+    stub.get_series_vintage_dates = lambda series_id: vintages
+    monkeypatch.setattr(fred_module, "Fred", lambda *a, **k: stub)
+    fetcher = fred_module.FredFetcher()
+
+    result = fetcher.backfill_vintages("DGS2")
+
+    windows = [(c["realtime_start"], c["realtime_end"]) for c in stub.calls]
+    covered = [v for v in vintages if any(s <= v.date().isoformat() <= e for s, e in windows)]
+    assert covered == vintages
+    for start, end in windows:
+        inside = [v for v in vintages if start <= v.date().isoformat() <= end]
+        assert len(inside) <= 2000
+    assert windows[0][0] == "2005-01-03"
+    assert windows[-1][1] == vintages[-1].date().isoformat()
+    assert result["chunks"] == len(windows) == 3
+    assert pg_session.query(Observation).count() == 3

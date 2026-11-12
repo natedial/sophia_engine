@@ -80,6 +80,11 @@ CORE_SERIES = {
 }
 
 
+# FRED rejects an ALFRED request spanning more vintage dates than this
+# ("exceeds the maximum number of vintage dates allowed ... (2000)").
+ALFRED_MAX_VINTAGES = 2000
+
+
 def _as_date(value: Any) -> date:
     return value.date() if hasattr(value, "date") else value
 
@@ -168,6 +173,31 @@ class FredFetcher(BaseFetcher):
             external_id, realtime_start=since.isoformat()
         )
         return _alfred_rows(frame, start_date, end_date)
+
+    def backfill_vintages(self, external_id: str) -> dict[str, Any]:
+        """Store the series' full ALFRED history, one capped request at a time.
+
+        Every observation date is kept, not only the lookback window, so
+        backtests can replay the series from its first vintage.
+        """
+        info = self.fetch_series_info(external_id)
+        series_id = self.ensure_series(external_id, info=info, refresh=True)
+        vintage_dates = [_as_date(v) for v in self._client.get_series_vintage_dates(external_id)]
+        totals = {"new_dates": 0, "revisions": 0, "unchanged": 0}
+        chunks = 0
+        for start in range(0, len(vintage_dates), ALFRED_MAX_VINTAGES):
+            window = vintage_dates[start : start + ALFRED_MAX_VINTAGES]
+            frame = self._client.get_series_all_releases(
+                external_id,
+                realtime_start=window[0].isoformat(),
+                realtime_end=window[-1].isoformat(),
+            )
+            counts = self.store_vintages(series_id, _alfred_rows(frame, date.min, date.max))
+            for key in totals:
+                totals[key] += counts[key]
+            chunks += 1
+            logger.info(f"Backfilled {external_id} vintages {window[0]}..{window[-1]}: {counts}")
+        return {"external_id": external_id, "series_id": series_id, "chunks": chunks, **totals}
 
     def _latest_stored_vintage(self, external_id: str) -> date | None:
         with get_session() as session:

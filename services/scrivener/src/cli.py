@@ -14,6 +14,9 @@ from src.db.models import Base
 app = typer.Typer(name="scrivener", help="Economic and markets data sourcing platform")
 console = Console()
 
+# Series the Phase 1 backtests replay over their full history.
+REFERENCE_SERIES = ("CPILFESL", "DGS2", "SOFR")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -72,6 +75,25 @@ def fetch(
         )
     else:
         console.print(f"Error: {result.get('error')}", style="red")
+
+
+@app.command()
+def backfill_vintages(
+    series: list[str] = typer.Argument(
+        None, help="FRED series IDs (default: the Phase 1 reference series)"
+    ),
+):
+    """Store the full ALFRED vintage history for FRED series."""
+    from src.fetchers.fred import FredFetcher
+
+    fetcher = FredFetcher()
+    for external_id in series or list(REFERENCE_SERIES):
+        result = fetcher.backfill_vintages(external_id)
+        console.print(
+            f"{external_id}: {result['new_dates']} dates, {result['revisions']} revisions, "
+            f"{result['unchanged']} unchanged, {result['chunks']} requests",
+            style="green",
+        )
 
 
 @app.command()

@@ -98,6 +98,14 @@ Since 2026-11-12 Scrivener runs on the local host instead of AWS and Supabase. `
 
 On a fresh database the tables are created at start-up, the scheduler syncs the release calendar, and a catch-up sweep backfills the lookback window (5 years by default).
 
+Observations are insert-only: each row is one vintage of a value, keyed on the date it became known (`realtime_start`). FRED values come from ALFRED, FRED's archive of past releases, so their history of revisions is real; BLS values have no archive and are stamped with the day Scrivener first saw them (`vintage_source = observed`). The sweep fetches only vintages newer than those stored. To load the full history of the reference series (`CPILFESL`, `DGS2`, `SOFR`), run once:
+
+```bash
+scrivener backfill-vintages
+```
+
+ALFRED accepts at most 2,000 vintage dates per request, so the command pages through long histories.
+
 ## CLI Commands
 
 | Command | Description |
