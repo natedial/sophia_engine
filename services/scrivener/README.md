@@ -106,6 +106,19 @@ scrivener backfill-vintages
 
 ALFRED accepts at most 2,000 vintage dates per request, so the command pages through long histories.
 
+A FRED series that ALFRED does not archive (currently `SP500`) is stored like BLS data, as first seen.
+
+Upgrading an existing database to vintage storage: `init-db` does not alter an existing table, so apply the migration by hand before restarting, then backfill:
+
+```bash
+docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T postgres \
+  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < services/scrivener/migrations/007_observation_vintages.sql
+make up                                # rebuild and restart scrivener and the scheduler
+docker compose -f infra/docker-compose.yml --env-file infra/.env exec scrivener scrivener backfill-vintages
+```
+
+The migration rebuilds the `observations` table empty; the scheduler's start-up catch-up sweep refills the lookback window.
+
 ## CLI Commands
 
 | Command | Description |

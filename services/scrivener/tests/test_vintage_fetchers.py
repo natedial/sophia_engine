@@ -133,3 +133,45 @@ def test_backfill_requests_chunks_covering_every_vintage(pg_session, monkeypatch
     assert windows[-1][1] == vintages[-1].date().isoformat()
     assert result["chunks"] == len(windows) == 3
     assert pg_session.query(Observation).count() == 3
+
+
+def test_backfilled_series_keeps_revisions_older_than_the_window(pg_session, fred) -> None:
+    """A seasonal revision can reach back past the lookback window."""
+    fetcher, stub = fred
+    series_id = fetcher.ensure_series("CPILFESL", info={"name": "Core CPI"})
+    fetcher.store_vintages(
+        series_id,
+        [{"date": date(2000, 1, 1), "value": 1.0, "realtime_start": date(2000, 2, 15),
+          "vintage_source": "alfred"}],
+    )
+    stub.frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2000-01-01"]),
+            "realtime_start": pd.to_datetime(["2026-02-12"]),
+            "value": [1.1],
+        }
+    )
+
+    fetcher.fetch_and_store("CPILFESL", date(2021, 11, 12), date(2026, 11, 12))
+
+    values = sorted(float(o.value) for o in pg_session.query(Observation).all())
+    assert values == [1.0, 1.1]
+
+
+def test_series_missing_from_alfred_is_stored_as_observed(pg_session, fred) -> None:
+    """SP500 exists in FRED but not ALFRED."""
+    fetcher, stub = fred
+
+    def not_in_alfred(*args, **kwargs):
+        raise ValueError(
+            "Bad Request.  The series does not exist in ALFRED but may exist in FRED."
+        )
+
+    stub.get_series_all_releases = not_in_alfred
+    stub.get_series = lambda series_id, observation_start=None, observation_end=None: pd.Series(
+        [5900.5], index=pd.to_datetime(["2026-11-11"])
+    )
+
+    rows = fetcher.fetch_observations("SP500", date(2026, 1, 1), date(2026, 12, 31))
+
+    assert rows == [{"date": date(2026, 11, 11), "value": 5900.5, "vintage_source": "observed"}]

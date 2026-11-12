@@ -84,6 +84,9 @@ CORE_SERIES = {
 # ("exceeds the maximum number of vintage dates allowed ... (2000)").
 ALFRED_MAX_VINTAGES = 2000
 
+# FRED's error for a series it serves but ALFRED does not archive (SP500).
+NOT_IN_ALFRED = "does not exist in ALFRED"
+
 
 def _as_date(value: Any) -> date:
     return value.date() if hasattr(value, "date") else value
@@ -168,10 +171,20 @@ class FredFetcher(BaseFetcher):
         """
         start_date = start_date or self.get_default_start_date()
         end_date = end_date or date.today()
-        since = self._latest_stored_vintage(external_id) or start_date
-        frame = self._client.get_series_all_releases(
-            external_id, realtime_start=since.isoformat()
-        )
+        earliest_date, latest_vintage = self._stored_extent(external_id)
+        # A backfilled series keeps receiving revisions to its older dates
+        # (seasonal factors reach back past the lookback window).
+        if earliest_date is not None:
+            start_date = min(start_date, earliest_date)
+        since = latest_vintage or start_date
+        try:
+            frame = self._client.get_series_all_releases(
+                external_id, realtime_start=since.isoformat()
+            )
+        except ValueError as exc:
+            if NOT_IN_ALFRED not in str(exc):
+                raise
+            return self._observed_rows(external_id, start_date, end_date)
         return _alfred_rows(frame, start_date, end_date)
 
     def backfill_vintages(self, external_id: str) -> dict[str, Any]:
@@ -199,16 +212,31 @@ class FredFetcher(BaseFetcher):
             logger.info(f"Backfilled {external_id} vintages {window[0]}..{window[-1]}: {counts}")
         return {"external_id": external_id, "series_id": series_id, "chunks": chunks, **totals}
 
-    def _latest_stored_vintage(self, external_id: str) -> date | None:
+    def _observed_rows(
+        self, external_id: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        """Current FRED values for a series ALFRED does not archive."""
+        data = self._client.get_series(
+            external_id, observation_start=start_date, observation_end=end_date
+        )
+        return [
+            {"date": _as_date(obs_date), "value": float(value), "vintage_source": "observed"}
+            for obs_date, value in data.items()
+            if value == value  # skip NaN
+        ]
+
+    def _stored_extent(self, external_id: str) -> tuple[date | None, date | None]:
+        """Earliest stored observation date and latest stored vintage."""
         with get_session() as session:
-            return session.scalar(
-                select(func.max(Observation.realtime_start))
+            row = session.execute(
+                select(func.min(Observation.date), func.max(Observation.realtime_start))
                 .join(Series, Series.id == Observation.series_id)
                 .where(
                     Series.external_id == external_id,
                     Series.source_id == self.source_id,
                 )
-            )
+            ).one()
+        return row[0], row[1]
 
     @classmethod
     def get_core_series(cls) -> dict[str, str]:
