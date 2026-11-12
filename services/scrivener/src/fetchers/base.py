@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 _INSERT_BATCH = 5000
 
 
+def _now() -> datetime:
+    """The current time; a seam for tests."""
+    return datetime.now(UTC)
+
+
 def _as_decimal(value: Any) -> Decimal | None:
     """Compare and store values exactly as their decimal text."""
     if value is None:
@@ -146,7 +151,7 @@ class BaseFetcher(ABC):
         if not observations:
             return counts
 
-        today = datetime.now(ZoneInfo(self.settings.timezone)).date()
+        today = _now().astimezone(ZoneInfo(self.settings.timezone)).date()
         rows = sorted(
             (
                 {

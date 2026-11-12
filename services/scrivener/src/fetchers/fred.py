@@ -8,10 +8,10 @@ from typing import Any
 
 import httpx
 from fredapi import Fred
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from src.db import get_engine, get_session
-from src.db.models import Release, ReleaseCalendarSyncRun, ReleaseDate
+from src.db.models import Observation, Release, ReleaseCalendarSyncRun, ReleaseDate, Series
 from src.fetchers.base import BaseFetcher
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,30 @@ CORE_SERIES = {
 }
 
 
+def _as_date(value: Any) -> date:
+    return value.date() if hasattr(value, "date") else value
+
+
+def _alfred_rows(frame: Any, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    """ALFRED rows inside the observation window, as vintage dicts."""
+    rows = []
+    for record in frame.itertuples(index=False):
+        if record.value != record.value:  # NaN: no value published
+            continue
+        obs_date = _as_date(record.date)
+        if not start_date <= obs_date <= end_date:
+            continue
+        rows.append(
+            {
+                "date": obs_date,
+                "value": float(record.value),
+                "realtime_start": _as_date(record.realtime_start),
+                "vintage_source": "alfred",
+            }
+        )
+    return rows
+
+
 class FredFetcher(BaseFetcher):
     """Fetcher for FRED (Federal Reserve Economic Data)."""
 
@@ -130,64 +154,31 @@ class FredFetcher(BaseFetcher):
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch observations from FRED."""
-        start_date = start_date or self.get_default_start_date()
-        end_date = end_date or date.today()
+        """Fetch every vintage of each value in the window from ALFRED.
 
-        # fredapi returns a pandas Series
-        data = self._client.get_series(
-            external_id,
-            observation_start=start_date,
-            observation_end=end_date,
-        )
-
-        observations = []
-        for obs_date, value in data.items():
-            # Skip NaN values
-            if value != value:  # NaN check
-                continue
-            observations.append({
-                "date": obs_date.date() if hasattr(obs_date, "date") else obs_date,
-                "value": float(value),
-            })
-
-        return observations
-
-    def fetch_with_revisions(
-        self,
-        external_id: str,
-        start_date: date | None = None,
-        end_date: date | None = None,
-    ) -> list[dict[str, Any]]:
-        """Fetch observations with revision history (vintage dates).
-
-        This is useful for understanding how data was revised over time.
+        The request starts at the latest vintage already stored for the
+        series, or at the window start on a first fetch. ALFRED reports an
+        unrevised value under that start date too; ``store_vintages`` drops
+        those repeats.
         """
         start_date = start_date or self.get_default_start_date()
         end_date = end_date or date.today()
+        since = self._latest_stored_vintage(external_id) or start_date
+        frame = self._client.get_series_all_releases(
+            external_id, realtime_start=since.isoformat()
+        )
+        return _alfred_rows(frame, start_date, end_date)
 
-        # Get all vintage dates for this series
-        vintages = self._client.get_series_all_releases(external_id)
-
-        observations = []
-        revision_counts: dict[date, int] = {}
-        for _, row in vintages.iterrows():
-            if row["value"] != row["value"]:  # NaN check
-                continue
-            obs_date = row.get("date", row.name)
-            if hasattr(obs_date, "date"):
-                obs_date = obs_date.date()
-            if start_date <= obs_date <= end_date:
-                revision_num = revision_counts.get(obs_date, 0)
-                revision_counts[obs_date] = revision_num + 1
-                observations.append({
-                    "date": obs_date,
-                    "value": float(row["value"]),
-                    "release_date": row.get("realtime_start"),
-                    "revision_num": revision_num,
-                })
-
-        return observations
+    def _latest_stored_vintage(self, external_id: str) -> date | None:
+        with get_session() as session:
+            return session.scalar(
+                select(func.max(Observation.realtime_start))
+                .join(Series, Series.id == Observation.series_id)
+                .where(
+                    Series.external_id == external_id,
+                    Series.source_id == self.source_id,
+                )
+            )
 
     @classmethod
     def get_core_series(cls) -> dict[str, str]:

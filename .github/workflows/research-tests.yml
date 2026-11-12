@@ -42,7 +42,7 @@ jobs:
         run: ruff check .
       - name: Scrivener (point-in-time files)
         working-directory: services/scrivener
-        run: ruff check src/fetchers/base.py tests/db.py tests/test_pg_fixture.py tests/test_vintages.py
+        run: ruff check src/fetchers/base.py src/fetchers/fred.py tests/test_vintage_fetchers.py tests/db.py tests/test_pg_fixture.py tests/test_vintages.py
 
   episto:
     name: episto
