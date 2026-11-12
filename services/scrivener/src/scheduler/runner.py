@@ -8,6 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from src.config import get_settings
+from src.scheduler.catch_up import last_successful_daily_sweep, sweep_is_overdue
 from src.scheduler.scheduler import create_scheduler, get_timezone
 from src.scheduler.jobs import daily_sweep_all, fetch_series_on_release
 from src.scheduler.calendar import ReleaseCalendar
@@ -38,6 +39,31 @@ class SchedulerRunner:
             replace_existing=True,
         )
         logger.info(f"Scheduled daily sweep at {hour:02d}:{minute:02d} {self.settings.timezone}")
+
+    def schedule_catch_up_sweep(self) -> None:
+        """Run a sweep now if the last scheduled one was missed."""
+        try:
+            last = last_successful_daily_sweep()
+        except Exception as e:  # a database outage must not stop the scheduler
+            logger.warning(f"Could not read last sweep; running catch-up anyway: {e}")
+            last = None
+        now = datetime.now(self.tz)
+        if not sweep_is_overdue(
+            last,
+            now,
+            hour=self.settings.daily_sweep_hour,
+            minute=self.settings.daily_sweep_minute,
+            tz=self.tz,
+        ):
+            return
+        self.scheduler.add_job(
+            daily_sweep_all,
+            trigger=DateTrigger(run_date=now, timezone=self.tz),
+            id="catch_up_sweep",
+            name="Catch-up sweep - missed daily sweep",
+            replace_existing=True,
+        )
+        logger.info(f"Daily sweep overdue (last success: {last}); running catch-up now")
 
     def setup_calendar_checker(self) -> None:
         """Set up a job to check release_dates every 12 hours."""
@@ -162,6 +188,7 @@ class SchedulerRunner:
         self.setup_daily_sweep()
         self.setup_calendar_checker()
         self.setup_speaker_calendar_sync()
+        self.schedule_catch_up_sweep()
 
         # Run initial check
         self._check_and_schedule_events()
