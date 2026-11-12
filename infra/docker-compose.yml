@@ -1,10 +1,12 @@
-# Default `make up` is the research stack: postgres, scrivener, arithmos.
+# Default `make up` is the research stack: postgres, scrivener (API and
+# scheduler), arithmos. Each restarts on its own after a reboot.
 # Prima/Forge/Canvas/dashboard/Telegram/Tholos/Kampe stay in the
 # `legacy-assistant` profile (`make up-legacy`). They are not on the
 # causal/research path.
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sophia}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -21,6 +23,7 @@ services:
 
   scrivener:
     build: ../services/scrivener
+    restart: unless-stopped
     command:
       - /bin/sh
       - -c
@@ -28,8 +31,10 @@ services:
         scrivener init-db && scrivener serve --host 0.0.0.0 --port 8000
     ports:
       - "127.0.0.1:${SCRIVENER_PORT:-8000}:8000"
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+    environment: &scrivener-env
+      # Scrivener uses the local Postgres above, reached on the Compose
+      # network. infra/.env's DATABASE_URL is for running the CLI on the host.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sophia}
       SCRIVENER_API_KEY: ${SCRIVENER_API_KEY:?Set SCRIVENER_API_KEY in .env}
       FRED_API_KEY: ${FRED_API_KEY:-}
       BLS_API_KEY: ${BLS_API_KEY:-}
@@ -44,8 +49,20 @@ services:
       timeout: 5s
       retries: 12
 
+  # Daily sweep and release-time fetches. On start it runs a catch-up
+  # sweep if the last scheduled one was missed (src/scheduler/catch_up.py).
+  scrivener-scheduler:
+    build: ../services/scrivener
+    restart: unless-stopped
+    command: ["scrivener", "scheduler"]
+    environment: *scrivener-env
+    depends_on:
+      scrivener:
+        condition: service_healthy
+
   sophia_arithmos:
     build: ../services/sophia_arithmos
+    restart: unless-stopped
     ports:
       - "127.0.0.1:${ARITHMOS_PORT:-8001}:8001"
     healthcheck:
