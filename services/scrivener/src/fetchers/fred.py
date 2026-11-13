@@ -8,10 +8,10 @@ from typing import Any
 
 import httpx
 from fredapi import Fred
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from src.db import get_engine, get_session
-from src.db.models import Release, ReleaseCalendarSyncRun, ReleaseDate
+from src.db.models import Observation, Release, ReleaseCalendarSyncRun, ReleaseDate, Series
 from src.fetchers.base import BaseFetcher
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,38 @@ CORE_SERIES = {
 }
 
 
+# FRED rejects an ALFRED request spanning more vintage dates than this
+# ("exceeds the maximum number of vintage dates allowed ... (2000)").
+ALFRED_MAX_VINTAGES = 2000
+
+# FRED's error for a series it serves but ALFRED does not archive (SP500).
+NOT_IN_ALFRED = "does not exist in ALFRED"
+
+
+def _as_date(value: Any) -> date:
+    return value.date() if hasattr(value, "date") else value
+
+
+def _alfred_rows(frame: Any, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    """ALFRED rows inside the observation window, as vintage dicts."""
+    rows = []
+    for record in frame.itertuples(index=False):
+        if record.value != record.value:  # NaN: no value published
+            continue
+        obs_date = _as_date(record.date)
+        if not start_date <= obs_date <= end_date:
+            continue
+        rows.append(
+            {
+                "date": obs_date,
+                "value": float(record.value),
+                "realtime_start": _as_date(record.realtime_start),
+                "vintage_source": "alfred",
+            }
+        )
+    return rows
+
+
 class FredFetcher(BaseFetcher):
     """Fetcher for FRED (Federal Reserve Economic Data)."""
 
@@ -130,64 +162,81 @@ class FredFetcher(BaseFetcher):
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch observations from FRED."""
-        start_date = start_date or self.get_default_start_date()
-        end_date = end_date or date.today()
+        """Fetch every vintage of each value in the window from ALFRED.
 
-        # fredapi returns a pandas Series
-        data = self._client.get_series(
-            external_id,
-            observation_start=start_date,
-            observation_end=end_date,
-        )
-
-        observations = []
-        for obs_date, value in data.items():
-            # Skip NaN values
-            if value != value:  # NaN check
-                continue
-            observations.append({
-                "date": obs_date.date() if hasattr(obs_date, "date") else obs_date,
-                "value": float(value),
-            })
-
-        return observations
-
-    def fetch_with_revisions(
-        self,
-        external_id: str,
-        start_date: date | None = None,
-        end_date: date | None = None,
-    ) -> list[dict[str, Any]]:
-        """Fetch observations with revision history (vintage dates).
-
-        This is useful for understanding how data was revised over time.
+        The request starts at the latest vintage already stored for the
+        series, or at the window start on a first fetch. ALFRED reports an
+        unrevised value under that start date too; ``store_vintages`` drops
+        those repeats.
         """
         start_date = start_date or self.get_default_start_date()
         end_date = end_date or date.today()
+        earliest_date, latest_vintage = self._stored_extent(external_id)
+        # A backfilled series keeps receiving revisions to its older dates
+        # (seasonal factors reach back past the lookback window).
+        if earliest_date is not None:
+            start_date = min(start_date, earliest_date)
+        since = latest_vintage or start_date
+        try:
+            frame = self._client.get_series_all_releases(
+                external_id, realtime_start=since.isoformat()
+            )
+        except ValueError as exc:
+            if NOT_IN_ALFRED not in str(exc):
+                raise
+            return self._observed_rows(external_id, start_date, end_date)
+        return _alfred_rows(frame, start_date, end_date)
 
-        # Get all vintage dates for this series
-        vintages = self._client.get_series_all_releases(external_id)
+    def backfill_vintages(self, external_id: str) -> dict[str, Any]:
+        """Store the series' full ALFRED history, one capped request at a time.
 
-        observations = []
-        revision_counts: dict[date, int] = {}
-        for _, row in vintages.iterrows():
-            if row["value"] != row["value"]:  # NaN check
-                continue
-            obs_date = row.get("date", row.name)
-            if hasattr(obs_date, "date"):
-                obs_date = obs_date.date()
-            if start_date <= obs_date <= end_date:
-                revision_num = revision_counts.get(obs_date, 0)
-                revision_counts[obs_date] = revision_num + 1
-                observations.append({
-                    "date": obs_date,
-                    "value": float(row["value"]),
-                    "release_date": row.get("realtime_start"),
-                    "revision_num": revision_num,
-                })
+        Every observation date is kept, not only the lookback window, so
+        backtests can replay the series from its first vintage.
+        """
+        info = self.fetch_series_info(external_id)
+        series_id = self.ensure_series(external_id, info=info, refresh=True)
+        vintage_dates = [_as_date(v) for v in self._client.get_series_vintage_dates(external_id)]
+        totals = {"new_dates": 0, "revisions": 0, "unchanged": 0}
+        chunks = 0
+        for start in range(0, len(vintage_dates), ALFRED_MAX_VINTAGES):
+            window = vintage_dates[start : start + ALFRED_MAX_VINTAGES]
+            frame = self._client.get_series_all_releases(
+                external_id,
+                realtime_start=window[0].isoformat(),
+                realtime_end=window[-1].isoformat(),
+            )
+            counts = self.store_vintages(series_id, _alfred_rows(frame, date.min, date.max))
+            for key in totals:
+                totals[key] += counts[key]
+            chunks += 1
+            logger.info(f"Backfilled {external_id} vintages {window[0]}..{window[-1]}: {counts}")
+        return {"external_id": external_id, "series_id": series_id, "chunks": chunks, **totals}
 
-        return observations
+    def _observed_rows(
+        self, external_id: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        """Current FRED values for a series ALFRED does not archive."""
+        data = self._client.get_series(
+            external_id, observation_start=start_date, observation_end=end_date
+        )
+        return [
+            {"date": _as_date(obs_date), "value": float(value), "vintage_source": "observed"}
+            for obs_date, value in data.items()
+            if value == value  # skip NaN
+        ]
+
+    def _stored_extent(self, external_id: str) -> tuple[date | None, date | None]:
+        """Earliest stored observation date and latest stored vintage."""
+        with get_session() as session:
+            row = session.execute(
+                select(func.min(Observation.date), func.max(Observation.realtime_start))
+                .join(Series, Series.id == Observation.series_id)
+                .where(
+                    Series.external_id == external_id,
+                    Series.source_id == self.source_id,
+                )
+            ).one()
+        return row[0], row[1]
 
     @classmethod
     def get_core_series(cls) -> dict[str, str]:

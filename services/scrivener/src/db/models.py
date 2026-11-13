@@ -78,18 +78,23 @@ class Series(Base):
 
 
 class Observation(Base):
-    """Time series data points."""
+    """One vintage of one time-series value.
+
+    Rows are insert-only. ``realtime_start`` is the date the value became
+    known: ALFRED's vintage date for FRED data, or the date Scrivener first
+    saw it (``vintage_source = "observed"``) where no archive exists.
+    """
 
     __tablename__ = "observations"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    series_id: Mapped[int] = mapped_column(ForeignKey("series.id"))
+    series_id: Mapped[int] = mapped_column(ForeignKey("series.id"), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     value: Mapped[Decimal | None] = mapped_column(Numeric)
-    release_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revision_num: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+    realtime_start: Mapped[date] = mapped_column(Date, nullable=False)
+    vintage_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Relationships
@@ -97,14 +102,14 @@ class Observation(Base):
 
     __table_args__ = (
         Index("idx_observations_series_date", "series_id", "date"),
-        Index("idx_observations_release", "release_date"),
         Index(
-            "idx_observations_unique",
+            "idx_observations_vintage",
             "series_id",
             "date",
-            "revision_num",
+            "realtime_start",
             unique=True,
         ),
+        Index("idx_observations_first_seen", "first_seen_at"),
     )
 
 

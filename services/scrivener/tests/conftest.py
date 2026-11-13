@@ -12,3 +12,6 @@ def configure_scrivener_api_key(monkeypatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+from tests.db import pg_engine, pg_session  # noqa: E402,F401  (shared fixtures)

@@ -1,13 +1,13 @@
 """Query utilities for time series data."""
 
 from datetime import date, timedelta
-from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, func, desc
+from sqlalchemy import Select, func, select
+from sqlalchemy.orm import aliased
 
 from src.db import get_session
-from src.db.models import Series, Observation, Source
+from src.db.models import Observation, Series, Source
 
 
 def _infer_units(
@@ -86,6 +86,30 @@ def _resolve_series_row(
     return rows[0]
 
 
+def latest_vintages(
+    series_id: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> Select:
+    """A query for one row per date: the latest vintage of each value."""
+    query = select(Observation).where(Observation.series_id == series_id)
+    if start_date is not None:
+        query = query.where(Observation.date >= start_date)
+    if end_date is not None:
+        query = query.where(Observation.date <= end_date)
+    return query.distinct(Observation.date).order_by(
+        Observation.date, Observation.realtime_start.desc()
+    )
+
+
+def _newest_dates(session, series_id: int, count: int) -> list[Observation]:
+    """The latest vintage for each of the newest ``count`` dates, newest first."""
+    current = aliased(Observation, latest_vintages(series_id).subquery())
+    return list(
+        session.scalars(select(current).order_by(current.date.desc()).limit(count))
+    )
+
+
 def _series_payload(series: Series) -> dict[str, Any]:
     inferred_units = _infer_units(
         external_id=series.external_id,
@@ -151,12 +175,8 @@ class SeriesQuery:
             if not series:
                 return None
 
-            obs = (
-                session.query(Observation)
-                .filter(Observation.series_id == series.id)
-                .order_by(desc(Observation.date))
-                .first()
-            )
+            newest = _newest_dates(session, series.id, 1)
+            obs = newest[0] if newest else None
 
             if not obs:
                 return None
@@ -199,22 +219,11 @@ class SeriesQuery:
             if not series:
                 return []
 
-            obs_query = (
-                session.query(Observation)
-                .filter(
-                    and_(
-                        Observation.series_id == series.id,
-                        Observation.date >= start_date,
-                        Observation.date <= end_date,
-                    )
-                )
-                .order_by(Observation.date)
-            )
-
+            obs_query = latest_vintages(series.id, start_date, end_date)
             if limit:
                 obs_query = obs_query.limit(limit)
 
-            observations = obs_query.all()
+            observations = list(session.scalars(obs_query))
 
             return [
                 {
@@ -344,13 +353,7 @@ class SeriesQuery:
             if not series:
                 return None
 
-            observations = (
-                session.query(Observation)
-                .filter(Observation.series_id == series.id)
-                .order_by(desc(Observation.date))
-                .limit(periods + 1)
-                .all()
-            )
+            observations = _newest_dates(session, series.id, periods + 1)
 
             if len(observations) < periods + 1:
                 return None

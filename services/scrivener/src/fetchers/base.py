@@ -3,8 +3,11 @@
 import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from src.config import get_settings
@@ -12,6 +15,23 @@ from src.db import get_session
 from src.db.models import FetchLog, Observation, Series, Source
 
 logger = logging.getLogger(__name__)
+
+# Rows per INSERT; keeps bind parameters well under Postgres's limit.
+_INSERT_BATCH = 5000
+
+
+def _now() -> datetime:
+    """The current time; a seam for tests."""
+    return datetime.now(UTC)
+
+
+def _as_decimal(value: Any) -> Decimal | None:
+    """Compare and store values exactly as their decimal text."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
 
 
 class BaseFetcher(ABC):
@@ -111,47 +131,84 @@ class BaseFetcher(ABC):
                 series.metadata_ = info.get("metadata")
             return series.id
 
-    def upsert_observations(
+    def store_vintages(
         self,
         series_id: int,
         observations: list[dict[str, Any]],
-    ) -> int:
-        """Upsert observations into the database.
+    ) -> dict[str, int]:
+        """Store each new vintage of each value; never overwrite.
 
-        Uses PostgreSQL ON CONFLICT to update existing records.
-        Returns the number of records upserted.
+        Each row has ``date`` and ``value`` and, where the source keeps an
+        archive, ``realtime_start`` and ``vintage_source``. A row without
+        ``realtime_start`` is recorded as first seen today. A row is written
+        only when its value differs from the vintage stored just before it
+        for the same date, so a source that repeats an unrevised value under
+        a later realtime_start adds nothing.
+
+        Returns counts of new dates, revisions, and unchanged rows.
         """
+        counts = {"new_dates": 0, "revisions": 0, "unchanged": 0}
         if not observations:
-            return 0
+            return counts
+
+        today = _now().astimezone(ZoneInfo(self.settings.timezone)).date()
+        rows = sorted(
+            (
+                {
+                    "date": obs["date"],
+                    "value": _as_decimal(obs.get("value")),
+                    "realtime_start": obs.get("realtime_start") or today,
+                    "vintage_source": obs.get("vintage_source") or "observed",
+                }
+                for obs in observations
+            ),
+            key=lambda row: (row["date"], row["realtime_start"]),
+        )
 
         with get_session() as session:
-            stmt = insert(Observation).values(
-                [
-                    {
-                        "series_id": series_id,
-                        "date": obs["date"],
-                        "value": obs.get("value"),
-                        "release_date": obs.get("release_date"),
-                        "revision_num": obs.get("revision_num", 0),
-                    }
-                    for obs in observations
-                ]
+            stored: dict[date, list[tuple[date, Decimal | None]]] = {}
+            existing = session.execute(
+                select(
+                    Observation.date, Observation.realtime_start, Observation.value
+                ).where(
+                    Observation.series_id == series_id,
+                    Observation.date >= rows[0]["date"],
+                    Observation.date <= rows[-1]["date"],
+                )
             )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["series_id", "date", "revision_num"],
-                set_={
-                    "value": stmt.excluded.value,
-                    "release_date": stmt.excluded.release_date,
-                },
-            )
-            session.execute(stmt)
+            for obs_date, known, value in existing:
+                stored.setdefault(obs_date, []).append((known, value))
+            for vintages in stored.values():
+                vintages.sort(key=lambda item: item[0])
 
-            # Update series last_updated timestamp
+            to_insert = []
+            for row in rows:
+                vintages = stored.setdefault(row["date"], [])
+                if any(known == row["realtime_start"] for known, _ in vintages):
+                    counts["unchanged"] += 1
+                    continue
+                earlier = [item for item in vintages if item[0] < row["realtime_start"]]
+                if earlier and earlier[-1][1] == row["value"]:
+                    counts["unchanged"] += 1
+                    continue
+                counts["revisions" if vintages else "new_dates"] += 1
+                vintages.append((row["realtime_start"], row["value"]))
+                vintages.sort(key=lambda item: item[0])
+                to_insert.append({"series_id": series_id, **row})
+
+            for start in range(0, len(to_insert), _INSERT_BATCH):
+                stmt = insert(Observation).values(to_insert[start : start + _INSERT_BATCH])
+                session.execute(
+                    stmt.on_conflict_do_nothing(
+                        index_elements=["series_id", "date", "realtime_start"]
+                    )
+                )
+
             session.query(Series).filter_by(id=series_id).update(
                 {"last_updated": datetime.now(UTC)}
             )
 
-        return len(observations)
+        return counts
 
     def fetch_and_store(
         self,
@@ -178,7 +235,8 @@ class BaseFetcher(ABC):
                 info=info,
                 refresh=True,
             )
-            records_inserted = self.upsert_observations(series_id, observations)
+            counts = self.store_vintages(series_id, observations)
+            records_inserted = counts["new_dates"] + counts["revisions"]
 
             result = {
                 "status": "success",
