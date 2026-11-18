@@ -131,3 +131,44 @@ def test_start_skips_release_sync_when_calendar_has_dates(monkeypatch) -> None:
     runner.start()
 
     assert ("sync", 120) not in calls
+
+
+def _log_sweep_success(session, source: str, when: datetime) -> None:
+    from src.db.models import FetchLog
+
+    session.add(FetchLog(source=source, job_type="daily_sweep", status="success",
+                         started_at=when, completed_at=when))
+    session.commit()
+
+
+def test_logged_sweep_without_observations_counts_as_never_swept(pg_session) -> None:
+    """Emptying observations (migration 007) must not leave the sweep looking current."""
+    from src.scheduler.catch_up import last_successful_daily_sweep
+
+    when = datetime(2026, 11, 17, 22, 5, tzinfo=ZoneInfo("UTC"))
+    _log_sweep_success(pg_session, "FRED", when)
+    _log_sweep_success(pg_session, "BLS", when)
+
+    assert last_successful_daily_sweep() is None
+
+
+def test_logged_sweep_with_observations_is_reported(pg_session) -> None:
+    from datetime import date
+
+    from src.db.models import Observation, Series, Source
+    from src.scheduler.catch_up import last_successful_daily_sweep
+
+    when = datetime(2026, 11, 17, 22, 5, tzinfo=ZoneInfo("UTC"))
+    for name in ("FRED", "BLS"):
+        _log_sweep_success(pg_session, name, when)
+        source = Source(name=name)
+        pg_session.add(source)
+        pg_session.flush()
+        series = Series(source_id=source.id, external_id=f"{name}-X", name="x")
+        pg_session.add(series)
+        pg_session.flush()
+        pg_session.add(Observation(series_id=series.id, date=date(2026, 9, 1), value=1,
+                                   realtime_start=date(2026, 10, 1), vintage_source="observed"))
+    pg_session.commit()
+
+    assert last_successful_daily_sweep() == when

@@ -1,6 +1,6 @@
 """Decide whether a daily sweep was missed while the scheduler was down.
 
-Every daily sweep re-fetches each series' full lookback window and upserts,
+Every daily sweep fetches whatever is newer than the data already stored,
 so a single successful sweep fills any gap. The scheduler runs one at start
 when the last successful sweep is older than the most recent scheduled slot.
 """
@@ -46,7 +46,7 @@ def sweep_is_overdue(
 def last_successful_daily_sweep() -> datetime | None:
     """When every sweep source last completed successfully, or None if one never has."""
     from src.db.connection import get_session
-    from src.db.models import FetchLog
+    from src.db.models import FetchLog, Observation, Series, Source
 
     with get_session() as session:
         rows = session.execute(
@@ -58,8 +58,19 @@ def last_successful_daily_sweep() -> datetime | None:
             )
             .group_by(FetchLog.source)
         ).all()
+        # A logged sweep only counts if its data is still there: emptying
+        # observations (as migration 007 did) must trigger a fresh sweep.
+        with_data = set(
+            session.scalars(
+                select(Source.name)
+                .join(Series, Series.source_id == Source.id)
+                .join(Observation, Observation.series_id == Series.id)
+                .where(Source.name.in_(SWEEP_SOURCES))
+                .distinct()
+            )
+        )
     latest = {source: completed for source, completed in rows if completed is not None}
-    if set(latest) != set(SWEEP_SOURCES):
+    if set(latest) != set(SWEEP_SOURCES) or with_data != set(SWEEP_SOURCES):
         return None
     return min(latest.values())
 
